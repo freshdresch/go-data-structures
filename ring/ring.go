@@ -1,6 +1,9 @@
 package ring
 
-import "sync/atomic"
+import (
+        "runtime"
+        "sync/atomic"
+)
 
 // Ring is a Go port of rte_ring from DPDK. It provides a fixed-size ring buffer
 // that can function as anything between an SPSC and MPMC queue. It defaults to
@@ -76,37 +79,54 @@ func New[T any](count uint32, opts ...RingOption) (*Ring[T], error) {
         return ring
 }
 
+/**
+ * moveProdHead moves the ring's producer head for an enqueue operation.
+ *
+ * Params:
+ *   numItems - The number of items we want to enqueue, i.e., how far the head
+ *              should be moved.
+ *   oldHead  - Saves the producer head value from *before* the move (where the
+ *              enqueue starts).
+ *   newHead  - Saves the producer head value from *after* the move (where the
+ *              enqueue ends).
+ *
+ * Returns:
+ *   1. The actual number of items enqueued. This can lie anywhere between 0
+ *      and numItems (inclusive).
+ *   2. Returns the number of free entries in the ring before the head was moved.
+ */
 func (ring *Ring[T]) moveProdHead(
         numItems uint32,
         oldHead *uint32,
         newHead *uint32,
-        freeEntries *uint32,
-) uint32 {
+) (uint32, uint32) {
         var (
-                consTail uint32
-                success  bool
+                consTail    uint32
+                freeEntries uint32
+                success     bool
         )
 
         multiProd := ring.multiProdEnqueue
         capacity := ring.capacity
         maxItems := numItems
 
-        // Go doesn't have any relaxed memory ordering utilities from what I
-        // can tell, so these will all be strongly ordered.
+        // Go doesn't have any relaxed memory ordering tools or the ability to
+        // leverage memory fences (from what I can tell), so we will have to 
+        // use sequentially consistent atomic operations for each of these.
         *oldHead = atomic.LoadUint32(ring.prodHead)
         for {
                 numItems = maxItems
                 consTail = atomic.LoadUint32(ring.consTail)
 
-                /* uint32 subtractions trickery makes this calculation always
+                /* uint32 subtraction trickery makes this calculation always
                  * valid, even if *oldHead > consTail.
                  */
                 freeEntries = (capacity + consTail - *oldHead)
-                if numItems > *freeEntries {
-                        numItems = *freeEntries
+                if numItems > freeEntries {
+                        numItems = freeEntries
                 }
 
-                newHead = *oldHead + numItems
+                *newHead = *oldHead + numItems
                 if multiProd {
                         success = atomic.CompareAndSwap(ring.prodHead, *oldHead, *newHead)
                 } else {
@@ -117,5 +137,99 @@ func (ring *Ring[T]) moveProdHead(
                 if (success == true) break
         }
 
-        return numItems
+        return numItems, freeEntries
+}
+
+/**
+ * moveConsHead moves the ring's consumer head for a dequeue operation.
+ *
+ * Params:
+ *   numItems - The number of items we want to dequeue, i.e., how far the head
+ *              should be moved.
+ *   oldHead  - Saves the consumer head value from *before* the move (where the
+ *              dequeue starts).
+ *   newHead  - Saves the producer head value from *after* the move (where the
+ *              dequeue ends).
+ *
+ * Returns:
+ *   1. The actual number of items enqueued. This can lie anywhere between 0
+ *      and numItems (inclusive).
+ *   2. Returns the number of free entries in the ring before the head was moved.
+ */
+func (ring *Ring[T]) moveConsHead(
+        numItems uint32,
+        // TODO I think we want the updates for these so they should stay pointers,
+        // but once I start using the function, if we only care about feeding the
+        // value in, we could supply straight up uint32s instead
+        oldHead *uint32,
+        newHead *uint32,
+) (uint32, uint32) {
+        var (
+                prodTail uint32
+                entries  uint32
+                success  bool
+        )
+
+        multiCons := ring.multiConsDequeue
+        maxItems := numItems
+
+        *oldHead = atomic.LoadUint32(ring.consHead)
+        for {
+                numItems = maxItems
+                prodTail = atomic.LoadUint32(ring.prodTail)
+
+                /* uint32 subtraction trickery makes this calculation always
+                 * valid, even if *oldHead > prodTail.
+                 */
+                entries = prodTail - *oldHead
+                if numItems > entries {
+                        numItems = entries
+                }
+
+                *newHead = *oldHead + numItems
+                if multiCons {
+                        success = atomic.CompareAndSwap(ring.consHead, *oldHead, *newHead)
+                } else {
+                        ring.consHead = *newHead
+                        success = true
+                }
+
+                if (success == true) break
+        }
+
+        return numItems, entries
+}
+
+/**
+ * updateTail updates the tail for the ring. Since it takes an arbitrary ring,
+ * it can handle both enqueue (passing the producer tail) and dequeue (passing
+ * the consumer tail).
+ *
+ * Params:
+ *   tailPtr - a pointer to ring's tail index that should be moved.
+ *   multi   - whether this ring operation supports multiple producers/consumers.
+ *   oldTail - the tail value that we need to see in order to start our tail
+ *             update. In the multiple producer/consumer case, we must wait for
+ *             operations in front of us to update the tail before we can go.
+ *   newTail - the tail value that we are updating the ring tail to reflect.
+ */
+func updateTail(
+        tailPtr *uint32,
+        multi    bool,
+        oldTail  uint32,
+        newTail  uint32,
+){
+        if multi {
+                // need to wait for the other enqueues/dequeues that precede us
+                // to complete, before we can go on.
+                for !atomic.CompareAndSwap(tailPtr, oldTail, newTail) {
+                        runtime.Gosched()
+                }
+                return
+        }
+
+        // TODO why does the single-producer/single-consumer (aka serialized)
+        // case have an atomic op here? Can't we just assign it straight up?
+        // atomic.StoreUint32(ring.prodTail, newTail)
+        *tailPtr = newTail
 }

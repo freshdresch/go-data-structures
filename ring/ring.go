@@ -5,6 +5,7 @@ import (
         "sync/atomic"
 )
 
+
 // Ring is a Go port of rte_ring from DPDK. It provides a fixed-size ring buffer
 // that can function as anything between an SPSC and MPMC queue. It defaults to
 // an SPSC queue in the base implementation, and multi-producer/multi-consumer
@@ -80,25 +81,146 @@ func New[T any](count uint32, opts ...RingOption) (*Ring[T], error) {
 }
 
 /**
- * moveProdHead moves the ring's producer head for an enqueue operation.
+ * Enqueue places one object in the ring.
  *
  * Params:
- *   numItems - The number of items we want to enqueue, i.e., how far the head
- *              should be moved.
- *   oldHead  - Saves the producer head value from *before* the move (where the
- *              enqueue starts).
- *   newHead  - Saves the producer head value from *after* the move (where the
- *              enqueue ends).
+ *   element - the object we want to enqueue into the ring.
  *
  * Returns:
- *   1. The actual number of items enqueued. This can lie anywhere between 0
- *      and numItems (inclusive).
+ *   `nil` if the element was successfully enqueued, or an error explaining why if not.
+ */
+func (ring *Ring[T]) Enqueue(element T) error {
+        elements := &T{element}
+        numEnqueued := ring.doEnqueue(elements, 1, nil, true)
+        if numEnqueued != 1 {
+                return errors.New("no space in the ring")
+        }
+        return nil
+}
+
+/**
+ * EnqueueBulk places a slice of elements onto the ring. The `bulk` descriptor signifies that we do
+ * not want any partial batches enqueued: either the entire batch gets enqueued, or we bail out and
+ * enqueue nothing at all.
+ *
+ * Params:
+ *   elements - the slice of elements we want to enqueue into the ring.
+ *   numElems - the number of elements in the batch.
+ *   freeSpace - a pointer where we will fill in the amount of available entries in the ring.
+ *
+ * Returns:
+ *   `nil` if the entire batch was successfully enqueued, or an error explaining why we could not
+ *   enqueue the batch.
+ */
+func (ring *Ring[T]) EnqueueBulk(
+        elements T[],
+        numElems uint32,
+        freeSpace *uint32,
+) error {
+        numEnqueued := ring.doEnqueue(elements, numElems, freeSpace, true)
+        if numEnqueued != numElems {
+                return fmt.Errorf(
+                        "needed %d empty slots in the ring, but only %d were free",
+                        numElems,
+                        *freeSpace,
+                )
+        }
+        return nil
+}
+
+/**
+ * EnqueueBurst places a slice of elements onto the ring. The 'burst' descriptor signifies that,
+ * in the circumstance where our ring does not have enough space for the whole batch, we will enqueue
+ * as many elements in the batch as the ring can hold.
+ *
+ * Params:
+ *   elements - the slice of elements we want to enqueue into the ring.
+ *   numElems - the number of elements in the batch.
+ *   freeSpace - a pointer where we will fill in the amount of available entries in the ring.
+ *
+ * Returns:
+ *   the number of elements successfully enqueued (on the closed interval [0, n]).
+ */
+func (ring *Ring[T]) EnqueueBurst(
+        elements T[],
+        numElems uint32,
+        freeSpace *uint32,
+) uint32 {
+        return ring.doEnqueue(
+                elements,
+                numElems,
+                freeSpace,
+                false,
+        )
+}
+
+func (ring *Ring[T]) doEnqueue(
+        elements T[],
+        numElems uint32,
+        freeSpace *uint32,
+        fixedEnqueue bool,
+) uint32 {
+        var (
+                prodHead    uint32
+                prodNext    uint32
+        )
+
+        // get the number of entries that we have space to accommodate
+        numEntries, freeEntries := ring.moveProdHead(
+                numElems,
+                &prodHead,
+                &prodNext,
+                fixedEnqueue,
+        )
+        if numEntries == 0 {
+                goto end
+        }
+
+        // enqueue the elements
+        if prodNext > prodHead {
+                for i := range numEntries {
+                        ring.entries[prodHead + i] = elements[i]
+                }
+        } else {
+                var idx uint32
+                // use more expensive wrappingAdd since we are wrapping around
+                for i := range numEntries {
+                        idx = wrappingAdd(prodHead, i, ring.mask)
+                        ring.entries[idx] = elements[i]
+                }
+        }
+
+        // update the tail after a successful enqueue
+        updateTail(ring.prodTail, ring.multiProdEnqueue, prodHead, prodNext)
+
+end:
+        if freeSpace != nil {
+                *freeSpace = freeEntries - numEntries
+        }
+        return numEntries
+}
+
+/**
+ * moveProdHead moves the ring's producer head for an enqueue operation. This will automatically
+ * wrap based on the ring's mask.
+ *
+ * Params:
+ *   numItems - The number of items we want to enqueue, i.e., how far the head should be moved.
+ *   oldHead - Saves the producer head value from *before* the move (where the enqueue starts).
+ *   newHead - Saves the producer head value from *after* the move (where the enqueue ends).
+ *   fixedEnqueue - If we are doing a bulk enqueue (where we enqueue the entire batch size, or don't
+ *             enqueue anything).
+ *
+ * Returns:
+ *   1. The actual number of items enqueued. This can lie anywhere between 0 and numItems
+ *      (inclusive). If it is a fixedEnqueue, then 0 or numItems are the only possible values.
  *   2. Returns the number of free entries in the ring before the head was moved.
  */
 func (ring *Ring[T]) moveProdHead(
         numItems uint32,
         oldHead *uint32,
         newHead *uint32,
+        fixedEnqueue bool,
 ) (uint32, uint32) {
         var (
                 consTail    uint32
@@ -123,10 +245,13 @@ func (ring *Ring[T]) moveProdHead(
                  */
                 freeEntries = (capacity + consTail - *oldHead)
                 if numItems > freeEntries {
+                        if fixedEnqueue {
+                                return 0, freeEntries
+                        }
                         numItems = freeEntries
                 }
 
-                *newHead = *oldHead + numItems
+                *newHead = wrappingAdd(*oldHead, numItems, ring.mask)
                 if multiProd {
                         success = atomic.CompareAndSwap(ring.prodHead, *oldHead, *newHead)
                 } else {
@@ -232,4 +357,11 @@ func updateTail(
         // case have an atomic op here? Can't we just assign it straight up?
         // atomic.StoreUint32(ring.prodTail, newTail)
         *tailPtr = newTail
+}
+
+// Note: this is only valid if we can perform `base + addend` without overflowing
+// the uint32. However, this is only a danger if someone is trying to create a
+// ring of size 2^32 (which would be >4 billion entries) so we should be safe.
+func wrappingAdd(uint32 base, uint32 addend, uint32 mask) uint32 {
+        return (base + addend) & mask
 }

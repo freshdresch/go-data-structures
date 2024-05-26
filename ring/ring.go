@@ -30,6 +30,9 @@ type Ring[T any] struct {
         prodTail *uint32 /* The tail index for the producer. */
         consHead *uint32 /* The head index for the consumer. */
 
+        /* TODO need to rectify whether I need distinct `size` and `capacity` or not, since I'm using
+         * golang slices instead of C-style arrays as backing memory. If I don't need the size,
+         * remember to recalculate the correct number of padding bytes. */
         size     uint32 /* Size of the ring. */
         mask     uint32 /* Mask of the ring (`size - 1`). */
         capacity uint32 /* Usable size of the ring. */
@@ -40,19 +43,21 @@ type Ring[T any] struct {
         _ [2]byte /* padding for better cache alignment */
 }
 
-func WithMultiProdEnqueue[T any]() func(*Ring[T]) {
+type RingOption[T any] func(*Ring[T])
+
+func WithMultiProdEnqueue[T any]() RingOption[T] {
         return func(ring *Ring[T]) {
                 ring.multiProdEnqueue = true
         }
 }
 
-func WithMultiConsDequeue[T any]() func(*Ring[T]) {
+func WithMultiConsDequeue[T any]() RingOption[T] {
         return func(ring *Ring[T]) {
                 ring.multiConsDequeue = true
         }
 }
 
-func New[T any](count uint32, opts ...func(*Ring[T])) (*Ring[T], error) {
+func New[T any](count uint32, opts ...RingOption[T]) (*Ring[T], error) {
         if count % 2 != 0 {
                 return &Ring[T]{}, errors.New("count is not a power of 2")
         }
@@ -82,6 +87,70 @@ func New[T any](count uint32, opts ...func(*Ring[T])) (*Ring[T], error) {
 }
 
 /**
+ * Reset flushes the entries in the ring by resetting its state.
+ *
+ * WARNING: Make sure to only do this while the ring is not in use!
+ *
+ * This reset function does not change the params of how the ring was initialized, it only resets
+ * the consumer and producer indices to show the ring is empty.
+ */
+func (ring *Ring[T]) Reset() {
+        /* Just use atomics so we don't have to worry about single or multi */
+        atomic.StoreUint32(ring.prodHead, 0)
+        atomic.StoreUint32(ring.prodTail, 0)
+        atomic.StoreUint32(ring.consHead, 0)
+        atomic.StoreUint32(ring.consTail, 0)
+}
+
+/**
+ * Count returns the number of occupied entries in the ring.
+ *
+ * Returns:
+ *   The number of occupied entries.
+ */
+func (ring *Ring[T]) Count() uint32 {
+        prodTail := atomic.LoadUint32(ring.prodTail)
+        consTail := atomic.LoadUint32(ring.consTail)
+        var count uint32 = prodTail - consTail
+        if count > ring.capacity {
+                return ring.capacity
+        }
+        return count
+}
+
+/**
+ * Free returns the number of empty entries in the ring.
+ *
+ * Returns:
+ *   The number of empty entries.
+ */
+func (ring *Ring[T]) Free() uint32 {
+        return ring.capacity - ring.Count()
+}
+
+/**
+ * Full returns whether the ring is full or not.
+ *
+ * Returns:
+ *   `true` if the ring is full, or `false` if it is not full.
+ */
+func (ring *Ring[T]) Full() bool {
+        return ring.Free() == 0
+}
+
+/**
+ * Empty returns whether the ring is empty or not.
+ *
+ * Returns:
+ *   `true` if the ring is empty, or `false` if it is not empty.
+ */
+func (ring *Ring[T]) Empty() bool {
+        prodTail := atomic.LoadUint32(ring.prodTail)
+        consTail := atomic.LoadUint32(ring.consTail)
+        return consTail == prodTail
+}
+
+/**
  * Enqueue places one object in the ring.
  *
  * Params:
@@ -93,6 +162,7 @@ func New[T any](count uint32, opts ...func(*Ring[T])) (*Ring[T], error) {
 func (ring *Ring[T]) Enqueue(element T) error {
         elements := make([]T, 1)
         elements[0] = element
+
         numEnqueued := ring.doEnqueue(elements, 1, nil, true)
         if numEnqueued != 1 {
                 return errors.New("no space in the ring")
@@ -141,7 +211,7 @@ func (ring *Ring[T]) EnqueueBulk(
  *   freeSpace - a pointer where we will fill in the amount of available entries in the ring.
  *
  * Returns:
- *   the number of elements successfully enqueued (on the closed interval [0, n]).
+ *   the number of elements successfully enqueued (on the closed interval [0, numElems]).
  */
 func (ring *Ring[T]) EnqueueBurst(
         elements []T,
@@ -156,6 +226,75 @@ func (ring *Ring[T]) EnqueueBurst(
         )
 }
 
+/**
+ * Dequeue removes the oldest object from the ring.
+ *
+ * Returns:
+ *   1. The dequeued element.
+ *   2. `nil` if the element was successfully dequeued, or an error explaining why if not.
+ */
+func (ring *Ring[T]) Dequeue() (T, error) {
+        elements, numDequeued := ring.doDequeue(1, nil, true)
+        if numDequeued != 1 {
+                return getZeroVal[T](), errors.New("no elements in the ring")
+        }
+        return elements[0], nil
+}
+
+/**
+ * DequeueBulk removes a chunk of elements from the ring. The `bulk` descriptor signifies that we do
+ * not want any partial batches dequeued: either the entire batch gets dequeued, or we bail out and
+ * dequeue nothing at all.
+ *
+ * Params:
+ *   numElems - the number of elements in the batch.
+ *   available - a pointer where we will fill in the amount of occupied entries in the ring.
+ *
+ * Returns:
+ *   1. The slice of elements we dequeued from the ring.
+ *   2. `nil` if the entire batch was successfully dequeued, or an error explaining why we could not
+ *      dequeue the batch.
+ */
+func (ring *Ring[T]) DequeueBulk(
+        numElems uint32,
+        available *uint32,
+) ([]T, error) {
+        elements, numDequeued := ring.doDequeue(numElems, available, true)
+        if numDequeued != numElems {
+                return []T{}, fmt.Errorf(
+                        "needed %d occupied entries in the ring, but only %d were occupied",
+                        numElems,
+                        *available,
+                )
+        }
+
+        return elements, nil
+}
+
+/**
+ * DequeueBurst remove a chunk of elements from the ring. The 'burst' descriptor signifies that,
+ * in the circumstance where our ring does have enough entries to fulfill our requested batch size,
+ * we will accept a partial batch and dequeue all of the ring's elements.
+ *
+ * Params:
+ *   numElems - the number of elements in the batch.
+ *   available - a pointer where we will fill in the amount of occupied entries in the ring.
+ *
+ * Returns:
+ *   1. The slice of elements we dequeued from the ring.
+ *   2. The number of elements successfully dequeued (on the closed interval [0, numElems]).
+ */
+func (ring *Ring[T]) DequeueBurst(
+        numElems uint32,
+        available *uint32,
+) ([]T, uint32) {
+        return ring.doDequeue(
+                numElems,
+                available,
+                false,
+        )
+}
+
 func (ring *Ring[T]) doEnqueue(
         elements []T,
         numElems uint32,
@@ -165,7 +304,6 @@ func (ring *Ring[T]) doEnqueue(
         var (
                 prodHead uint32
                 prodNext uint32
-                i        uint32
         )
 
         // get the number of entries that we have space to accommodate
@@ -181,13 +319,13 @@ func (ring *Ring[T]) doEnqueue(
 
         // enqueue the elements
         if prodNext > prodHead {
-                for i = 0; i < numEntries; i++ {
+                for i := range numEntries {
                         ring.entries[prodHead+i] = elements[i]
                 }
         } else {
                 var idx uint32
                 // use more expensive wrappingAdd since we are wrapping around
-                for i = 0; i < numEntries; i++ {
+                for i := range numEntries {
                         idx = wrappingAdd(prodHead, i, ring.mask)
                         ring.entries[idx] = elements[i]
                 }
@@ -203,6 +341,53 @@ end:
         return numEntries
 }
 
+func (ring *Ring[T]) doDequeue(
+        numElems uint32,
+        available *uint32,
+        fixedDequeue bool,
+) ([]T, uint32) {
+        var (
+                consHead uint32
+                consNext uint32
+        )
+
+        // get the number of entries that we can actually dequeue
+        numEntries, filledBefore := ring.moveConsHead(
+                numElems,
+                &consHead,
+                &consNext,
+                fixedDequeue,
+        )
+
+        elements := make([]T, numEntries)
+        if numEntries == 0 {
+                goto end
+        }
+
+        // dequeue the elements
+        if consNext > consHead {
+                for i := range numEntries {
+                        elements[i] = ring.entries[consHead + i]
+                }
+        } else {
+                var idx uint32
+                // use more expensive wrappingAdd since we are wrapping around
+                for i := range numEntries {
+                        idx = wrappingAdd(consHead, i, ring.mask)
+                        elements[i] = ring.entries[idx]
+                }
+        }
+
+        // update the tail after a successful dequeue
+        updateTail(ring.consTail, ring.multiConsDequeue, consHead, consNext)
+
+end:
+        if available != nil {
+                *available = filledBefore - numEntries
+        }
+        return elements, numEntries
+}
+
 /**
  * moveProdHead moves the ring's producer head for an enqueue operation. This will automatically
  * wrap based on the ring's mask.
@@ -212,7 +397,7 @@ end:
  *   oldHead - Saves the producer head value from *before* the move (where the enqueue starts).
  *   newHead - Saves the producer head value from *after* the move (where the enqueue ends).
  *   fixedEnqueue - If we are doing a bulk enqueue (where we enqueue the entire batch size, or don't
- *             enqueue anything).
+ *       enqueue anything).
  *
  * Returns:
  *   1. The actual number of items enqueued. This can lie anywhere between 0 and numItems
@@ -254,6 +439,10 @@ func (ring *Ring[T]) moveProdHead(
                         numItems = freeEntries
                 }
 
+                if numItems == 0 {
+                        return 0, 0
+                }
+
                 *newHead = wrappingAdd(*oldHead, numItems, ring.mask)
                 if multiProd {
                         success = atomic.CompareAndSwapUint32(ring.prodHead, *oldHead, *newHead)
@@ -275,25 +464,25 @@ func (ring *Ring[T]) moveProdHead(
  *
  * Params:
  *   numItems - The number of items we want to dequeue, i.e., how far the head should be moved.
- *   oldHead  - Saves the consumer head value from *before* the move (where the dequeue starts).
- *   newHead  - Saves the producer head value from *after* the move (where the dequeue ends).
+ *   oldHead - Saves the consumer head value from *before* the move (where the dequeue starts).
+ *   newHead - Saves the consumer head value from *after* the move (where the dequeue ends).
+ *   fixedDequeue - If we are doing a bulk enqueue (where we dequeue the entire batch size, or don't
+ *       dequeue anything).
  *
  * Returns:
- *   1. The actual number of items enqueued. This can lie anywhere between 0 and numItems
-        (inclusive).
- *   2. Returns the number of free entries in the ring before the head was moved.
+ *   1. The actual number of items dequeued. This can lie anywhere between 0 and numItems
+ *      (inclusive). If it is a fixedDequeue, then 0 or numItems are the only possible values.
+ *   2. Returns the number of occupied entries in the ring before the head was moved.
  */
 func (ring *Ring[T]) moveConsHead(
         numItems uint32,
-        // TODO I think we want the updates for these so they should stay pointers, but once I
-        // start using the function, if we only care about feeding the value in, we could supply
-        // straight up uint32s instead
         oldHead *uint32,
         newHead *uint32,
+        fixedDequeue bool,
 ) (uint32, uint32) {
         var (
                 prodTail uint32
-                entries  uint32
+                filledEntries  uint32
                 success  bool
         )
 
@@ -308,9 +497,16 @@ func (ring *Ring[T]) moveConsHead(
                 /* uint32 subtraction trickery makes this calculation always valid, even if
                  * `*oldHead > prodTail`.
                  */
-                entries = prodTail - *oldHead
-                if numItems > entries {
-                        numItems = entries
+                filledEntries = prodTail - *oldHead
+                if numItems > filledEntries {
+                        if fixedDequeue {
+                                return 0, filledEntries
+                        }
+                        numItems = filledEntries
+                }
+
+                if numItems == 0 {
+                        return 0, 0
                 }
 
                 *newHead = *oldHead + numItems
@@ -326,7 +522,7 @@ func (ring *Ring[T]) moveConsHead(
                 }
         }
 
-        return numItems, entries
+        return numItems, filledEntries
 }
 
 /**
@@ -362,9 +558,16 @@ func updateTail(
         *tailPtr = newTail
 }
 
-// Note: this is only valid if we can perform `base + addend` without overflowing the uint32.
-// However, this is only a danger if someone is trying to create a ring of size 2^32 (which would
-// be >4 billion entries) so we should be safe.
+/**
+ * Note: this is only valid if we can perform `base + addend` without overflowing the uint32.
+ * However, this is only a danger if someone is trying to create a ring of size 2^32, which would be
+ * be >4 billion entries, so we should be safe.
+ */
 func wrappingAdd(base, addend, mask uint32) uint32 {
         return (base + addend) & mask
+}
+
+func getZeroVal[T any]() T {
+        var zval T
+        return zval
 }

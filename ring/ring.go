@@ -58,13 +58,13 @@ func WithMultiConsDequeue[T any]() RingOption[T] {
 }
 
 func New[T any](count uint32, opts ...RingOption[T]) (*Ring[T], error) {
-        if count % 2 != 0 {
-                return &Ring[T]{}, errors.New("count is not a power of 2")
+        if count < 2 || (count&(count-1)) != 0 {
+                return nil, fmt.Errorf("count must be a power of two and >= 2; got %d", count)
         }
         mask := count - 1
 
         ring := &Ring[T]{
-                entries:  make([]T, count),
+                entries:  make([]T, int(count)),
                 size:     count,
                 mask:     mask,
                 capacity: mask,

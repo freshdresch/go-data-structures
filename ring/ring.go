@@ -194,7 +194,7 @@ func (ring *Ring[T]) EnqueueBulk(
                 return fmt.Errorf(
                         "needed %d empty slots in the ring, but only %d were free",
                         numElems,
-                        *freeSpace,
+                        numEnqueued,
                 )
         }
         return nil
@@ -264,7 +264,7 @@ func (ring *Ring[T]) DequeueBulk(
                 return []T{}, fmt.Errorf(
                         "needed %d occupied entries in the ring, but only %d were occupied",
                         numElems,
-                        *available,
+                        numDequeued,
                 )
         }
 
@@ -314,30 +314,30 @@ func (ring *Ring[T]) doEnqueue(
                 fixedEnqueue,
         )
         if numEntries == 0 {
-                goto end
+                updateValidPtr(freeSpace, freeEntries)
+                return numEntries
         }
 
-        // enqueue the elements
-        if prodNext > prodHead {
-                for i := range numEntries {
-                        ring.entries[prodHead+i] = elements[i]
-                }
-        } else {
-                var idx uint32
-                // use more expensive wrappingAdd since we are wrapping around
-                for i := range numEntries {
-                        idx = wrappingAdd(prodHead, i, ring.mask)
-                        ring.entries[idx] = elements[i]
-                }
+        baseIdx := prodHead & ring.mask
+        n1 := ring.capacity - baseIdx
+        if n1 > numEntries {
+                n1 = numEntries
+        }
+
+        // enqueue the elements -- first contiguous chunk
+        for i := uint32(0); i < n1; i++ {
+                ring.entries[int(baseIdx+i)] = elements[i]
+        }
+
+        // second chunk if wrapped
+        for i := n1; i < numEntries; i++ {
+                ring.entries[int(i - n1)] = elements[i]
         }
 
         // update the tail after a successful enqueue
         updateTail(ring.prodTail, ring.multiProdEnqueue, prodHead, prodNext)
 
-end:
-        if freeSpace != nil {
-                *freeSpace = freeEntries - numEntries
-        }
+        updateValidPtr(freeSpace, freeEntries - numEntries)
         return numEntries
 }
 
@@ -359,38 +359,37 @@ func (ring *Ring[T]) doDequeue(
                 fixedDequeue,
         )
 
-        elements := make([]T, numEntries)
+        elements := make([]T, int(numEntries))
         if numEntries == 0 {
-                goto end
+                updateValidPtr(available, filledBefore)
+                return elements, numEntries
         }
 
-        // dequeue the elements
-        if consNext > consHead {
-                for i := range numEntries {
-                        elements[i] = ring.entries[consHead + i]
-                }
-        } else {
-                var idx uint32
-                // use more expensive wrappingAdd since we are wrapping around
-                for i := range numEntries {
-                        idx = wrappingAdd(consHead, i, ring.mask)
-                        elements[i] = ring.entries[idx]
-                }
+        baseIdx := consHead & ring.mask
+        n1 := ring.capacity - baseIdx
+        if n1 > numEntries {
+                n1 = numEntries
+        }
+
+        // dequeue the elements -- first chunk
+        for i := uint32(0); i < n1; i++ {
+                elements[i] = ring.entries[int(baseIdx+i)]
+        }
+
+        // second chunk if wrapped
+        for i := n1; i < numEntries; i++ {
+                elements[i] = ring.entries[int(i - n1)]
         }
 
         // update the tail after a successful dequeue
         updateTail(ring.consTail, ring.multiConsDequeue, consHead, consNext)
 
-end:
-        if available != nil {
-                *available = filledBefore - numEntries
-        }
+        updateValidPtr(available, filledBefore - numEntries)
         return elements, numEntries
 }
 
 /**
- * moveProdHead moves the ring's producer head for an enqueue operation. This will automatically
- * wrap based on the ring's mask.
+ * moveProdHead moves the ring's producer head for an enqueue operation.
  *
  * Params:
  *   numItems - The number of items we want to enqueue, i.e., how far the head should be moved.
@@ -443,11 +442,11 @@ func (ring *Ring[T]) moveProdHead(
                         return 0, 0
                 }
 
-                *newHead = wrappingAdd(*oldHead, numItems, ring.mask)
+                *newHead = *oldHead + numItems
                 if multiProd {
                         success = atomic.CompareAndSwapUint32(ring.prodHead, *oldHead, *newHead)
                 } else {
-                        *ring.prodHead = *newHead
+                        atomic.StoreUint32(ring.prodHead, *newHead)
                         success = true
                 }
 
@@ -552,19 +551,14 @@ func updateTail(
                 return
         }
 
-        // TODO why does the single-producer/single-consumer (aka serialized) case have an atomic op
-        // here? Can't we just assign it straight up?
-        // atomic.StoreUint32(ring.prodTail, newTail)
-        *tailPtr = newTail
+        atomic.StoreUint32(tailPtr, newTail)
 }
 
-/**
- * Note: this is only valid if we can perform `base + addend` without overflowing the uint32.
- * However, this is only a danger if someone is trying to create a ring of size 2^32, which would be
- * be >4 billion entries, so we should be safe.
- */
-func wrappingAdd(base, addend, mask uint32) uint32 {
-        return (base + addend) & mask
+func updateValidPtr(ptr *uint32, val uint32) {
+        if ptr == nil {
+                return
+        }
+        *ptr = val
 }
 
 func getZeroVal[T any]() T {

@@ -178,13 +178,14 @@ func TestSPMCRingBuffer(t *testing.T) {
         var wg sync.WaitGroup
         wg.Add(4)
         for i := 0; i < 4; i++ {
-                go func() {
+        for i := 0; i < 4; i++ {
+                go func(worker int) {
                         defer wg.Done()
-                        for j := 0; j < numDequeues[i]; j++ {
+                        for j := 0; j < numDequeues[worker]; j++ {
                                 dequeuedItem, err := buffer.Dequeue()
                                 assert.NoError(t, err)
 
-                                fmt.Printf("Consumer %d dequeued %q\n", i, dequeuedItem)
+                                fmt.Printf("Consumer %d dequeued %q\n", worker, dequeuedItem)
 
                                 mu.Lock()
                                 _, ok := dequeuedStrings[dequeuedItem]
@@ -194,7 +195,7 @@ func TestSPMCRingBuffer(t *testing.T) {
 
                                 time.Sleep(1 * time.Millisecond)
                         }
-                }()
+                }(i)
         }
         wg.Wait()
 
@@ -222,19 +223,19 @@ func TestMPSCRingBuffer(t *testing.T) {
         wg.Add(numWorkers)
 
         for i := 0; i < numWorkers; i++ {
-                go func() {
+                go func(worker int) {
                         defer wg.Done()
 
-                        stride := numEnqueues[i]
+                        stride := numEnqueues[worker]
                         for j := 0; j < stride; j++ {
-                                idx := (i * 8) + j
+                                idx := (worker * 8) + j
                                 err = buffer.Enqueue(testStrings[idx])
                                 assert.NoError(t, err)
 
-                                fmt.Printf("Consumer %d enqueued %q\n", i, testStrings[idx])
+                                fmt.Printf("Consumer %d enqueued %q\n", worker, testStrings[idx])
                                 time.Sleep(1 * time.Millisecond)
                         }
-                }()
+                }(i)
         }
         wg.Wait()
 
@@ -278,18 +279,18 @@ func TestMPMCRingBuffer(t *testing.T) {
 
         producerWG.Add(numWorkers)
         for i := 0; i < numWorkers; i++ {
-                go func() {
+                go func(worker int) {
                         defer producerWG.Done()
 
-                        for j := 0; j < strides[i]; j++ {
-                                idx := (i * 8) + j
+                        for j := 0; j < strides[worker]; j++ {
+                                idx := (worker * 8) + j
                                 err = buffer.Enqueue(testStrings[idx])
                                 assert.NoError(t, err)
 
-                                fmt.Printf("Consumer %d enqueued %q\n", i, testStrings[idx])
+                                fmt.Printf("Consumer %d enqueued %q\n", worker, testStrings[idx])
                                 time.Sleep(10 * time.Millisecond)
                         }
-                }()
+                }(i)
         }
 
         // offset the consumer goroutines by 20 ms to give the chance for
@@ -302,13 +303,13 @@ func TestMPMCRingBuffer(t *testing.T) {
 
         consumerWG.Add(numWorkers)
         for i := 0; i < 4; i++ {
-                go func() {
+                go func(worker int) {
                         defer consumerWG.Done()
-                        for j := 0; j < strides[i]; j++ {
+                        for j := 0; j < strides[worker]; j++ {
                                 dequeuedItem, err := buffer.Dequeue()
                                 assert.NoError(t, err)
 
-                                fmt.Printf("Consumer %d dequeued %q\n", i, dequeuedItem)
+                                fmt.Printf("Consumer %d dequeued %q\n", worker, dequeuedItem)
 
                                 mu.Lock()
                                 _, ok := dequeuedStrings[dequeuedItem]
@@ -318,7 +319,7 @@ func TestMPMCRingBuffer(t *testing.T) {
 
                                 time.Sleep(10 * time.Millisecond)
                         }
-                }()
+                }(i)
         }
 
         producerWG.Wait()

@@ -228,7 +228,7 @@ func TestMPSCRingBuffer(t *testing.T) {
                         stride := numEnqueues[worker]
                         for j := 0; j < stride; j++ {
                                 idx := (worker * 8) + j
-                                err = buffer.Enqueue(testStrings[idx])
+                                err := buffer.Enqueue(testStrings[idx])
                                 assert.NoError(t, err)
 
                                 fmt.Printf("Consumer %d enqueued %q\n", worker, testStrings[idx])
@@ -283,7 +283,7 @@ func TestMPMCRingBuffer(t *testing.T) {
 
                         for j := 0; j < strides[worker]; j++ {
                                 idx := (worker * 8) + j
-                                err = buffer.Enqueue(testStrings[idx])
+                                err := buffer.Enqueue(testStrings[idx])
                                 assert.NoError(t, err)
 
                                 fmt.Printf("Consumer %d enqueued %q\n", worker, testStrings[idx])

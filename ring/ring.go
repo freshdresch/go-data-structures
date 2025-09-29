@@ -30,12 +30,9 @@ type Ring[T any] struct {
         prodTail *uint32 /* The tail index for the producer. */
         consHead *uint32 /* The head index for the consumer. */
 
-        /* TODO need to rectify whether I need distinct `size` and `capacity` or not, since I'm using
-         * golang slices instead of C-style arrays as backing memory. If I don't need the size,
-         * remember to recalculate the correct number of padding bytes. */
-        size     uint32 /* Size of the ring. */
-        mask     uint32 /* Mask of the ring (`size - 1`). */
-        capacity uint32 /* Usable size of the ring. */
+        size     uint32 /* Backing array length. */
+        mask     uint32 /* Mask for bounding the index of the ring. */
+        capacity uint32 /* Usable slots in the ring. */
 
         multiProdEnqueue bool /* Multi-Producer enqueue instead of single. */
         multiConsDequeue bool /* Multi-Consumer dequeue instead of single. */
@@ -57,7 +54,7 @@ func WithMultiConsDequeue[T any]() RingOption[T] {
         }
 }
 
-func New[T any](count uint32, opts ...RingOption[T]) (*Ring[T], error) {
+func NewRing[T any](count uint32, opts ...RingOption[T]) (*Ring[T], error) {
         if count < 2 || (count&(count-1)) != 0 {
                 return nil, fmt.Errorf("count must be a power of two and >= 2; got %d", count)
         }
@@ -319,7 +316,7 @@ func (ring *Ring[T]) doEnqueue(
         }
 
         baseIdx := prodHead & ring.mask
-        n1 := ring.capacity - baseIdx
+        n1 := ring.size - baseIdx
         if n1 > numEntries {
                 n1 = numEntries
         }
@@ -366,7 +363,7 @@ func (ring *Ring[T]) doDequeue(
         }
 
         baseIdx := consHead & ring.mask
-        n1 := ring.capacity - baseIdx
+        n1 := ring.size - baseIdx
         if n1 > numEntries {
                 n1 = numEntries
         }

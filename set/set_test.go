@@ -21,7 +21,7 @@ func TestMakingSetFromSlice(t *testing.T) {
         assert.True(t, s.Exists("one"))
         assert.True(t, s.Exists("two"))
         assert.True(t, s.Exists("three"))
-        assert.Equal(t, s.Len(), 3)
+        assert.Equal(t, 3, s.Len())
 }
 
 func TestAddAndRemove(t *testing.T) {
@@ -91,7 +91,7 @@ func TestAddAndRemove(t *testing.T) {
         // test the skipping of values in the bulk update functions
         // now `set` will have `toyota` and `porsche`
         s.Add("porsche")
-        assert.Equal(t, s.Len(), 2)
+        assert.Equal(t, 2, s.Len())
 
         other = &Set[string]{
                 entries: map[string]struct{}{
@@ -101,7 +101,7 @@ func TestAddAndRemove(t *testing.T) {
                 length: 2,
         }
         s.Update(other)
-        assert.Equal(t, s.Len(), 3)
+        assert.Equal(t, 3, s.Len())
 
         other = &Set[string]{
                 entries: map[string]struct{}{
@@ -111,7 +111,7 @@ func TestAddAndRemove(t *testing.T) {
                 length: 2,
         }
         s.DifferenceUpdate(other)
-        assert.Equal(t, s.Len(), 2)
+        assert.Equal(t, 2, s.Len())
 }
 
 func TestCloneSafety(t *testing.T) {
@@ -130,7 +130,7 @@ func TestCloneSafety(t *testing.T) {
         s.Clear()
         assert.True(t, s.Empty())
 
-        assert.Equal(t, other.Len(), 3)
+        assert.Equal(t, 3, other.Len())
         assert.True(t, other.Exists("honda"))
         assert.True(t, other.Exists("ford"))
         assert.True(t, other.Exists("jeep"))
@@ -222,7 +222,7 @@ func TestLogicalSetOperations(t *testing.T) {
                 length: 2,
         }
 
-        assert.Equal(t, other.Intersection(s).Len(), 1)
-        assert.Equal(t, other.Union(s).Len(), 6)
+        assert.Equal(t, 1, other.Intersection(s).Len())
+        assert.Equal(t, 6, other.Union(s).Len())
         assert.False(t, other.Equals(s))
 }

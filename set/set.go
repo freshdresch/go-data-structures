@@ -36,23 +36,21 @@ func NewSetFromSlice[K comparable](keys []K) *Set[K] {
 // Add adds a single element to the Set. If the element is in the set, the
 // operation is a no-op.
 func (s *Set[K]) Add(element K) {
-        if s.Exists(element) {
+        if _, ok := s.entries[element]; ok {
                 return
         }
-
         s.entries[element] = struct{}{}
-        s.length += 1
+        s.length++
 }
 
 // Remove deletes an element from the Set. If the element is not in the set, the
 // operation is a no-op.
 func (s *Set[K]) Remove(element K) {
-        if !s.Exists(element) {
+        if _, ok := s.entries[element]; !ok {
                 return
         }
-
         delete(s.entries, element)
-        s.length -= 1
+        s.length--
 }
 
 // Difference returns a set containing the set difference between the receiver
@@ -69,7 +67,7 @@ func (s *Set[K]) Difference(other *Set[K]) *Set[K] {
                         continue
                 }
                 result.entries[element] = struct{}{}
-                added += 1
+                added++
         }
 
         result.length += added
@@ -84,27 +82,27 @@ func (s *Set[K]) Difference(other *Set[K]) *Set[K] {
 // elements that are not resident in both sets.
 func (s *Set[K]) Intersection(other *Set[K]) *Set[K] {
         var (
-                smallerMap *map[K]struct{}
-                largerMap  *map[K]struct{}
+                smallerMap map[K]struct{}
+                largerMap  map[K]struct{}
         )
 
         // iterate through the smaller set
         if s.length < other.length {
-                smallerMap = &s.entries
-                largerMap = &other.entries
+                smallerMap = s.entries
+                largerMap = other.entries
         } else {
-                smallerMap = &other.entries
-                largerMap = &s.entries
+                smallerMap = other.entries
+                largerMap = s.entries
         }
 
         result := NewSet[K]()
         added := 0
-        for element := range *smallerMap {
-                if _, ok := (*largerMap)[element]; !ok {
+        for element := range smallerMap {
+                if _, ok := largerMap[element]; !ok {
                         continue
                 }
                 result.entries[element] = struct{}{}
-                added += 1
+                added++
         }
 
         result.length += added
@@ -133,11 +131,11 @@ func (s *Set[K]) Union(other *Set[K]) *Set[K] {
         result := largerSet.Clone()
         added := 0
         for element := range smallerSet.entries {
-                if largerSet.Exists(element) {
+                if _, ok := result.entries[element]; ok {
                         continue
                 }
                 result.entries[element] = struct{}{}
-                added += 1
+                added++
         }
 
         result.length += added
@@ -162,10 +160,8 @@ func (s *Set[K]) Disjunction(other *Set[K]) *Set[K] {
 
 // Exists returns whether or not the element exists in the Set.
 func (s *Set[K]) Exists(element K) bool {
-        if _, ok := s.entries[element]; !ok {
-                return false
-        }
-        return true
+        _, ok := s.entries[element]
+        return ok
 }
 
 // Equals returns whether the two sets have identical contents.
@@ -197,7 +193,7 @@ func (s *Set[K]) Clear() {
 func (s *Set[K]) Clone() *Set[K] {
         result := &Set[K]{
                 entries: make(map[K]struct{}, s.length),
-                length: s.length,
+                length:  s.length,
         }
 
         for elem := range s.entries {
@@ -214,11 +210,11 @@ func (s *Set[K]) Clone() *Set[K] {
 func (s *Set[K]) Update(other *Set[K]) {
         added := 0
         for element := range other.entries {
-                if s.Exists(element) {
+                if _, ok := s.entries[element]; ok {
                         continue
                 }
                 s.entries[element] = struct{}{}
-                added += 1
+                added++
         }
         s.length += added
 }
@@ -231,11 +227,11 @@ func (s *Set[K]) Update(other *Set[K]) {
 func (s *Set[K]) DifferenceUpdate(other *Set[K]) {
         removed := 0
         for element := range other.entries {
-                if !s.Exists(element) {
+                if _, ok := s.entries[element]; !ok {
                         continue
                 }
                 delete(s.entries, element)
-                removed += 1
+                removed++
         }
         s.length -= removed
 }

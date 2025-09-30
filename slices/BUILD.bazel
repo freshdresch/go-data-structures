@@ -1,0 +1,19 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "slices",
+    srcs = ["slices.go"],
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "slices_test",
+    srcs = [
+        "slices_test.go",
+        "slices.go",
+    ],
+    deps = [
+        "@com_github_stretchr_testify//assert:assert",
+    ],
+    visibility = ["//:__subpackages__"],
+)

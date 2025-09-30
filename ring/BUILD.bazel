@@ -1,0 +1,20 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "ring",
+    srcs = ["ring.go"],
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "ring_test",
+    srcs = [
+        "ring_test.go",
+        "ring.go",
+    ],
+    deps = [
+        "@com_github_stretchr_testify//assert:assert",
+        "@com_github_stretchr_testify//require:require",
+    ],
+    visibility = ["//:__subpackages__"],
+)

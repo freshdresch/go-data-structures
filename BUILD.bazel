@@ -1,0 +1,16 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+package(default_visibility = ["//visibility:public"])
+
+go_library(
+    name = "go-data-structures_lib",
+    srcs = [],
+    importpath = "github.com/freshdresch/go-data-structures",
+    deps = [
+        "//maps",
+        "//ring",
+        "//set",
+        "//slices",
+    ],
+    visibility = ["//visibility:public"],
+)

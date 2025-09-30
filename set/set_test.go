@@ -10,24 +10,38 @@ func TestMakingEmptySet(t *testing.T) {
         assert.True(t, set.Empty())
 }
 
-func TestAddAndRemove(t *testing.T) {
-        set := NewSet[string]()
-        set.Add("porsche")
-        set.Add("jaguar")
-        set.Add("toyota")
+func TestMakingSetFromSlice(t *testing.T) {
+        inputSlice := []string{
+                "one",
+                "two",
+                "three",
+                "three", // the duplicate should not affect the set
+        }
+        s := NewSetFromSlice[string](inputSlice)
+        assert.True(t, s.Exists("one"))
+        assert.True(t, s.Exists("two"))
+        assert.True(t, s.Exists("three"))
+        assert.Equal(t, 3, s.Len())
+}
 
-        assert.True(t, set.Exists("porsche"))
-        assert.True(t, set.Exists("jaguar"))
-        assert.True(t, set.Exists("toyota"))
-        assert.False(t, set.Exists("honda"))
-        assert.False(t, set.Exists("ford"))
-        assert.False(t, set.Exists("jeep"))
+func TestAddAndRemove(t *testing.T) {
+        s := NewSet[string]()
+        s.Add("porsche")
+        s.Add("jaguar")
+        s.Add("toyota")
+
+        assert.True(t, s.Exists("porsche"))
+        assert.True(t, s.Exists("jaguar"))
+        assert.True(t, s.Exists("toyota"))
+        assert.False(t, s.Exists("honda"))
+        assert.False(t, s.Exists("ford"))
+        assert.False(t, s.Exists("jeep"))
 
         // test the no-op add too
-        length := set.Len()
-        set.Add("porsche")
-        assert.True(t, set.Exists("porsche"))
-        assert.Equal(t, length, set.Len())
+        length := s.Len()
+        s.Add("porsche")
+        assert.True(t, s.Exists("porsche"))
+        assert.Equal(t, length, s.Len())
 
         other := &Set[string]{
                 entries: map[string]struct{}{
@@ -37,47 +51,47 @@ func TestAddAndRemove(t *testing.T) {
                 },
                 length: 3,
         }
-        
-        set.Update(other)
+
+        s.Update(other)
 
         // test all of the elements, even the ones we didn't expect to change,
         // just to make sure no funny business is happening
-        assert.True(t, set.Exists("porsche"))
-        assert.True(t, set.Exists("jaguar"))
-        assert.True(t, set.Exists("toyota"))
-        assert.True(t, set.Exists("honda"))
-        assert.True(t, set.Exists("ford"))
-        assert.True(t, set.Exists("jeep"))
+        assert.True(t, s.Exists("porsche"))
+        assert.True(t, s.Exists("jaguar"))
+        assert.True(t, s.Exists("toyota"))
+        assert.True(t, s.Exists("honda"))
+        assert.True(t, s.Exists("ford"))
+        assert.True(t, s.Exists("jeep"))
 
-        set.Remove("porsche")
+        s.Remove("porsche")
 
-        assert.False(t, set.Exists("porsche"))
-        assert.True(t, set.Exists("jaguar"))
-        assert.True(t, set.Exists("toyota"))
-        assert.True(t, set.Exists("honda"))
-        assert.True(t, set.Exists("ford"))
-        assert.True(t, set.Exists("jeep"))
+        assert.False(t, s.Exists("porsche"))
+        assert.True(t, s.Exists("jaguar"))
+        assert.True(t, s.Exists("toyota"))
+        assert.True(t, s.Exists("honda"))
+        assert.True(t, s.Exists("ford"))
+        assert.True(t, s.Exists("jeep"))
 
         // test the no-op remove too
-        length = set.Len()
-        set.Remove("fiat")
-        assert.Equal(t, length, set.Len())
+        length = s.Len()
+        s.Remove("fiat")
+        assert.Equal(t, length, s.Len())
 
         // add one more element to the Set that we are going to bulk subtract
         other.Add("jaguar")
-        set.DifferenceUpdate(other)
+        s.DifferenceUpdate(other)
 
-        assert.False(t, set.Exists("porsche"))
-        assert.False(t, set.Exists("jaguar"))
-        assert.True(t, set.Exists("toyota"))
-        assert.False(t, set.Exists("honda"))
-        assert.False(t, set.Exists("ford"))
-        assert.False(t, set.Exists("jeep"))
+        assert.False(t, s.Exists("porsche"))
+        assert.False(t, s.Exists("jaguar"))
+        assert.True(t, s.Exists("toyota"))
+        assert.False(t, s.Exists("honda"))
+        assert.False(t, s.Exists("ford"))
+        assert.False(t, s.Exists("jeep"))
 
         // test the skipping of values in the bulk update functions
         // now `set` will have `toyota` and `porsche`
-        set.Add("porsche")
-        assert.Equal(t, set.Len(), uint64(2))
+        s.Add("porsche")
+        assert.Equal(t, 2, s.Len())
 
         other = &Set[string]{
                 entries: map[string]struct{}{
@@ -86,8 +100,8 @@ func TestAddAndRemove(t *testing.T) {
                 },
                 length: 2,
         }
-        set.Update(other)
-        assert.Equal(t, set.Len(), uint64(3))
+        s.Update(other)
+        assert.Equal(t, 3, s.Len())
 
         other = &Set[string]{
                 entries: map[string]struct{}{
@@ -96,12 +110,12 @@ func TestAddAndRemove(t *testing.T) {
                 },
                 length: 2,
         }
-        set.DifferenceUpdate(other)
-        assert.Equal(t, set.Len(), uint64(2))
+        s.DifferenceUpdate(other)
+        assert.Equal(t, 2, s.Len())
 }
 
 func TestCloneSafety(t *testing.T) {
-        set := &Set[string]{
+        s := &Set[string]{
                 entries: map[string]struct{}{
                         "honda": struct{}{},
                         "ford": struct{}{},
@@ -110,20 +124,20 @@ func TestCloneSafety(t *testing.T) {
                 length: 3,
         }
 
-        other := set.Clone()
-        assert.True(t, set.Equals(other))
+        other := s.Clone()
+        assert.True(t, s.Equals(other))
 
-        set.Clear()
-        assert.True(t, set.Empty())
+        s.Clear()
+        assert.True(t, s.Empty())
 
-        assert.Equal(t, other.Len(), uint64(3))
+        assert.Equal(t, 3, other.Len())
         assert.True(t, other.Exists("honda"))
         assert.True(t, other.Exists("ford"))
         assert.True(t, other.Exists("jeep"))
 }
 
 func TestLogicalSetOperations(t *testing.T) {
-        set := &Set[string]{
+        s := &Set[string]{
                 entries: map[string]struct{}{
                         "porsche": struct{}{},
                         "toyota": struct{}{},
@@ -153,7 +167,7 @@ func TestLogicalSetOperations(t *testing.T) {
                 },
                 length: 3,
         }
-        assert.True(t, set.Intersection(other).Equals(expected))
+        assert.True(t, s.Intersection(other).Equals(expected))
 
         expected = &Set[string]{
                 entries: map[string]struct{}{
@@ -165,7 +179,7 @@ func TestLogicalSetOperations(t *testing.T) {
                 },
                 length: 4,
         }
-        assert.True(t, set.Disjunction(other).Equals(expected))
+        assert.True(t, s.Disjunction(other).Equals(expected))
 
         expected = &Set[string]{
                 entries: map[string]struct{}{
@@ -174,7 +188,7 @@ func TestLogicalSetOperations(t *testing.T) {
                 },
                 length: 2,
         }
-        assert.True(t, other.Difference(set).Equals(expected))
+        assert.True(t, other.Difference(s).Equals(expected))
 
         expected = &Set[string]{
                 entries: map[string]struct{}{
@@ -183,7 +197,7 @@ func TestLogicalSetOperations(t *testing.T) {
                 },
                 length: 2,
         }
-        assert.True(t, set.Difference(other).Equals(expected))
+        assert.True(t, s.Difference(other).Equals(expected))
 
         expected = &Set[string]{
                 entries: map[string]struct{}{
@@ -197,7 +211,7 @@ func TestLogicalSetOperations(t *testing.T) {
                 },
                 length: 7,
         }
-        assert.True(t, set.Union(other).Equals(expected))
+        assert.True(t, s.Union(other).Equals(expected))
 
         // test the sets with imbalanced lengths
         other = &Set[string]{
@@ -208,7 +222,7 @@ func TestLogicalSetOperations(t *testing.T) {
                 length: 2,
         }
 
-        assert.Equal(t, other.Intersection(set).Len(), uint64(1))
-        assert.Equal(t, other.Union(set).Len(), uint64(6))
-        assert.False(t, other.Equals(set))
+        assert.Equal(t, 1, other.Intersection(s).Len())
+        assert.Equal(t, 6, other.Union(s).Len())
+        assert.False(t, other.Equals(s))
 }

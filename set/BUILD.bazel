@@ -1,0 +1,19 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "set",
+    srcs = ["set.go"],
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "set_test",
+    srcs = [
+        "set_test.go",
+        "set.go",
+    ],
+    deps = [
+        "@com_github_stretchr_testify//assert:assert",
+    ],
+    visibility = ["//:__subpackages__"],
+)

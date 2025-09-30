@@ -1,0 +1,19 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "maps",
+    srcs = ["maps.go"],
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "maps_test",
+    srcs = [
+        "maps_test.go",
+        "maps.go",
+    ],
+    deps = [
+        "@com_github_stretchr_testify//assert:assert",
+    ],
+    visibility = ["//:__subpackages__"],
+)

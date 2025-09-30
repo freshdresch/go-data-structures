@@ -21,7 +21,7 @@ func TestKeys(t *testing.T) {
         })
 
         expected := []string{"a", "b", "c", "d"}
-        assert.Equal(t, actual, expected)
+        assert.Equal(t, expected, actual)
 }
 
 func TestValues(t *testing.T) {
@@ -32,7 +32,7 @@ func TestValues(t *testing.T) {
 
         // need to respect the stable order
         expected := []string{"1", "2", "2", "3"}
-        assert.Equal(t, actual, expected)
+        assert.Equal(t, expected, actual)
 }
 
 func TestInvert(t *testing.T) {
@@ -53,7 +53,7 @@ func TestInvert(t *testing.T) {
 
         inverted, err := Invert(m)
         assert.NoError(t, err)
-        assert.Equal(t, inverted, expected)
+        assert.Equal(t, expected, inverted)
 }
 
 func TestMerge(t *testing.T) {

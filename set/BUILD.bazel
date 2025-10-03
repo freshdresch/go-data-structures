@@ -8,10 +8,8 @@ go_library(
 
 go_test(
     name = "set_test",
-    srcs = [
-        "set_test.go",
-        "set.go",
-    ],
+    srcs = ["set_test.go"],
+    embed = [":set"],
     deps = [
         "@com_github_stretchr_testify//assert:assert",
     ],

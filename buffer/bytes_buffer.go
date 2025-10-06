@@ -39,9 +39,7 @@ func (b *BytesBuffer) Read(p []byte) (int, error) {
                 return 0, io.EOF
         }
         n := copy(p, b.Slice())
-        b.Truncate(b.Len() - n) // shrink from the front
-        // Shift contents down (not the fastest, but safe for now)
-        copy(b.data, b.data[n:b.len+n])
+        b.Consume(n)
         return n, nil
 }
 

@@ -178,48 +178,53 @@ func (b *Buffer[T]) Append(vals ...T) {
 // Grow increases logical length by n and returns a slice to fill.
 // It panics if capacity would be exceeded.
 func (b *Buffer[T]) Grow(n int) []T {
-        if n < 0 {
-                panic("buffer: negative grow")
-        } else if b.len + n > cap(b.data) {
-                panic("buffer: grow would exceed capacity")
-        }
-
-        tail := cap(b.data) - (b.start + b.len)
-        if tail < n {
-                if cap(b.data) - b.len >= n {
-                        b.Compact()
-                } else {
-                        panic("buffer: grow would exceed capacity")
-                }
-        }
-
-        start := b.start + b.len
-        end := start + n
-        b.len += n
-        return b.data[start:end]
+        return b.grow(n, false)
 }
 
 // GrowAndZero increases logical length by n, zeroes that memory, and then returns it as a slice to
 // fill. It panics if capacity would be exceeded.
 func (b *Buffer[T]) GrowAndZero(n int) []T {
+        return b.grow(n, true)
+}
+
+func (b *Buffer[T]) grow(n int, shouldZero bool) []T {
         if n < 0 {
                 panic("buffer: negative grow")
         } else if b.len + n > cap(b.data) {
                 panic("buffer: grow would exceed capacity")
         }
 
+        shouldCompact := false
         tail := cap(b.data) - (b.start + b.len)
         if tail < n {
                 if cap(b.data) - b.len >= n {
-                        b.CompactAndZero()
+                        shouldCompact = true
                 } else {
                         panic("buffer: grow would exceed capacity")
+                }
+        }
+
+        if shouldCompact {
+                switch shouldZero {
+                case true:
+                        b.CompactAndZero()
+                case false:
+                        b.Compact()
                 }
         }
 
         start := b.start + b.len
         end := start + n
         b.len += n
+
+        // If we didn't do a compact, then we still need to zero the entries
+        if shouldZero && !shouldCompact {
+                var zero T
+                for i := start; i < end; i++ {
+                        b.data[i] = zero
+                }
+        }
+
         return b.data[start:end]
 }
 

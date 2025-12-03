@@ -430,7 +430,32 @@ func TestBuffer_Grow(t *testing.T) {
         })
 
         t.Run("cause grow to compact", func(t *testing.T) {
-                // TODO
+                b := makeBuffer[int](t, []int{0, 1, 2, 3, 4, 5, 6, 7}, 8)
+
+                // Manually shift start so a compaction is necessary
+                b.start = 1
+                b.len = 4
+                require.Equal(t, []int{1, 2, 3, 4}, b.Slice())
+
+                // Only 3 slots in the tail, so growing by 4 requires compacting.
+                growSlice := b.Grow(4)
+
+                // After compaction:
+                //  - [1, 2, 3, 4] was copied to the front of the slice.
+                //  - The fifth entry is the old location of '4' before the copy, and it will not be
+                //    overwritten, so it should be another '4'.
+                //  - The rest of the slice should have the pre-existing contents [5, 6, 7].
+                assert.Equal(t, 8, b.Len())
+                assert.Equal(t, 4, len(growSlice))
+                assert.Equal(t, []int{1, 2, 3, 4, 4, 5, 6, 7}, b.Slice())
+
+                // Ensure the returned slice is writable and correctly mapped
+                growSlice[0] = 5
+                growSlice[1] = 6
+                growSlice[2] = 7
+                growSlice[3] = 8
+
+                assert.Equal(t, []int{1, 2, 3, 4, 5, 6, 7, 8}, b.Slice())
         })
 
         t.Run("grow more elements than buffer length", func(t *testing.T) {
@@ -515,7 +540,29 @@ func TestBuffer_GrowAndZero(t *testing.T) {
         })
 
         t.Run("cause grow to compact", func(t *testing.T) {
-                // TODO
+                b := makeBuffer[int](t, []int{0, 1, 2, 3, 4}, 8)
+
+                // Manually shift start so a compaction is necessary
+                b.start = 1
+                b.len = 4
+                require.Equal(t, []int{1, 2, 3, 4}, b.Slice())
+
+                // Only 3 slots in the tail, so growing by 4 requires compacting.
+                growSlice := b.GrowAndZero(4)
+
+                // After compaction, which should move [1, 2, 3, 4] to the front and the grown
+                // region should be zeroed.
+                assert.Equal(t, 8, b.Len())
+                assert.Equal(t, 4, len(growSlice))
+                assert.Equal(t, []int{1, 2, 3, 4, 0, 0, 0, 0}, b.Slice())
+
+                // Ensure the returned slice is writable and correctly mapped
+                growSlice[0] = 5
+                growSlice[1] = 6
+                growSlice[2] = 7
+                growSlice[3] = 8
+
+                assert.Equal(t, []int{1, 2, 3, 4, 5, 6, 7, 8}, b.Slice())
         })
 
         t.Run("grow more elements than buffer length", func(t *testing.T) {

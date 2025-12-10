@@ -11,7 +11,7 @@ type Set[K comparable] struct {
 }
 
 // NewSet returns a pointer to a freshly constructed Set, instantiated to its
-// zero value.
+// NewSet creates an empty Set with an initialized internal map and length zero.
 func NewSet[K comparable]() *Set[K] {
 	return &Set[K]{
 		entries: make(map[K]struct{}),
@@ -20,7 +20,8 @@ func NewSet[K comparable]() *Set[K] {
 }
 
 // NewSetFromSlice returns a pointer to a freshly constructed Set, instantiated
-// to the contents of the input slice.
+// NewSetFromSlice creates a new Set containing the elements from the provided slice.
+// Duplicate values in keys are ignored and the returned Set contains each distinct element at most once.
 func NewSetFromSlice[K comparable](keys []K) *Set[K] {
 	s := Set[K]{
 		entries: make(map[K]struct{}),

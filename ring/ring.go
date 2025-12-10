@@ -42,18 +42,25 @@ type Ring[T any] struct {
 
 type RingOption[T any] func(*Ring[T])
 
+// WithMultiProdEnqueue returns a RingOption that enables multi-producer enqueue semantics for a Ring.
+// The option configures the ring to allow multiple concurrent producers to perform enqueues.
 func WithMultiProdEnqueue[T any]() RingOption[T] {
 	return func(ring *Ring[T]) {
 		ring.multiProdEnqueue = true
 	}
 }
 
+// Apply the returned option to a Ring (for example via NewRing) to allow multiple goroutines to dequeue concurrently.
 func WithMultiConsDequeue[T any]() RingOption[T] {
 	return func(ring *Ring[T]) {
 		ring.multiConsDequeue = true
 	}
 }
 
+// NewRing creates and initializes a fixed-size ring buffer with the specified element count.
+// The count must be a power of two and at least 2; the ring's usable capacity is count-1.
+// Optional RingOption values may be provided to enable multi-producer or multi-consumer behavior.
+// Returns a pointer to the initialized Ring[T] or an error when the count validation fails.
 func NewRing[T any](count uint32, opts ...RingOption[T]) (*Ring[T], error) {
 	if count < 2 || (count&(count-1)) != 0 {
 		return nil, fmt.Errorf("count must be a power of two and >= 2; got %d", count)
@@ -521,18 +528,10 @@ func (ring *Ring[T]) moveConsHead(
 	return numItems, filledEntries
 }
 
-/**
- * updateTail updates the tail for the ring. Since it takes an arbitrary ring, it can handle both
- * enqueue (passing the producer tail) and dequeue (passing the consumer tail).
- *
- * Params:
- *   tailPtr - a pointer to ring's tail index that should be moved.
- *   multi - whether this ring operation supports multiple producers/consumers.
- *   oldTail - the tail value that we need to see in order to start our tail update. In the multiple
- *       producer/consumer case, we must wait for operations in front of us to update the tail before
- *       we can go.
- *   newTail - the tail value that we are updating the ring tail to reflect.
- */
+// updateTail updates the given tail index for enqueue or dequeue operations on the ring.
+// If multi is true, it waits for preceding operations to complete and atomically advances tailPtr
+// from oldTail to newTail, yielding the processor between attempts.
+// If multi is false, it sets tailPtr to newTail directly.
 func updateTail(
 	tailPtr *uint32,
 	multi bool,
@@ -551,6 +550,7 @@ func updateTail(
 	atomic.StoreUint32(tailPtr, newTail)
 }
 
+// updateValidPtr sets the value pointed to by ptr to val if ptr is non-nil; otherwise it does nothing.
 func updateValidPtr(ptr *uint32, val uint32) {
 	if ptr == nil {
 		return
@@ -558,6 +558,7 @@ func updateValidPtr(ptr *uint32, val uint32) {
 	*ptr = val
 }
 
+// getZeroVal returns the zero (default-initialized) value for the type parameter T.
 func getZeroVal[T any]() T {
 	var zval T
 	return zval

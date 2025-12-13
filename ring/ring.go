@@ -14,10 +14,6 @@ import (
 // acquire/release fences, and ordering guarantees that the DPDK C implementation leverages. We try
 // to be as performant as we can, in the face of working only in the realm of sequential consistency.
 //
-// Performance notes:
-//   - SPSC path is 2 atomic stores + 2 atomic loads
-//   - MPMC path is 1 compare-and-swap + 1 atomic store
-//
 // The ring defaults to an SPSC queue in the base implementation, and multi-producer/multi-consumer
 // semantics can be added through functional options. For example: to create an MPMC queue,
 // initialize the ring with both the multi-producer and multi-consumer options.
@@ -165,10 +161,10 @@ func (ring *Ring[T]) Empty() bool {
  *   `nil` if the element was successfully enqueued, or an error explaining why if not.
  */
 func (ring *Ring[T]) Enqueue(element T) error {
-	elems := make([]T, 1)
+	var elems [1]T
 	elems[0] = element
 
-	numEnqueued := ring.doEnqueue(elems, 1, nil, true)
+	numEnqueued := ring.doEnqueue(elems[:], 1, nil, true)
 	if numEnqueued != 1 {
 		return errors.New("no space in the ring")
 	}
@@ -326,16 +322,16 @@ func (ring *Ring[T]) doEnqueue(
 
 	// enqueue the elements -- first contiguous chunk
 	for i := uint32(0); i < end; i++ {
-		ring.entries[int(base+i)] = elems[i]
+		ring.entries[int(base+i)] = elems[int(i)]
 	}
 
 	// second chunk if wrapped
 	for i := end; i < numEntries; i++ {
-		ring.entries[int(i-end)] = elems[i]
+		ring.entries[int(i-end)] = elems[int(i)]
 	}
 
 	// ensure in-order publication
-	if r.multiProd {
+	if ring.multiProd {
 		for atomic.LoadUint32(ring.prodTail) != head {
 			runtime.Gosched()
 		}
@@ -365,7 +361,7 @@ func (ring *Ring[T]) doDequeue(
 		return nil, uint32(0)
 	}
 
-	elems := make([]T, numElems)
+	elems := make([]T, int(numElems))
 
 	base := head & ring.mask
 	end := ring.size - base
@@ -375,16 +371,16 @@ func (ring *Ring[T]) doDequeue(
 
 	// dequeue the elements -- first chunk
 	for i := uint32(0); i < end; i++ {
-		elems[i] = ring.entries[base+i]
+		elems[int(i)] = ring.entries[int(base+i)]
 	}
 
 	// second chunk if wrapped
 	for i := end; i < numElems; i++ {
-		elems[i] = ring.entries[i-end]
+		elems[int(i)] = ring.entries[int(i-end)]
 	}
 
 	// ensure in-order consumption
-	if r.multiCons {
+	if ring.multiCons {
 		for atomic.LoadUint32(ring.consTail) != head {
 			runtime.Gosched()
 		}

@@ -21,20 +21,20 @@ func TestRingCreation(t *testing.T) {
 	simple, err := NewRing[uintptr](64)
 	assert.NoError(t, err)
 	assertNewRing[uintptr](t, simple, 64)
-	assert.False(t, simple.multiProdEnqueue)
-	assert.False(t, simple.multiConsDequeue)
+	assert.False(t, simple.multiProd)
+	assert.False(t, simple.multiCons)
 
 	mpsc, err := NewRing[uintptr](64, WithMultiProdEnqueue[uintptr]())
 	assert.NoError(t, err)
 	assertNewRing[uintptr](t, mpsc, 64)
-	assert.True(t, mpsc.multiProdEnqueue)
-	assert.False(t, mpsc.multiConsDequeue)
+	assert.True(t, mpsc.multiProd)
+	assert.False(t, mpsc.multiCons)
 
 	spmc, err := NewRing[uintptr](64, WithMultiConsDequeue[uintptr]())
 	assert.NoError(t, err)
 	assertNewRing[uintptr](t, spmc, 64)
-	assert.False(t, spmc.multiProdEnqueue)
-	assert.True(t, spmc.multiConsDequeue)
+	assert.False(t, spmc.multiProd)
+	assert.True(t, spmc.multiCons)
 
 	mpmc, err := NewRing[uintptr](
 		64,
@@ -43,8 +43,8 @@ func TestRingCreation(t *testing.T) {
 	)
 	assert.NoError(t, err)
 	assertNewRing[uintptr](t, mpmc, 64)
-	assert.True(t, mpmc.multiProdEnqueue)
-	assert.True(t, mpmc.multiConsDequeue)
+	assert.True(t, mpmc.multiProd)
+	assert.True(t, mpmc.multiCons)
 
 	large, err := NewRing[uintptr](1 << 16)
 	assert.NoError(t, err)
@@ -390,6 +390,81 @@ func TestRingBufferMultipleWraparounds(t *testing.T) {
 		assert.Equal(t, buffer.Free(), uint32(buflen-1))
 		assert.Equal(t, buffer.Count(), uint32(0))
 	}
+}
+
+func TestMPMC_OutOfOrderPublication(t *testing.T) {
+	const ringSize = 8
+
+	r, err := NewRing[int](
+		ringSize,
+		WithMultiProdEnqueue[int](),
+		WithMultiConsDequeue[int](),
+	)
+	require.NoError(t, err)
+
+	start := make(chan struct{})
+	prodAReady := make(chan struct{})
+
+	// Producer A: enqueue first, then stall
+	go func() {
+		<-start
+
+		_ = r.Enqueue(1)
+
+		// Signal that A has completed its enqueue attempt
+		close(prodAReady)
+	}()
+
+	// Producer B: wait until A has gone first
+	go func() {
+		<-start
+		<-prodAReady
+
+		_ = r.Enqueue(2)
+	}()
+
+	results := make(chan int, 2)
+
+	// Consumer: dequeue both
+	go func() {
+		<-start
+		for i := 0; i < 2; i++ {
+			v, _ := r.Dequeue()
+			results <- v
+		}
+	}()
+
+	// Start everything
+	close(start)
+
+	got := make([]int, 0, 2)
+	timeout := time.After(2 * time.Second)
+
+	for len(got) < 2 {
+		select {
+		case v := <-results:
+			got = append(got, v)
+		case <-timeout:
+			t.Fatal("timed out waiting for dequeue results")
+		}
+	}
+
+	// Validate: no unpublished (zero) values
+	for _, v := range got {
+		if v == 0 {
+			t.Fatalf("observed zero value (unpublished slot): %+v", got)
+		}
+	}
+
+	// Validate contents
+	set := map[int]struct{}{}
+	for _, v := range got {
+		set[v] = struct{}{}
+	}
+
+	assert.Len(t, set, 2)
+	assert.Contains(t, set, 1)
+	assert.Contains(t, set, 2)
 }
 
 func BenchmarkSPSCRingBufferSeq(b *testing.B) {

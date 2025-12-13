@@ -16,6 +16,9 @@ func NewBytesBuffer(cap int) *BytesBuffer {
 
 // Write appends bytes (satisfies io.Writer).
 func (b *BytesBuffer) Write(p []byte) (int, error) {
+	if b.Len()+len(p) > b.Cap() {
+		return 0, io.ErrShortBuffer
+	}
 	b.Append(p...)
 	return len(p), nil
 }

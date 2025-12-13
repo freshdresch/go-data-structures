@@ -3,6 +3,7 @@ package ring
 import (
 	"errors"
 	"fmt"
+	"runtime"
 	"sync/atomic"
 )
 
@@ -41,8 +42,8 @@ type Ring[T any] struct {
 	mask     uint32 /* Mask for bounding the index of the ring. */
 	capacity uint32 /* Usable slots in the ring. */
 
-	multiProdEnqueue bool /* Multi-Producer enqueue instead of single. */
-	multiConsDequeue bool /* Multi-Consumer dequeue instead of single. */
+	multiProd bool /* Multi-Producer enqueue instead of single. */
+	multiCons bool /* Multi-Consumer dequeue instead of single. */
 
 	_ [2]byte /* padding for better cache alignment */
 }
@@ -51,13 +52,13 @@ type RingOption[T any] func(*Ring[T])
 
 func WithMultiProdEnqueue[T any]() RingOption[T] {
 	return func(ring *Ring[T]) {
-		ring.multiProdEnqueue = true
+		ring.multiProd = true
 	}
 }
 
 func WithMultiConsDequeue[T any]() RingOption[T] {
 	return func(ring *Ring[T]) {
-		ring.multiConsDequeue = true
+		ring.multiCons = true
 	}
 }
 
@@ -303,7 +304,7 @@ func (ring *Ring[T]) doEnqueue(
 	elems []T,
 	numElems uint32,
 	freeSpace *uint32,
-	fixedEnqueue bool,
+	fixed bool,
 ) uint32 {
 	var (
 		head uint32
@@ -311,7 +312,7 @@ func (ring *Ring[T]) doEnqueue(
 	)
 
 	// get the number of entries that we have space to accommodate
-	numEntries, freeBefore := ring.moveProdHead(numElems, &head, &next, fixedEnqueue)
+	numEntries, freeBefore := ring.moveProdHead(numElems, &head, &next, fixed)
 	if numEntries == 0 {
 		updateValidPtr(freeSpace, freeBefore)
 		return 0
@@ -331,6 +332,13 @@ func (ring *Ring[T]) doEnqueue(
 	// second chunk if wrapped
 	for i := end; i < numEntries; i++ {
 		ring.entries[int(i-end)] = elems[i]
+	}
+
+	// ensure in-order publication
+	if r.multiProd {
+		for atomic.LoadUint32(ring.prodTail) != head {
+			runtime.Gosched()
+		}
 	}
 
 	// atomic store acts as release barrier
@@ -373,6 +381,13 @@ func (ring *Ring[T]) doDequeue(
 	// second chunk if wrapped
 	for i := end; i < numElems; i++ {
 		elems[i] = ring.entries[i-end]
+	}
+
+	// ensure in-order consumption
+	if r.multiCons {
+		for atomic.LoadUint32(ring.consTail) != head {
+			runtime.Gosched()
+		}
 	}
 
 	// update the tail after a successful dequeue
@@ -424,7 +439,7 @@ func (ring *Ring[T]) moveProdHead(
 
 		next := head + numItems
 
-		if ring.multiProdEnqueue {
+		if ring.multiProd {
 			if atomic.CompareAndSwapUint32(ring.prodHead, head, next) {
 				*oldHead = head
 				*newHead = next
@@ -468,7 +483,7 @@ func (ring *Ring[T]) moveConsHead(
 	)
 
 	maxItems := numItems
-	multiCons := ring.multiConsDequeue
+	multiCons := ring.multiCons
 
 	for {
 		head = atomic.LoadUint32(ring.consHead)

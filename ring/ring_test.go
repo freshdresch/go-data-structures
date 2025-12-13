@@ -2,6 +2,7 @@ package ring
 
 import (
 	"fmt"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -429,8 +430,14 @@ func TestMPMC_OutOfOrderPublication(t *testing.T) {
 	go func() {
 		<-start
 		for i := 0; i < 2; i++ {
-			v, _ := r.Dequeue()
-			results <- v
+			for {
+				v, err := r.Dequeue()
+				if err == nil {
+					results <- v
+					break
+				}
+				runtime.Gosched() // yield and retry
+			}
 		}
 	}()
 

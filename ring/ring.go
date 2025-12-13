@@ -31,7 +31,7 @@ type Ring[T any] struct {
 	prodHead *uint32 /* The head index for the producer: used for reservation. */
 	prodTail *uint32 /* The tail index for the producer: used for publication. */
 
-	consHead *uint32 /* The head index for the consumer. used for reservation*/
+	consHead *uint32 /* The head index for the consumer: used for reservation*/
 	consTail *uint32 /* The tail index for the consumer: used for publication. */
 
 	size     uint32 /* Backing array length. */

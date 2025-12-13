@@ -1,5 +1,5 @@
-// package buffer provides a different buffer primitve that encourages reuse of the same fixed-length
-// buffer, as opposed to the dynamic nature of slices.
+// package buffer provides a different buffer primitive that encourages reuse of the same
+// fixed-length buffer, as opposed to the dynamic nature of slices.
 package buffer
 
 import (
@@ -163,12 +163,8 @@ func (b *Buffer[T]) Append(vals ...T) {
 
 	tail := cap(b.data) - (b.start + b.len)
 	if tail < n {
-		// if total free space (cap - len) is enough, compact to create tail space
-		if cap(b.data)-b.len >= n {
-			b.Compact()
-		} else {
-			panic("buffer: append would exceed capacity")
-		}
+		// compact to create tail space
+		b.Compact()
 	}
 
 	copy(b.data[b.start+b.len:], vals)

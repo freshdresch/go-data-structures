@@ -15,7 +15,7 @@ go_test(
     srcs = [
         "buffer_test.go",
         "bytes_buffer_test.go",
-	"pool_test.go",
+        "pool_test.go",
     ],
     embed = [":buffer"],
     deps = [

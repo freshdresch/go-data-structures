@@ -4,6 +4,7 @@ package buffer
 
 import (
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"testing"
 )
 
@@ -16,7 +17,9 @@ func TestBytesBuffer(t *testing.T) {
 	assert.Equal(t, "hello world!", bb.String())
 
 	p := make([]byte, 5)
-	n, _ := bb.Read(p)
+	n, err := bb.Read(p)
+	require.NoError(t, err)
+
 	assert.Equal(t, "hello", string(p[:n]))
 	assert.Equal(t, " world!", bb.String())
 }

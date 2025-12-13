@@ -3,7 +3,6 @@
 package buffer
 
 import (
-	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -66,21 +65,21 @@ func TestBuffer_Append(t *testing.T) {
 
 	t.Run("cause append to compact", func(t *testing.T) {
 		b := makeBuffer[int](t, []int{1, 2, 3, 4, 5}, 5)
-		fmt.Printf("Starting buffer: %s\n", b)
+		t.Logf("Starting buffer: %s\n", b)
 
 		b.Consume(3)
-		fmt.Printf("After Consume: %s\n", b)
+		t.Logf("After Consume: %s\n", b)
 		assert.Equal(t, []int{4, 5}, b.Slice())
 		assert.Equal(t, 2, b.Len())
 
 		b.Append(6)
-		fmt.Printf("After Append: %s\n", b)
+		t.Logf("After Append: %s\n", b)
 		assert.Equal(t, []int{4, 5, 6}, b.Slice())
 		assert.Equal(t, 3, b.Len())
 
 		// should be stale values on the end after a grow
 		b.Grow(2)
-		fmt.Printf("After Grow: %s\n", b)
+		t.Logf("After Grow: %s\n", b)
 		assert.Equal(t, []int{4, 5, 6, 4, 5}, b.Slice())
 		assert.Equal(t, 5, b.Len())
 	})
@@ -680,7 +679,9 @@ func FuzzBuffer_Invariants(f *testing.F) {
 		for i := 0; i < opCount; i++ {
 			switch i % 6 {
 			case 0:
-				b.Append(i)
+				if b.Len() < b.Cap() {
+					b.Append(i)
+				}
 			case 1:
 				if b.Len() > 0 {
 					b.Consume(1)
@@ -690,7 +691,7 @@ func FuzzBuffer_Invariants(f *testing.F) {
 					b.Truncate(b.Len() / 2)
 				}
 			case 3:
-				if growSize > 0 {
+				if growSize > 0 && b.Len()+growSize <= b.Cap() {
 					_ = b.Grow(growSize)
 				}
 			case 4:

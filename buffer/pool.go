@@ -7,14 +7,12 @@ import "sync"
 // Pool manages reusable Buffers of a fixed capacity.
 type Pool[T any] struct {
 	pool  sync.Pool
-	cap   int
 	clear bool // whether to wipe the buffer contents before returning to the pool
 }
 
 // NewPool creates a pool of Buffers with the given capacity.
-func NewPool[T any](poolCap, bufCap int, clear bool) *Pool[T] {
+func NewPool[T any](bufCap int, clear bool) *Pool[T] {
 	return &Pool[T]{
-		cap:   poolCap,
 		clear: clear,
 		pool: sync.Pool{
 			New: func() any {

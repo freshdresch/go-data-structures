@@ -8,10 +8,8 @@ import (
 )
 
 func TestBufferPool(t *testing.T) {
-	// buffer pool of size 1 to make sure we return the same buffer
-	numBufs := 1
 	bufLen := 256
-	p := NewPool[int](numBufs, bufLen, true)
+	p := NewPool[int](bufLen, true)
 
 	buf := p.Get()
 	buf.Append(42, 99)

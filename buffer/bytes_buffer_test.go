@@ -3,20 +3,20 @@
 package buffer
 
 import (
-        "testing"
-        "github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/assert"
+	"testing"
 )
 
 func TestBytesBuffer(t *testing.T) {
-        bb := NewBytesBuffer(64)
-        bb.WriteString("hello ")
-        bb.Write([]byte("world"))
-        bb.WriteByte('!')
+	bb := NewBytesBuffer(64)
+	bb.WriteString("hello ")
+	bb.Write([]byte("world"))
+	bb.WriteByte('!')
 
-        assert.Equal(t, "hello world!", bb.String())
+	assert.Equal(t, "hello world!", bb.String())
 
-        p := make([]byte, 5)
-        n, _ := bb.Read(p)
-        assert.Equal(t, "hello", string(p[:n]))
-        assert.Equal(t, " world!", bb.String())
+	p := make([]byte, 5)
+	n, _ := bb.Read(p)
+	assert.Equal(t, "hello", string(p[:n]))
+	assert.Equal(t, " world!", bb.String())
 }

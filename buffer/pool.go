@@ -6,35 +6,35 @@ import "sync"
 
 // Pool manages reusable Buffers of a fixed capacity.
 type Pool[T any] struct {
-        pool  sync.Pool
-        cap   int
-        clear bool // whether to wipe the buffer contents before returning to the pool
+	pool  sync.Pool
+	cap   int
+	clear bool // whether to wipe the buffer contents before returning to the pool
 }
 
 // NewPool creates a pool of Buffers with the given capacity.
 func NewPool[T any](poolCap, bufCap int, clear bool) *Pool[T] {
-        return &Pool[T]{
-                cap:   poolCap,
-                clear: clear,
-                pool:  sync.Pool{
-                        New: func() any {
-                                return NewBuffer[T](bufCap)
-                        },
-                },
-        }
+	return &Pool[T]{
+		cap:   poolCap,
+		clear: clear,
+		pool: sync.Pool{
+			New: func() any {
+				return NewBuffer[T](bufCap)
+			},
+		},
+	}
 }
 
 // Get retrieves a Buffer from the pool.
 func (p *Pool[T]) Get() *Buffer[T] {
-        return p.pool.Get().(*Buffer[T])
+	return p.pool.Get().(*Buffer[T])
 }
 
 // Put returns a Buffer to the pool (reset before returning).
 func (p *Pool[T]) Put(b *Buffer[T]) {
-        if p.clear {
-                b.ResetAndZero()
-        } else {
-                b.Reset()
-        }
-        p.pool.Put(b)
+	if p.clear {
+		b.ResetAndZero()
+	} else {
+		b.Reset()
+	}
+	p.pool.Put(b)
 }

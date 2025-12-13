@@ -3,25 +3,25 @@
 package buffer
 
 import (
-        "testing"
-        "github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/assert"
+	"testing"
 )
 
 func TestBufferPool(t *testing.T) {
-        // buffer pool of size 1 to make sure we return the same buffer
-        numBufs := 1
-        bufLen := 256
-        p := NewPool[int](numBufs, bufLen, true)
+	// buffer pool of size 1 to make sure we return the same buffer
+	numBufs := 1
+	bufLen := 256
+	p := NewPool[int](numBufs, bufLen, true)
 
-        buf := p.Get()
-        buf.Append(42, 99)
-        assert.Equal(t, []int{42, 99}, buf.Slice())
+	buf := p.Get()
+	buf.Append(42, 99)
+	assert.Equal(t, []int{42, 99}, buf.Slice())
 
-        p.Put(buf)
+	p.Put(buf)
 
-        buf = p.Get()
-        assert.Equal(t, []int{}, buf.Slice())
+	buf = p.Get()
+	assert.Equal(t, []int{}, buf.Slice())
 
-        buf.Grow(2)
-        assert.Equal(t, []int{0, 0}, buf.Slice())
+	buf.Grow(2)
+	assert.Equal(t, []int{0, 0}, buf.Slice())
 }

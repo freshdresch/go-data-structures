@@ -193,11 +193,7 @@ func (b *Buffer[T]) grow(n int, shouldZero bool) []T {
 	shouldCompact := false
 	tail := cap(b.data) - (b.start + b.len)
 	if tail < n {
-		if cap(b.data)-b.len >= n {
-			shouldCompact = true
-		} else {
-			panic("buffer: grow would exceed capacity")
-		}
+		shouldCompact = true
 	}
 
 	if shouldCompact {
@@ -250,17 +246,11 @@ func (b *Buffer[T]) CompactAndZero() {
 	oldLen := b.len
 	copy(b.data[0:oldLen], b.data[oldStart:oldStart+oldLen])
 
-	// Zero out the old region after the copy
+	// Zero everything after the new live region
 	var zero T
-	for i := oldLen; i < oldStart+oldLen; i++ {
+	for i := oldLen; i < cap(b.data); i++ {
 		b.data[i] = zero
 	}
-
-	// Zero out the region before the old start that isn't overwritten
-	for i := b.len; i < oldStart; i++ {
-		b.data[i] = zero
-	}
-
 	b.start = 0
 }
 

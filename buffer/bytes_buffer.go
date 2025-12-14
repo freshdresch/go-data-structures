@@ -16,11 +16,18 @@ func NewBytesBuffer(capacity int) *BytesBuffer {
 
 // Write appends bytes (satisfies io.Writer).
 func (b *BytesBuffer) Write(p []byte) (int, error) {
-	if b.Len()+len(p) > b.Cap() {
-		return 0, io.ErrShortBuffer
+	avail := b.Cap() - b.Len()
+	if avail < len(p) {
+		b.Append(p[:avail]...)
+		return avail, io.ErrShortBuffer
 	}
 	b.Append(p...)
 	return len(p), nil
+}
+
+// WriteString appends a string (like bytes.Buffer.WriteString).
+func (b *BytesBuffer) WriteString(s string) (int, error) {
+	return b.Write([]byte(s))
 }
 
 // WriteByte appends a single byte.
@@ -30,15 +37,6 @@ func (b *BytesBuffer) WriteByte(c byte) error {
 	}
 	b.Append(c)
 	return nil
-}
-
-// WriteString appends a string (like bytes.Buffer.WriteString).
-func (b *BytesBuffer) WriteString(s string) (int, error) {
-	if b.Len()+len(s) > b.Cap() {
-		return 0, io.ErrShortBuffer
-	}
-	b.Append([]byte(s)...)
-	return len(s), nil
 }
 
 // Read reads up to len(p) bytes into p, consuming from the front.

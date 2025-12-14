@@ -29,6 +29,10 @@ func (p *Pool[T]) Get() *Buffer[T] {
 
 // Put returns a Buffer to the pool (reset before returning).
 func (p *Pool[T]) Put(b *Buffer[T]) {
+	if b == nil {
+		return
+	}
+
 	if p.clear {
 		b.ResetAndZero()
 	} else {

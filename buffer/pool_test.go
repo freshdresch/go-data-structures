@@ -8,8 +8,8 @@ import (
 )
 
 func TestBufferPool(t *testing.T) {
-	bufLen := 256
-	p := NewPool[int](bufLen, true)
+	cap := 256
+	p := NewPool[int](cap, true)
 
 	buf := p.Get()
 	buf.Append(42, 99)
@@ -18,7 +18,7 @@ func TestBufferPool(t *testing.T) {
 	p.Put(buf)
 
 	buf = p.Get()
-	assert.Equal(t, []int{}, buf.Slice())
+	assert.Empty(t, buf.Slice())
 
 	buf.Grow(2)
 	assert.Equal(t, []int{0, 0}, buf.Slice())

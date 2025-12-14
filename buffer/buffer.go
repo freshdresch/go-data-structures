@@ -1,5 +1,5 @@
 // package buffer provides a different buffer primitive that encourages reuse of the same
-// fixed-length buffer, as opposed to the dynamic nature of slices.
+// fixed-capacity buffer, as opposed to the dynamic nature of slices.
 package buffer
 
 import (
@@ -129,6 +129,10 @@ func (b *Buffer[T]) ConsumeRight(n int) {
 		panic("buffer: consume out of range")
 	}
 	b.len -= n
+	if b.len == 0 {
+		// collapse offset when empty to avoid unbounded growth of start
+		b.start = 0
+	}
 }
 
 // ConsumeRightAndZero removes n elements from the end of the live region
@@ -144,7 +148,12 @@ func (b *Buffer[T]) ConsumeRightAndZero(n int) {
 	for i := 0; i < n; i++ {
 		b.data[zeroStart+i] = zero
 	}
+
 	b.len -= n
+	if b.len == 0 {
+		// collapse offset when empty to avoid unbounded growth of start
+		b.start = 0
+	}
 }
 
 // Append adds vals onto the end of the buffer.

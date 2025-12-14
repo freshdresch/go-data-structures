@@ -19,6 +19,7 @@ func TestBytesBuffer(t *testing.T) {
 	p := make([]byte, 5)
 	n, err := bb.Read(p)
 	require.NoError(t, err)
+	assert.Equal(t, 5, n)
 
 	assert.Equal(t, "hello", string(p[:n]))
 	assert.Equal(t, " world!", bb.String())

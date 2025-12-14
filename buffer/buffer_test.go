@@ -1,4 +1,4 @@
-// package buffer provides a different buffer primitve that encourages reuse of the same fixed-length
+// package buffer provides a different buffer primitive that encourages reuse of the same fixed-capacity
 // buffer, as opposed to the dynamic nature of slices.
 package buffer
 

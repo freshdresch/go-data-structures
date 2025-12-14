@@ -10,8 +10,8 @@ type BytesBuffer struct {
 }
 
 // NewBytesBuffer creates a new BytesBuffer with the given capacity and options.
-func NewBytesBuffer(cap int) *BytesBuffer {
-	return &BytesBuffer{Buffer: NewBuffer[byte](cap)}
+func NewBytesBuffer(capacity int) *BytesBuffer {
+	return &BytesBuffer{Buffer: NewBuffer[byte](capacity)}
 }
 
 // Write appends bytes (satisfies io.Writer).

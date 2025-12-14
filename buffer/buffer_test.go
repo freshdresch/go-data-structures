@@ -704,9 +704,9 @@ func FuzzBuffer_Invariants(f *testing.F) {
 	})
 }
 
-func makeBuffer[T any](t *testing.T, vals []T, cap int) *Buffer[T] {
+func makeBuffer[T any](t *testing.T, vals []T, capacity int) *Buffer[T] {
 	t.Helper()
-	b := NewBuffer[T](cap)
+	b := NewBuffer[T](capacity)
 	require.NotNil(t, b)
 	b.Append(vals...)
 	return b

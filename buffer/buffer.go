@@ -16,12 +16,12 @@ type Buffer[T any] struct {
 }
 
 // NewBuffer creates a Buffer with the given capacity.
-func NewBuffer[T any](cap int) *Buffer[T] {
-	if cap < 0 {
+func NewBuffer[T any](capacity int) *Buffer[T] {
+	if capacity < 0 {
 		panic("buffer: negative capacity")
 	}
 	return &Buffer[T]{
-		data: make([]T, cap),
+		data: make([]T, capacity),
 	}
 }
 

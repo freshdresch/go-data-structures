@@ -8,8 +8,8 @@ import (
 )
 
 func TestBufferPool(t *testing.T) {
-	cap := 256
-	p := NewPool[int](cap, true)
+	capacity := 256
+	p := NewPool[int](capacity, true)
 
 	buf := p.Get()
 	buf.Append(42, 99)

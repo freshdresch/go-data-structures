@@ -7,6 +7,7 @@ go_library(
     srcs = [],
     importpath = "github.com/freshdresch/go-data-structures",
     deps = [
+        "//buffer",
         "//maps",
         "//ring",
         "//set",

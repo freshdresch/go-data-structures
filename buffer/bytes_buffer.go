@@ -25,12 +25,18 @@ func (b *BytesBuffer) Write(p []byte) (int, error) {
 
 // WriteByte appends a single byte.
 func (b *BytesBuffer) WriteByte(c byte) error {
+	if b.Len()+1 > b.Cap() {
+		return io.ErrShortBuffer
+	}
 	b.Append(c)
 	return nil
 }
 
 // WriteString appends a string (like bytes.Buffer.WriteString).
 func (b *BytesBuffer) WriteString(s string) (int, error) {
+	if b.Len()+len(s) > b.Cap() {
+		return 0, io.ErrShortBuffer
+	}
 	b.Append([]byte(s)...)
 	return len(s), nil
 }
@@ -38,6 +44,9 @@ func (b *BytesBuffer) WriteString(s string) (int, error) {
 // Read reads up to len(p) bytes into p, consuming from the front.
 // It behaves like io.Reader.
 func (b *BytesBuffer) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
 	if b.Len() == 0 {
 		return 0, io.EOF
 	}

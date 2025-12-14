@@ -3,16 +3,35 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "ring",
     srcs = ["ring.go"],
+    importpath = "github.com/freshdresch/go-data-structures/ring",
     visibility = ["//visibility:public"],
 )
 
+# Internal tests (white-box)
 go_test(
-    name = "ring_test",
-    srcs = ["ring_test.go"],
+    name = "ring_internal_test",
+    srcs = [
+        "ring_test.go",
+    ],
     embed = [":ring"],
     deps = [
         "@com_github_stretchr_testify//assert:assert",
         "@com_github_stretchr_testify//require:require",
+    ],
+    visibility = ["//:__subpackages__"],
+)
+
+# External benchmarks (black-box)
+go_test(
+    name = "ring_bench",
+    srcs = [
+        "channel_bench_test.go",
+        "common_bench_test.go",
+        "mutex_slice_bench_test.go",
+        "ring_bench_test.go",
+    ],
+    deps = [
+        ":ring",
     ],
     visibility = ["//:__subpackages__"],
 )

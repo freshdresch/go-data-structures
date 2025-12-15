@@ -157,7 +157,7 @@ func BenchmarkChan_SPSC_Seq_Batch(b *testing.B) {
 			b.Run(
 				fmt.Sprintf("batch%d_%dB", batchSize, payloadSize),
 				func(b *testing.B) {
-					ch := make(chan [][]byte, ringSize)
+					ch := NewChanWrapper[[]byte](ringSize)
 					payload := make([][]byte, batchSize)
 					for i := range payload {
 						payload[i] = make([]byte, payloadSize)
@@ -167,8 +167,8 @@ func BenchmarkChan_SPSC_Seq_Batch(b *testing.B) {
 					b.ResetTimer()
 
 					for i := 0; i < b.N; i++ {
-						ch <- payload
-						<-ch
+						ch.EnqueueBurst(payload)
+						_ = ch.DequeueBurst(batchSize)
 					}
 				},
 			)
@@ -183,7 +183,7 @@ func BenchmarkChan_MPSC_Parallel_Batch(b *testing.B) {
 			b.Run(
 				fmt.Sprintf("batch%d_%dB", batchSize, payloadSize),
 				func(b *testing.B) {
-					ch := make(chan [][]byte, ringSize)
+					ch := NewChanWrapper[[]byte](ringSize)
 					payload := make([][]byte, batchSize)
 					for i := range payload {
 						payload[i] = make([]byte, payloadSize)
@@ -199,13 +199,13 @@ func BenchmarkChan_MPSC_Parallel_Batch(b *testing.B) {
 						go func() {
 							defer wg.Done()
 							for j := 0; j < b.N; j++ {
-								ch <- payload
+								ch.EnqueueBurst(payload)
 							}
 						}()
 					}
 
 					for i := 0; i < b.N*producers; i++ {
-						<-ch
+						_ = ch.DequeueBurst(batchSize)
 					}
 					wg.Wait()
 				},
@@ -221,7 +221,7 @@ func BenchmarkChan_SPMC_Parallel_Batch(b *testing.B) {
 			b.Run(
 				fmt.Sprintf("batch%d_%dB", batchSize, payloadSize),
 				func(b *testing.B) {
-					ch := make(chan [][]byte, ringSize)
+					ch := NewChanWrapper[[]byte](ringSize)
 					payload := make([][]byte, batchSize)
 					for i := range payload {
 						payload[i] = make([]byte, payloadSize)
@@ -237,13 +237,13 @@ func BenchmarkChan_SPMC_Parallel_Batch(b *testing.B) {
 						go func() {
 							defer wg.Done()
 							for j := 0; j < b.N; j++ {
-								<-ch
+								_ = ch.DequeueBurst(batchSize)
 							}
 						}()
 					}
 
 					for i := 0; i < b.N*consumers; i++ {
-						ch <- payload
+						ch.EnqueueBurst(payload)
 					}
 					wg.Wait()
 				},
@@ -262,7 +262,7 @@ func BenchmarkChan_MPMC_Parallel_Batch(b *testing.B) {
 			b.Run(
 				fmt.Sprintf("batch%d_%dB", batchSize, payloadSize),
 				func(b *testing.B) {
-					ch := make(chan [][]byte, ringSize)
+					ch := NewChanWrapper[[]byte](ringSize)
 					payload := make([][]byte, batchSize)
 					for i := range payload {
 						payload[i] = make([]byte, payloadSize)
@@ -279,7 +279,7 @@ func BenchmarkChan_MPMC_Parallel_Batch(b *testing.B) {
 						go func() {
 							defer prodWG.Done()
 							for j := 0; j < b.N; j++ {
-								ch <- payload
+								ch.EnqueueBurst(payload)
 							}
 						}()
 					}
@@ -288,7 +288,7 @@ func BenchmarkChan_MPMC_Parallel_Batch(b *testing.B) {
 						go func() {
 							defer consWG.Done()
 							for j := 0; j < b.N; j++ {
-								<-ch
+								_ = ch.DequeueBurst(batchSize)
 							}
 						}()
 					}

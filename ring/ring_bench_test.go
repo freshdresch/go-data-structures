@@ -240,7 +240,6 @@ func BenchmarkRing_MPSC_Parallel_Batch(b *testing.B) {
 					for i := 0; i < b.N*producers; i++ {
 						_, _ = rb.DequeueBurst(uint32(batchSize), nil)
 					}
-
 					wg.Wait()
 				},
 			)

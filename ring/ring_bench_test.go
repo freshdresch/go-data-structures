@@ -152,7 +152,7 @@ func BenchmarkRing_SPSC_Seq_Batch(b *testing.B) {
 						payload[i] = make([]byte, payloadSize)
 					}
 
-					b.SetBytes(int64(payloadSize))
+					b.SetBytes(int64(batchSize * payloadSize))
 					b.ResetTimer()
 
 					for i := 0; i < b.N; i++ {
@@ -181,7 +181,7 @@ func BenchmarkRing_SPMC_Parallel_Batch(b *testing.B) {
 						payload[i] = make([]byte, payloadSize)
 					}
 
-					b.SetBytes(int64(payloadSize))
+					b.SetBytes(int64(batchSize * payloadSize))
 					b.ResetTimer()
 
 					var wg sync.WaitGroup
@@ -222,7 +222,7 @@ func BenchmarkRing_MPSC_Parallel_Batch(b *testing.B) {
 						payload[i] = make([]byte, payloadSize)
 					}
 
-					b.SetBytes(int64(payloadSize))
+					b.SetBytes(int64(batchSize * payloadSize))
 					b.ResetTimer()
 
 					var wg sync.WaitGroup
@@ -268,7 +268,7 @@ func BenchmarkRing_MPMC_Parallel_Batch(b *testing.B) {
 						payload[i] = make([]byte, payloadSize)
 					}
 
-					b.SetBytes(int64(payloadSize))
+					b.SetBytes(int64(batchSize * payloadSize))
 					b.ResetTimer()
 
 					var (

@@ -117,13 +117,14 @@ func (s *Set[K]) Union(other *Set[K]) *Set[K] {
 	return result
 }
 
-// SymmetricDifference returns a new Set with the elements that are in exactly one of
-// the receiver and other. It is calculated as the Union minus the Intersection.
+// Disjunction returns a new Set with the elements that are in exactly one of the
+// receiver and other. This is the symmetric difference, also called the disjunctive
+// union. It is calculated as the Union minus the Intersection.
 //
-// SymmetricDifference copies the elements into a new Set, so the result does not share
-// storage with either Set. Elements are copied by value, so pointer elements still
-// point to the same values. SymmetricDifference does not modify the receiver or other.
-func (s *Set[K]) SymmetricDifference(other *Set[K]) *Set[K] {
+// Disjunction copies the elements into a new Set, so the result does not share storage
+// with either Set. Elements are copied by value, so pointer elements still point to the
+// same values. Disjunction does not modify the receiver or other.
+func (s *Set[K]) Disjunction(other *Set[K]) *Set[K] {
 	// Union returns a new Set, so the result can be modified in place afterward.
 	result := s.Union(other)
 	intersection := s.Intersection(other)

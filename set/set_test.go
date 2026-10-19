@@ -227,7 +227,7 @@ func TestLogicalSetOperations(t *testing.T) {
 			"toyota":  {},
 		},
 	}
-	assert.True(t, cars.SymmetricDifference(other).Equals(expected))
+	assert.True(t, cars.Disjunction(other).Equals(expected))
 
 	expected = &Set[string]{
 		entries: map[string]struct{}{
@@ -275,13 +275,13 @@ func TestEqualsSameLengthDifferentElements(t *testing.T) {
 	assert.False(t, FromSlice([]int{1, 2}).Equals(FromSlice([]int{1, 3})))
 }
 
-func TestSymmetricDifference(t *testing.T) {
+func TestDisjunction(t *testing.T) {
 	cars := FromSlice([]string{"porsche", "toyota", "honda"})
 	other := FromSlice([]string{"honda", "ford"})
 
 	expected := FromSlice([]string{"porsche", "toyota", "ford"})
-	assert.True(t, cars.SymmetricDifference(other).Equals(expected))
-	assert.True(t, other.SymmetricDifference(cars).Equals(expected))
+	assert.True(t, cars.Disjunction(other).Equals(expected))
+	assert.True(t, other.Disjunction(cars).Equals(expected))
 
 	// The receiver and the argument are not modified.
 	assert.Equal(t, 3, cars.Len())
@@ -289,7 +289,7 @@ func TestSymmetricDifference(t *testing.T) {
 	assert.Equal(t, 2, other.Len())
 
 	empty := New[string]()
-	assert.True(t, cars.SymmetricDifference(empty).Equals(cars))
+	assert.True(t, cars.Disjunction(empty).Equals(cars))
 }
 
 func TestZeroValueSetOperations(t *testing.T) {
@@ -305,8 +305,8 @@ func TestZeroValueSetOperations(t *testing.T) {
 		{"Intersection, zero argument", (*Set[int]).Intersection, false, []int{}},
 		{"Difference, zero receiver", (*Set[int]).Difference, true, []int{}},
 		{"Difference, zero argument", (*Set[int]).Difference, false, []int{1, 2}},
-		{"SymmetricDifference, zero receiver", (*Set[int]).SymmetricDifference, true, []int{1, 2}},
-		{"SymmetricDifference, zero argument", (*Set[int]).SymmetricDifference, false, []int{1, 2}},
+		{"Disjunction, zero receiver", (*Set[int]).Disjunction, true, []int{1, 2}},
+		{"Disjunction, zero argument", (*Set[int]).Disjunction, false, []int{1, 2}},
 	}
 
 	for _, test := range tests {

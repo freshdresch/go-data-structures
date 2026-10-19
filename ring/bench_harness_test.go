@@ -2,6 +2,7 @@ package ring_test
 
 import (
 	"fmt"
+	"math"
 	"runtime"
 	"sync/atomic"
 	"testing"
@@ -453,4 +454,180 @@ func TestGCMetric(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, total, plain.received)
 	assert.Less(t, plain.gcPerMelem, 1.0)
+}
+
+// assertWithinHistogramError checks that got is the histogram's report of want: never above it,
+// and below it by less than 1/(subBuckets+1) of want, the bound derived on histogram. A zero want
+// must be reported exactly.
+func assertWithinHistogramError(t *testing.T, want, got time.Duration) {
+	t.Helper()
+	if want == 0 {
+		assert.Equal(t, time.Duration(0), got)
+		return
+	}
+	assert.LessOrEqual(t, got, want)
+	if got > want {
+		return
+	}
+	// For integers, want-got < want/(subBuckets+1) is the same as want-got <= (want-1)/(subBuckets+1).
+	// This form stays exact and cannot overflow, unlike multiplying the difference by subBuckets+1.
+	assert.LessOrEqual(t, want-got, (want-1)/(subBuckets+1), "want %v, got %v", want, got)
+}
+
+// TestHistogram checks that percentiles come back within 1/(subBuckets+1) from 1 ns to 1 s and at
+// the edges of the value range, and that merge, count, and max agree with what was recorded.
+func TestHistogram(t *testing.T) {
+	t.Run("magnitudes", func(t *testing.T) {
+		for value := time.Duration(1); value <= time.Second; value = value*5/4 + 1 {
+			var h histogram
+			h.record(value)
+			assert.Equal(t, 1, h.count())
+			assert.Equal(t, value, h.max())
+			assertWithinHistogramError(t, value, h.percentile(50))
+		}
+	})
+	t.Run("exact", func(t *testing.T) {
+		for value := range time.Duration(2 * subBuckets) {
+			var h histogram
+			h.record(value)
+			assert.Equal(t, value, h.percentile(50))
+		}
+	})
+	t.Run("ranks", func(t *testing.T) {
+		var h histogram
+		for value := time.Duration(1); value <= 1000; value++ {
+			h.record(value)
+		}
+		assert.Equal(t, 1000, h.count())
+		assert.Equal(t, time.Duration(1000), h.max())
+		assert.Equal(t, time.Duration(1), h.percentile(0))
+		assertWithinHistogramError(t, 500, h.percentile(50))
+		assertWithinHistogramError(t, 900, h.percentile(90))
+		assertWithinHistogramError(t, 990, h.percentile(99))
+		assertWithinHistogramError(t, 999, h.percentile(99.9))
+		assertWithinHistogramError(t, 1000, h.percentile(100))
+	})
+	t.Run("exactRank", func(t *testing.T) {
+		// Catches a Floor in place of Ceil: the exact rank is 1.5, so the rank must be 2.
+		var h histogram
+		h.record(1)
+		h.record(1000)
+		h.record(1000)
+		assert.Equal(t, histogramLowest(histogramIndex(1000)), h.percentile(50))
+
+		// Checks that a fractional rank of .001 rounds up: the exact rank 998.001 must give 999.
+		var tail histogram
+		for range 998 {
+			tail.record(1)
+		}
+		tail.record(1000)
+		assert.Equal(t, histogramLowest(histogramIndex(1000)), tail.percentile(99.9))
+
+		// Catches an epsilon as large as 1e-6: exact rank 1997.001 must still round up to 1998.
+		var wide histogram
+		for range 1997 {
+			wide.record(1)
+		}
+		wide.record(1000)
+		wide.record(1000)
+		assert.Equal(t, histogramLowest(histogramIndex(1000)), wide.percentile(99.9))
+	})
+	t.Run("largeCount", func(t *testing.T) {
+		// ceil(0.999 * 20,972,000) is exactly 20,951,028. Float rounding must not push the
+		// rank to 20,951,029, which would land in the bucket of 1000 instead of 1.
+		const total = 20972000
+		const lowCount = 20951028
+		var h histogram
+		for range lowCount {
+			h.record(1)
+		}
+		for range total - lowCount {
+			h.record(1000)
+		}
+		assert.Equal(t, total, h.count())
+		assert.Equal(t, time.Duration(1), h.percentile(99.9))
+	})
+	t.Run("largeCountFraction", func(t *testing.T) {
+		// Catches an epsilon above about 1e-10: the exact rank is 20,951,026.002, so it must
+		// round up to 20,951,027, the first rank of the bucket of 1000.
+		const total = 20971998
+		const lowCount = 20951026
+		var h histogram
+		for range lowCount {
+			h.record(1)
+		}
+		for range total - lowCount {
+			h.record(1000)
+		}
+		assert.Equal(t, total, h.count())
+		assert.Equal(t, histogramLowest(histogramIndex(1000)), h.percentile(99.9))
+	})
+	t.Run("edges", func(t *testing.T) {
+		var h histogram
+		assert.Equal(t, 0, h.count())
+		assert.Equal(t, time.Duration(0), h.max())
+		assert.Equal(t, time.Duration(0), h.percentile(50))
+		h.record(0)
+		h.record(-time.Second)
+		h.record(math.MaxInt64)
+		assert.Equal(t, 3, h.count())
+		assert.Equal(t, time.Duration(math.MaxInt64), h.max())
+		assert.Equal(t, time.Duration(0), h.percentile(50))
+		assertWithinHistogramError(t, math.MaxInt64, h.percentile(100))
+
+		var descending histogram
+		descending.record(1000)
+		descending.record(1)
+		assert.Equal(t, time.Duration(1000), descending.max())
+	})
+	t.Run("clamp", func(t *testing.T) {
+		var h histogram
+		for value := time.Duration(1); value <= 100; value++ {
+			h.record(value)
+		}
+		assert.Equal(t, h.percentile(0), h.percentile(-1))
+		assert.Equal(t, h.percentile(100), h.percentile(101))
+		assert.Equal(t, h.percentile(0), h.percentile(math.NaN()))
+	})
+	t.Run("merge", func(t *testing.T) {
+		var low, high histogram
+		for range 90 {
+			low.record(100 * time.Nanosecond)
+		}
+		for range 10 {
+			high.record(time.Millisecond)
+		}
+		low.merge(&high)
+		assert.Equal(t, 100, low.count())
+		assert.Equal(t, time.Millisecond, low.max())
+		assertWithinHistogramError(t, 100*time.Nanosecond, low.percentile(90))
+		assertWithinHistogramError(t, time.Millisecond, low.percentile(91))
+		assert.Equal(t, 10, high.count())
+	})
+	t.Run("boundaries", func(t *testing.T) {
+		for k := range histogramBuckets {
+			lowest := histogramLowest(k)
+			assert.Equal(t, k, histogramIndex(lowest))
+			if k >= 1 {
+				assert.Greater(t, lowest, histogramLowest(k-1))
+			}
+		}
+		// The top of each bucket is where the error is largest, so this pins the bound.
+		for k := range histogramBuckets - 1 {
+			top := histogramLowest(k+1) - 1
+			assert.Equal(t, k, histogramIndex(top))
+			var h histogram
+			h.record(top)
+			assertWithinHistogramError(t, top, h.percentile(50))
+		}
+		for e := 1; e <= durationValueBits-1; e++ {
+			below := time.Duration(1)<<e - 1
+			at := time.Duration(1) << e
+			var belowHist, atHist histogram
+			belowHist.record(below)
+			atHist.record(at)
+			assertWithinHistogramError(t, below, belowHist.percentile(50))
+			assertWithinHistogramError(t, at, atHist.percentile(50))
+		}
+	})
 }

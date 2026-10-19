@@ -25,6 +25,7 @@ go_test(
         "alloc_test.go",
         "bench_adapters_test.go",
         "bench_harness_test.go",
+        "bench_latency_test.go",
         "bench_test.go",
         "race_off_test.go",
         "race_on_test.go",

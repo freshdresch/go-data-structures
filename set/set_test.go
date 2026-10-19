@@ -1,8 +1,9 @@
 package set
 
 import (
-	"github.com/stretchr/testify/assert"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestMakingEmptySet(t *testing.T) {
@@ -45,9 +46,9 @@ func TestAddAndRemove(t *testing.T) {
 
 	other := &Set[string]{
 		entries: map[string]struct{}{
-			"honda": struct{}{},
-			"ford":  struct{}{},
-			"jeep":  struct{}{},
+			"honda": {},
+			"ford":  {},
+			"jeep":  {},
 		},
 		length: 3,
 	}
@@ -95,8 +96,8 @@ func TestAddAndRemove(t *testing.T) {
 
 	other = &Set[string]{
 		entries: map[string]struct{}{
-			"honda":   struct{}{},
-			"porsche": struct{}{},
+			"honda":   {},
+			"porsche": {},
 		},
 		length: 2,
 	}
@@ -105,8 +106,8 @@ func TestAddAndRemove(t *testing.T) {
 
 	other = &Set[string]{
 		entries: map[string]struct{}{
-			"honda":  struct{}{},
-			"jaguar": struct{}{},
+			"honda":  {},
+			"jaguar": {},
 		},
 		length: 2,
 	}
@@ -117,9 +118,9 @@ func TestAddAndRemove(t *testing.T) {
 func TestCloneSafety(t *testing.T) {
 	s := &Set[string]{
 		entries: map[string]struct{}{
-			"honda": struct{}{},
-			"ford":  struct{}{},
-			"jeep":  struct{}{},
+			"honda": {},
+			"ford":  {},
+			"jeep":  {},
 		},
 		length: 3,
 	}
@@ -139,31 +140,31 @@ func TestCloneSafety(t *testing.T) {
 func TestLogicalSetOperations(t *testing.T) {
 	s := &Set[string]{
 		entries: map[string]struct{}{
-			"porsche": struct{}{},
-			"toyota":  struct{}{},
-			"honda":   struct{}{},
-			"ford":    struct{}{},
-			"jeep":    struct{}{},
+			"porsche": {},
+			"toyota":  {},
+			"honda":   {},
+			"ford":    {},
+			"jeep":    {},
 		},
 		length: 5,
 	}
 
 	other := &Set[string]{
 		entries: map[string]struct{}{
-			"honda": struct{}{},
-			"ford":  struct{}{},
-			"jeep":  struct{}{},
-			"chevy": struct{}{},
-			"dodge": struct{}{},
+			"honda": {},
+			"ford":  {},
+			"jeep":  {},
+			"chevy": {},
+			"dodge": {},
 		},
 		length: 5,
 	}
 
 	expected := &Set[string]{
 		entries: map[string]struct{}{
-			"honda": struct{}{},
-			"ford":  struct{}{},
-			"jeep":  struct{}{},
+			"honda": {},
+			"ford":  {},
+			"jeep":  {},
 		},
 		length: 3,
 	}
@@ -172,10 +173,10 @@ func TestLogicalSetOperations(t *testing.T) {
 	expected = &Set[string]{
 		entries: map[string]struct{}{
 			// make sure order doesn't matter
-			"chevy":   struct{}{},
-			"dodge":   struct{}{},
-			"porsche": struct{}{},
-			"toyota":  struct{}{},
+			"chevy":   {},
+			"dodge":   {},
+			"porsche": {},
+			"toyota":  {},
 		},
 		length: 4,
 	}
@@ -183,8 +184,8 @@ func TestLogicalSetOperations(t *testing.T) {
 
 	expected = &Set[string]{
 		entries: map[string]struct{}{
-			"chevy": struct{}{},
-			"dodge": struct{}{},
+			"chevy": {},
+			"dodge": {},
 		},
 		length: 2,
 	}
@@ -192,8 +193,8 @@ func TestLogicalSetOperations(t *testing.T) {
 
 	expected = &Set[string]{
 		entries: map[string]struct{}{
-			"porsche": struct{}{},
-			"toyota":  struct{}{},
+			"porsche": {},
+			"toyota":  {},
 		},
 		length: 2,
 	}
@@ -201,13 +202,13 @@ func TestLogicalSetOperations(t *testing.T) {
 
 	expected = &Set[string]{
 		entries: map[string]struct{}{
-			"porsche": struct{}{},
-			"toyota":  struct{}{},
-			"honda":   struct{}{},
-			"ford":    struct{}{},
-			"jeep":    struct{}{},
-			"chevy":   struct{}{},
-			"dodge":   struct{}{},
+			"porsche": {},
+			"toyota":  {},
+			"honda":   {},
+			"ford":    {},
+			"jeep":    {},
+			"chevy":   {},
+			"dodge":   {},
 		},
 		length: 7,
 	}
@@ -216,8 +217,8 @@ func TestLogicalSetOperations(t *testing.T) {
 	// test the sets with imbalanced lengths
 	other = &Set[string]{
 		entries: map[string]struct{}{
-			"honda": struct{}{},
-			"dodge": struct{}{},
+			"honda": {},
+			"dodge": {},
 		},
 		length: 2,
 	}

@@ -3,9 +3,10 @@
 package buffer
 
 import (
+	"testing"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"testing"
 )
 
 func TestBytesBuffer(t *testing.T) {

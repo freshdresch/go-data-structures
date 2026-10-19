@@ -1,6 +1,8 @@
 package ring_test
 
 import (
+	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/freshdresch/go-data-structures/ring"
@@ -37,9 +39,9 @@ type ringQueue[T any] struct {
 	ring *ring.Ring[T]
 }
 
-// newRingQueue returns a ringQueue whose ring has ringCapacity slots and allows as many
-// producers and consumers as mode has.
-func newRingQueue[T any](mode benchMode) (*ringQueue[T], error) {
+// newModeRing returns a ring with ringCapacity slots that allows as many producers and consumers
+// as mode has.
+func newModeRing[T any](mode benchMode) (*ring.Ring[T], error) {
 	var options []ring.Option
 	if mode.producers > 1 {
 		options = append(options, ring.WithMultiProdEnqueue())
@@ -47,7 +49,12 @@ func newRingQueue[T any](mode benchMode) (*ringQueue[T], error) {
 	if mode.consumers > 1 {
 		options = append(options, ring.WithMultiConsDequeue())
 	}
-	created, err := ring.New[T](ringCapacity, options...)
+	return ring.New[T](ringCapacity, options...)
+}
+
+// newRingQueue returns a ringQueue over a ring built for mode.
+func newRingQueue[T any](mode benchMode) (*ringQueue[T], error) {
+	created, err := newModeRing[T](mode)
 	if err != nil {
 		return nil, err
 	}
@@ -63,6 +70,88 @@ func (q *ringQueue[T]) enqueue(items []T) int {
 // slice.
 func (q *ringQueue[T]) dequeue(dst []T) int {
 	elems, _ := q.ring.DequeueBurst(uint32(len(dst)), nil)
+	return copy(dst, elems)
+}
+
+// newRingAPIQueue returns the adapter that drives a ring built for mode through api.
+func newRingAPIQueue[T any](api ringAPI, mode benchMode) (queue[T], error) {
+	var wrap func(*ring.Ring[T]) queue[T]
+	switch api {
+	case apiSingle:
+		wrap = func(base *ring.Ring[T]) queue[T] { return &ringSingleQueue[T]{ring: base} }
+	case apiBurst:
+		wrap = func(base *ring.Ring[T]) queue[T] { return &ringQueue[T]{ring: base} }
+	case apiBulk:
+		wrap = func(base *ring.Ring[T]) queue[T] { return &ringBulkQueue[T]{ring: base} }
+	default:
+		return nil, fmt.Errorf("unknown ring API %v", api)
+	}
+	created, err := newModeRing[T](mode)
+	if err != nil {
+		return nil, err
+	}
+	return wrap(created), nil
+}
+
+// ringSingleQueue drives the ring through Enqueue and Dequeue, moving at most one element per
+// call. It is rewritten when the ring API changes.
+type ringSingleQueue[T any] struct {
+	ring *ring.Ring[T]
+}
+
+// enqueue moves only items[0], so it returns 0 or 1.
+func (q *ringSingleQueue[T]) enqueue(items []T) int {
+	err := q.ring.Enqueue(items[0])
+	if errors.Is(err, ring.ErrFull) {
+		return 0
+	}
+	if err != nil {
+		panic(err)
+	}
+	return 1
+}
+
+// dequeue fills only dst[0], so it returns 0 or 1.
+func (q *ringSingleQueue[T]) dequeue(dst []T) int {
+	elem, err := q.ring.Dequeue()
+	if errors.Is(err, ring.ErrEmpty) {
+		return 0
+	}
+	if err != nil {
+		panic(err)
+	}
+	dst[0] = elem
+	return 1
+}
+
+// ringBulkQueue drives the ring through EnqueueBulk and DequeueBulk, which move all of the
+// elements or none, so each call returns 0 or the full length. It is rewritten when the ring API
+// changes.
+type ringBulkQueue[T any] struct {
+	ring *ring.Ring[T]
+}
+
+func (q *ringBulkQueue[T]) enqueue(items []T) int {
+	err := q.ring.EnqueueBulk(items, uint32(len(items)), nil)
+	if errors.Is(err, ring.ErrFull) {
+		return 0
+	}
+	if err != nil {
+		panic(err)
+	}
+	return len(items)
+}
+
+// dequeue copies the elements DequeueBulk returns into dst, because today's DequeueBulk returns a
+// new slice.
+func (q *ringBulkQueue[T]) dequeue(dst []T) int {
+	elems, err := q.ring.DequeueBulk(uint32(len(dst)), nil)
+	if errors.Is(err, ring.ErrEmpty) {
+		return 0
+	}
+	if err != nil {
+		panic(err)
+	}
 	return copy(dst, elems)
 }
 

@@ -309,6 +309,69 @@ func checkAccounting(t *testing.T, tc accountingCase, mode benchMode, total int)
 	require.NoError(t, accountingError(sinks, mode.producers, total))
 }
 
+// TestRingAPIAccounting checks that every run BenchmarkRingAPI makes through the queue harness
+// moves each element exactly once, in order per producer within each consumer, for each api,
+// batch size, and mode it runs. The requested totals are rounded as the benchmark rounds them,
+// and 10,007 needs rounding for every bulk run except SPSC at batch size 1.
+func TestRingAPIAccounting(t *testing.T) {
+	for _, mode := range ringAPIModes {
+		for _, api := range ringAPIs {
+			for _, batch := range api.batches() {
+				tc := accountingCase{
+					name:  api.String(),
+					batch: batch,
+					run: func(total int, sinks func(consumer int) *recordSink[int64],
+					) (throughputResult, error) {
+						newQueue := func() (queue[int64], error) {
+							return newRingAPIQueue[int64](api, mode)
+						}
+						return runThroughput(noopTimer{}, newQueue, mode.producers,
+							mode.consumers, batch, total, fillInt64, sinks)
+					},
+				}
+				for _, requested := range []int{1, 10_007} {
+					total := api.total(requested, batch, mode.producers)
+					name := fmt.Sprintf("api=%s/mode=%s/batch=%d/total=%d",
+						tc.name, mode.name, batch, total)
+					t.Run(name, func(t *testing.T) {
+						checkAccounting(t, tc, mode, total)
+					})
+				}
+			}
+		}
+	}
+}
+
+// TestRingAPIAdapters checks that each adapter uses the API it claims, which accounting cannot
+// tell apart, because an adapter that moved one element at a time would still move every element
+// exactly once. It builds SPSC rings through newModeRing, the constructor the adapters use, and
+// checks what each call returns and what Count reports afterward.
+func TestRingAPIAdapters(t *testing.T) {
+	t.Run("bulk", func(t *testing.T) {
+		created, err := newModeRing[int64](spscMode)
+		require.NoError(t, err)
+		q := &ringBulkQueue[int64]{ring: created}
+		assert.Equal(t, 3, q.enqueue([]int64{1, 2, 3}))
+		assert.Equal(t, 0, q.dequeue(make([]int64, 8)))
+		assert.Equal(t, uint32(3), created.Count())
+		assert.Equal(t, 3, q.dequeue(make([]int64, 3)))
+	})
+
+	t.Run("single", func(t *testing.T) {
+		created, err := newModeRing[int64](spscMode)
+		require.NoError(t, err)
+		q := &ringSingleQueue[int64]{ring: created}
+		assert.Equal(t, 1, q.enqueue([]int64{1, 2}))
+		assert.Equal(t, uint32(1), created.Count())
+		assert.Equal(t, 1, q.dequeue(make([]int64, 4)))
+	})
+
+	t.Run("unknownAPI", func(t *testing.T) {
+		_, err := newRingAPIQueue[int64](ringAPI(99), spscMode)
+		assert.Error(t, err)
+	})
+}
+
 func TestGCPerMillion(t *testing.T) {
 	cases := []struct {
 		name     string

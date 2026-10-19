@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"unsafe"
+
+	"github.com/freshdresch/go-data-structures/ring"
 )
 
 // spinPolls is how many dequeue attempts a spinThenYield wait cycle makes, the first included,
@@ -216,6 +218,13 @@ func producerShare(total, producers, producer int) int {
 	return share
 }
 
+// setElemBytes sets the benchmark's bytes per operation to the size of one T, so throughput
+// reports MB/s for the element type.
+func setElemBytes[T any](b *testing.B) {
+	b.Helper()
+	b.SetBytes(int64(unsafe.Sizeof(*new(T))))
+}
+
 // benchTimer is the part of *testing.B the runs use, so tests can run them without a benchmark.
 type benchTimer interface {
 	ResetTimer()
@@ -391,20 +400,30 @@ type benchMode struct {
 	consumers int
 }
 
-// benchModes lists every mode, with multiWorkers goroutines on each multi side.
-var benchModes = []benchMode{
-	{name: "SPSC", producers: 1, consumers: 1},
-	{name: "MPSC", producers: multiWorkers, consumers: 1},
-	{name: "SPMC", producers: 1, consumers: multiWorkers},
-	{name: "MPMC", producers: multiWorkers, consumers: multiWorkers},
-}
+// The named modes below use multiWorkers goroutines on each multi side.
+var (
+	// spscMode has one producer and one consumer.
+	spscMode = benchMode{name: "SPSC", producers: 1, consumers: 1}
+	// mpscMode has many producers and one consumer.
+	mpscMode = benchMode{name: "MPSC", producers: multiWorkers, consumers: 1}
+	// spmcMode has one producer and many consumers.
+	spmcMode = benchMode{name: "SPMC", producers: 1, consumers: multiWorkers}
+	// mpmcMode has many producers and many consumers.
+	mpmcMode = benchMode{name: "MPMC", producers: multiWorkers, consumers: multiWorkers}
+)
+
+// benchModes lists every mode, in the order the throughput benchmarks run them.
+var benchModes = []benchMode{spscMode, mpscMode, spmcMode, mpmcMode}
+
+// benchBatches lists the batch sizes the throughput benchmarks run at.
+var benchBatches = []int{1, 8, 32, 64}
 
 // BenchmarkThroughput measures moving b.N elements from producers to consumers, so ns/op is
 // nanoseconds per element transferred end to end.
 func BenchmarkThroughput(b *testing.B) {
 	for _, mode := range benchModes {
 		b.Run("mode="+mode.name, func(b *testing.B) {
-			for _, batch := range []int{1, 8, 32, 64} {
+			for _, batch := range benchBatches {
 				b.Run(fmt.Sprintf("batch=%d", batch), func(b *testing.B) {
 					b.Run("elem=int64", func(b *testing.B) {
 						benchmarkThroughputImpls(b, mode, batch, fillInt64)
@@ -426,10 +445,9 @@ func BenchmarkThroughput(b *testing.B) {
 func benchmarkThroughputImpls[T any](b *testing.B, mode benchMode, batch int,
 	fill fillFunc[T],
 ) {
-	elemBytes := int64(unsafe.Sizeof(*new(T)))
 	for _, impl := range adapterImpls[T](mode) {
 		b.Run("impl="+impl.name, func(b *testing.B) {
-			b.SetBytes(elemBytes)
+			setElemBytes[T](b)
 			result, err := runThroughput(b, impl.newQueue, mode.producers, mode.consumers,
 				batch, b.N, fill, noopSinks[T])
 			if err != nil {
@@ -442,9 +460,156 @@ func benchmarkThroughputImpls[T any](b *testing.B, mode benchMode, batch int,
 		return
 	}
 	b.Run("impl=chan", func(b *testing.B) {
-		b.SetBytes(elemBytes)
+		setElemBytes[T](b)
 		result := runChanThroughput(b, mode.producers, mode.consumers, b.N, fill,
 			noopSinks[T])
 		reportThroughput(b, result, b.N)
 	})
+}
+
+// ringAPI is a style of ring call that BenchmarkRingAPI measures.
+type ringAPI int
+
+const (
+	// apiSingle is Enqueue and Dequeue, one element per call.
+	apiSingle ringAPI = iota
+	// apiBurst is EnqueueBurst and DequeueBurst, which move as many elements as they can.
+	apiBurst
+	// apiBulk is EnqueueBulk and DequeueBulk, which move all of the elements or none.
+	apiBulk
+)
+
+// ringAPIs lists every style BenchmarkRingAPI runs through the queue harness.
+var ringAPIs = []ringAPI{apiSingle, apiBurst, apiBulk}
+
+// ringAPIModes are the modes BenchmarkRingAPI runs in, SPSC and MPMC.
+var ringAPIModes = []benchMode{spscMode, mpmcMode}
+
+// String returns the name api has in BenchmarkRingAPI's sub-benchmark names.
+func (api ringAPI) String() string {
+	switch api {
+	case apiSingle:
+		return "single"
+	case apiBurst:
+		return "burst"
+	case apiBulk:
+		return "bulk"
+	default:
+		return fmt.Sprintf("ringAPI(%d)", int(api))
+	}
+}
+
+// batches returns the batch sizes api runs at. apiSingle moves one element per call, so it runs
+// at batch size 1 only.
+func (api ringAPI) batches() []int {
+	if api == apiSingle {
+		return []int{1}
+	}
+	return benchBatches
+}
+
+// total returns how many elements a run of api sends when n are requested. For apiBulk it rounds
+// n up to a multiple of batch times producers. Rounding to the batch keeps the total in whole
+// batches, because an all-or-nothing dequeue cannot take a smaller remainder. The factor of the
+// producer count makes each producer's share whole batches too, so no producer issues a short
+// bulk enqueue and every call is the measured operation.
+func (api ringAPI) total(n, batch, producers int) int {
+	if api != apiBulk {
+		return n
+	}
+	multiple := batch * producers
+	return (n + multiple - 1) / multiple * multiple
+}
+
+// BenchmarkRingAPI measures each style of ring call through the queue harness, so ns/op is
+// nanoseconds per element transferred end to end. api=seq instead measures one Enqueue and one
+// Dequeue in a single goroutine, the per-call cost without contention.
+func BenchmarkRingAPI(b *testing.B) {
+	for _, mode := range ringAPIModes {
+		b.Run("mode="+mode.name, func(b *testing.B) {
+			for _, api := range ringAPIs {
+				b.Run("api="+api.String(), func(b *testing.B) {
+					benchmarkRingAPIBatches(b, mode, api)
+				})
+			}
+		})
+	}
+	b.Run("api=seq", func(b *testing.B) {
+		b.Run("elem=int64", func(b *testing.B) {
+			benchmarkRingAPISeq(b, fillInt64)
+		})
+		b.Run("elem=ptr", func(b *testing.B) {
+			benchmarkRingAPISeq(b, fillPtr(newItemPool()))
+		})
+	})
+}
+
+// benchmarkRingAPIBatches runs one batch sub-benchmark for each batch size api runs at. apiSingle
+// has no batch part in its name, so its batch-1 case runs directly under the api level.
+func benchmarkRingAPIBatches(b *testing.B, mode benchMode, api ringAPI) {
+	for _, batch := range api.batches() {
+		if api == apiSingle {
+			benchmarkRingAPIElems(b, mode, api, batch)
+			continue
+		}
+		b.Run(fmt.Sprintf("batch=%d", batch), func(b *testing.B) {
+			benchmarkRingAPIElems(b, mode, api, batch)
+		})
+	}
+}
+
+// benchmarkRingAPIElems runs one elem sub-benchmark for each element type.
+func benchmarkRingAPIElems(b *testing.B, mode benchMode, api ringAPI, batch int) {
+	b.Run("elem=int64", func(b *testing.B) {
+		benchmarkRingAPIRun(b, mode, api, batch, fillInt64)
+	})
+	b.Run("elem=ptr", func(b *testing.B) {
+		benchmarkRingAPIRun(b, mode, api, batch, fillPtr(newItemPool()))
+	})
+}
+
+// benchmarkRingAPIRun sends api's total for b.N elements through runThroughput. For apiBulk
+// that total is rounded up, but testing still divides by b.N, so ns/op is off by at most
+// batch times producers divided by b.N, which is negligible at the b.N a benchmark settles on.
+func benchmarkRingAPIRun[T any](b *testing.B, mode benchMode, api ringAPI, batch int,
+	fill fillFunc[T],
+) {
+	setElemBytes[T](b)
+	total := api.total(b.N, batch, mode.producers)
+	newQueue := func() (queue[T], error) {
+		return newRingAPIQueue[T](api, mode)
+	}
+	result, err := runThroughput(b, newQueue, mode.producers, mode.consumers, batch, total, fill,
+		noopSinks[T])
+	if err != nil {
+		b.Fatal(err)
+	}
+	reportThroughput(b, result, total)
+}
+
+// benchmarkRingAPISeq calls Enqueue and then Dequeue on one element per b.Loop iteration, in one
+// goroutine, on a ring with no options, and reports the GC metrics like every throughput run.
+func benchmarkRingAPISeq[T any](b *testing.B, fill fillFunc[T]) {
+	setElemBytes[T](b)
+	created, err := ring.New[T](ringCapacity)
+	if err != nil {
+		b.Fatal(err)
+	}
+	elems := make([]T, 1)
+	fill(elems, 0, 0)
+	elem := elems[0]
+	iterations := 0
+	gcCycles := runTimed(b, func() {
+		for b.Loop() {
+			if err := created.Enqueue(elem); err != nil {
+				b.Fatal(err)
+			}
+			if _, err := created.Dequeue(); err != nil {
+				b.Fatal(err)
+			}
+			iterations++
+		}
+	})
+	result := newThroughputResult([]int{iterations}, gcCycles, iterations)
+	reportThroughput(b, result, iterations)
 }

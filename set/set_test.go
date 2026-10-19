@@ -13,13 +13,13 @@ func TestMakingEmptySet(t *testing.T) {
 }
 
 func TestMakingSetFromSlice(t *testing.T) {
-	inputSlice := []string{
+	input := []string{
 		"one",
 		"two",
 		"three",
 		"three", // The duplicate should not affect the set.
 	}
-	words := FromSlice(inputSlice)
+	words := FromSlice(input)
 	assert.True(t, words.Contains("one"))
 	assert.True(t, words.Contains("two"))
 	assert.True(t, words.Contains("three"))
@@ -41,11 +41,11 @@ func TestZeroValueSet(t *testing.T) {
 	assert.Equal(t, 2, updated.Len())
 	assert.True(t, updated.Contains(2))
 
-	elements := 0
+	yielded := 0
 	for range updated.All() {
-		elements++
+		yielded++
 	}
-	assert.Equal(t, 2, elements)
+	assert.Equal(t, 2, yielded)
 }
 
 func TestAddAndRemove(t *testing.T) {
@@ -327,6 +327,8 @@ func TestZeroValueSetOperations(t *testing.T) {
 			// The result is a usable, independent Set.
 			result.Add(99)
 			assert.True(t, result.Contains(99))
+			assert.False(t, populated.Contains(99))
+			assert.True(t, zero.Empty())
 		})
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"runtime"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -660,4 +661,201 @@ func TestHandoffAccounting(t *testing.T) {
 			assert.Equal(t, roundTrips, outcome.result.latency.count())
 		})
 	}
+}
+
+// replayProducer feeds one loaded producer's schedule of batches, batch elements each, to a new
+// lateTracker. attemptAt returns when a batch's first enqueue attempt starts, given its due time,
+// so a test injects the producer's timing without a clock. It returns the tracker and the last
+// attempt.
+func replayProducer(producer, producers, batches, batch int, rate float64,
+	attemptAt func(due time.Duration) time.Duration,
+) (*lateTracker, time.Duration) {
+	tracker := &lateTracker{}
+	var attempt time.Duration
+	for k := range batches {
+		due := dueTime(producer, producers, k, batch, rate)
+		attempt = attemptAt(due)
+		tracker.observe(attempt, due)
+	}
+	return tracker, attempt
+}
+
+// pacerSendDelay is how long after its due time a healthy producer starts each batch.
+const pacerSendDelay = 2 * time.Microsecond
+
+// pacerQueueWait is how long after the last attempt the last element is dequeued.
+const pacerQueueWait = 5 * time.Microsecond
+
+// onTime starts every batch pacerSendDelay after it was due.
+func onTime(due time.Duration) time.Duration {
+	return due + pacerSendDelay
+}
+
+// stalled is onTime, except that a producer stalled from start to end starts every batch due in
+// that window at end, all at once, and then is back on schedule.
+func stalled(start, end time.Duration) func(due time.Duration) time.Duration {
+	return func(due time.Duration) time.Duration {
+		if due >= start && due < end {
+			return max(end, onTime(due))
+		}
+		return onTime(due)
+	}
+}
+
+// TestPacer checks the loaded pacer with injected times: the producer stagger, the sustained
+// decision for healthy, briefly stalled, backlogged, and partly failing runs, and the cap.
+func TestPacer(t *testing.T) {
+	t.Run("stagger", func(t *testing.T) {
+		const producers = 4
+		const batches = 100
+		const rate = 1e6
+		var dues []time.Duration
+		for p := range producers {
+			for k := range batches {
+				dues = append(dues, dueTime(p, producers, k, 1, rate))
+			}
+		}
+		slices.Sort(dues)
+		assert.Equal(t, time.Duration(0), dues[0])
+		for k := 1; k < len(dues); k++ {
+			assert.Equal(t, time.Microsecond, dues[k]-dues[k-1], "arrival %d", k)
+		}
+	})
+
+	t.Run("lastElementAndExactness", func(t *testing.T) {
+		const producers = 4
+		const batch = 32
+		// 3M/s makes the arrivals 333.33 ns apart, so every due time needs rounding.
+		const rate = 3_000_000
+		// Far enough into the run that each producer has sent about 25M elements.
+		for _, k := range []int{0, 1, 999, 781_249} {
+			for p := range producers {
+				due := dueTime(p, producers, k, batch, rate)
+				last := (k+1)*batch - 1
+				assert.Equal(t, dueTime(p, producers, last, 1, rate), due)
+				// The exact due time, rounded to the nearest nanosecond in integer arithmetic.
+				arrival := int64(last*producers + p)
+				want := (arrival*int64(time.Second) + rate/2) / rate
+				assert.Equal(t, time.Duration(want), due, "producer %d batch %d", p, k)
+			}
+		}
+	})
+
+	// Every run below offers 100k/s for a nominal 1 s.
+	const rate = 100_000
+	const batches = 100_000
+
+	t.Run("healthy", func(t *testing.T) {
+		tracker, last := replayProducer(0, 1, batches, 1, rate, onTime)
+		lastDequeue := last + pacerQueueWait
+		achieved := achievedRate(batches, lastDequeue)
+		assert.Equal(t, time.Duration(0), tracker.lateTime)
+		assert.Equal(t, batches, tracker.lag.count())
+		assert.Equal(t, pacerSendDelay, tracker.lag.max())
+		assert.True(t, sustained(achieved, rate, []time.Duration{tracker.lateTime}, lastDequeue))
+	})
+
+	t.Run("shortStall", func(t *testing.T) {
+		const stallStart = 500 * time.Millisecond
+		const stallEnd = stallStart + 2*time.Millisecond
+		tracker, last := replayProducer(0, 1, batches, 1, rate, stalled(stallStart, stallEnd))
+		lastDequeue := last + pacerQueueWait
+		achieved := achievedRate(batches, lastDequeue)
+		// Only the first stalled batch adds late time. It is due at stallStart, so it is more
+		// than lateThreshold behind from stallStart + lateThreshold until it starts at the end of
+		// the stall. The rest of the burst starts at the same instant, and adds nothing.
+		assert.Equal(t, stallEnd-(stallStart+lateThreshold), tracker.lateTime)
+		assert.Equal(t, stallEnd-stallStart, tracker.lag.max())
+		assert.True(t, sustained(achieved, rate, []time.Duration{tracker.lateTime}, lastDequeue))
+	})
+
+	t.Run("persistentBacklog", func(t *testing.T) {
+		// The producer runs 5% slower than its schedule, so it falls further behind with every
+		// batch.
+		slow := func(due time.Duration) time.Duration {
+			return onTime(due + due/20)
+		}
+		tracker, last := replayProducer(0, 1, batches, 1, rate, slow)
+		lastDequeue := last + pacerQueueWait
+		achieved := achievedRate(batches, lastDequeue)
+		lateTimes := []time.Duration{tracker.lateTime}
+		assert.Less(t, achieved, 0.98*rate)
+		assert.Greater(t, tracker.lateTime, lastDequeue/100)
+		assert.False(t, sustained(achieved, rate, lateTimes, lastDequeue))
+		// Each condition fails the run on its own.
+		assert.False(t, sustained(rate, rate, lateTimes, lastDequeue))
+		assert.False(t, sustained(achieved, rate, []time.Duration{0}, lastDequeue))
+	})
+
+	t.Run("oneFailingProducer", func(t *testing.T) {
+		const producers = 4
+		const perProducer = batches / producers
+		// The last producer stalls for 15 ms, 1.5% of the run, while the others stay on time.
+		// Averaged over the four producers that would be under 1%, but each is judged alone.
+		const stallStart = 500 * time.Millisecond
+		const stallEnd = stallStart + 15*time.Millisecond
+		var lateTimes []time.Duration
+		var lastAttempt time.Duration
+		for p := range producers {
+			attemptAt := onTime
+			if p == producers-1 {
+				attemptAt = stalled(stallStart, stallEnd)
+			}
+			tracker, last := replayProducer(p, producers, perProducer, 1, rate, attemptAt)
+			lateTimes = append(lateTimes, tracker.lateTime)
+			lastAttempt = max(lastAttempt, last)
+		}
+		lastDequeue := lastAttempt + pacerQueueWait
+		achieved := achievedRate(batches, lastDequeue)
+		assert.GreaterOrEqual(t, achieved, 0.98*rate)
+		assert.False(t, sustained(achieved, rate, lateTimes, lastDequeue))
+		assert.True(t, sustained(achieved, rate, lateTimes[:producers-1], lastDequeue))
+	})
+
+	t.Run("boundaries", func(t *testing.T) {
+		const due = 10 * time.Millisecond
+		atThreshold := &lateTracker{}
+		atThreshold.observe(due+lateThreshold, due)
+		assert.Equal(t, time.Duration(0), atThreshold.lateTime)
+		assert.Equal(t, lateThreshold, atThreshold.lag.max())
+
+		early := &lateTracker{}
+		early.observe(due-time.Microsecond, due)
+		assert.Equal(t, time.Duration(0), early.lateTime)
+		assert.Equal(t, time.Duration(0), early.lag.max())
+
+		const oddLag = 1234567 * time.Nanosecond
+		odd := &lateTracker{}
+		odd.observe(due+oddLag, due)
+		assert.Equal(t, oddLag, odd.lag.max())
+
+		// The budget and the floor mirror the expressions in sustained. Both operands are
+		// variables, so the products are rounded at run time as they are there, not computed
+		// exactly as constants.
+		runDuration := time.Second
+		offered := float64(rate)
+		lateBudget := 0.01 * float64(runDuration)
+		atBudget := time.Duration(lateBudget)
+		require.Equal(t, lateBudget, float64(atBudget))
+		assert.False(t, sustained(offered, offered, []time.Duration{atBudget}, runDuration))
+		underBudget := atBudget - time.Nanosecond
+		assert.True(t, sustained(offered, offered, []time.Duration{underBudget}, runDuration))
+
+		achievedFloor := 0.98 * offered
+		noLateTime := []time.Duration{0}
+		assert.True(t, sustained(achievedFloor, offered, noLateTime, runDuration))
+		belowFloor := math.Nextafter(achievedFloor, 0)
+		assert.False(t, sustained(belowFloor, offered, noLateTime, runDuration))
+
+		assert.Equal(t, 0.0, achievedRate(batches, 0))
+	})
+
+	t.Run("cap", func(t *testing.T) {
+		const nominal = 2 * time.Second
+		assert.False(t, capReached(0, nominal))
+		assert.False(t, capReached(nominal, nominal))
+		assert.False(t, capReached(2*nominal-time.Nanosecond, nominal))
+		assert.True(t, capReached(2*nominal, nominal))
+		assert.True(t, capReached(2*nominal+time.Nanosecond, nominal))
+	})
 }

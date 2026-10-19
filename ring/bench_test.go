@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 	"unsafe"
 
 	"github.com/freshdresch/go-data-structures/ring"
@@ -25,6 +26,10 @@ const multiWorkers = 4
 
 // ptrPoolSize is the number of values the ptr element type points into, in rotation.
 const ptrPoolSize = 1024
+
+// lateThreshold is how far a loaded producer may fall behind its schedule before the time it spends
+// further behind counts as late time.
+const lateThreshold = time.Millisecond
 
 // seqBits is how many low bits of a packed int64 element hold the sequence number. The producer
 // ID is in the bits above them.

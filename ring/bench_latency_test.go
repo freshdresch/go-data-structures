@@ -332,3 +332,88 @@ func BenchmarkHandoff(b *testing.B) {
 		})
 	}
 }
+
+// dueTime returns when the last element of a loaded producer's batch is due, as an offset from the
+// start barrier. rate is the offered rate of all producers together, in elements per second, and
+// must be positive. Each producer sends at rate/producers, so one producer's elements are
+// interval = producers/rate apart, and producer p is offset by p*interval/producers. The element
+// at index k of producer p's schedule is therefore due at (k*producers + p)/rate, which spaces
+// the combined arrivals of all producers evenly, 1/rate apart. The batch at batchIndex ends with
+// element index (batchIndex+1)*batch - 1.
+//
+// The due time is computed from the element's position, never by adding up intervals, so float
+// error does not accumulate over a run. It is rounded to the nearest nanosecond, and is within a
+// nanosecond of exact for any run shorter than about a day.
+func dueTime(producer, producers, batchIndex, batch int, rate float64) time.Duration {
+	last := (batchIndex+1)*batch - 1
+	arrival := last*producers + producer
+	return time.Duration(math.Round(float64(arrival) * float64(time.Second) / rate))
+}
+
+// lateTracker follows one loaded producer's lateness. The zero value is ready to use, and treats
+// the start barrier, offset 0, as the producer's previous attempt. A lateTracker is not safe for
+// concurrent use, so each producer feeds its own.
+type lateTracker struct {
+	// lag holds how far behind its due time each batch's first enqueue attempt started, for the
+	// lag-* metrics.
+	lag histogram
+	// lateTime is the producer's total time more than lateThreshold behind its schedule.
+	lateTime time.Duration
+	// previousAttempt is the attempt stamp of the batch observe saw last.
+	previousAttempt time.Duration
+}
+
+// observe records one batch. attempt is when the batch's first enqueue attempt started, the
+// batch's attempt stamp, and due is its dueTime. Both are offsets from the start barrier. The lag
+// is attempt - due, or 0 when the batch started early, a clamp the histogram applies. Late time
+// counts only the time the producer spent more than lateThreshold behind, so observe adds
+// attempt - max(previousAttempt, due+lateThreshold) to lateTime when that is positive. The
+// producer is more than lateThreshold behind on this batch from due+lateThreshold until it
+// attempts the batch, and any part of that stretch before its previous attempt was already
+// counted for an earlier batch, so each late instant is counted once. For the first batch, the
+// previous attempt is the start barrier, before which the run had not begun. observe assumes a
+// producer's attempts never go backward. Each producer reads the monotonic clock in order, so
+// previousAttempt only moves forward.
+func (l *lateTracker) observe(attempt, due time.Duration) {
+	l.lag.record(attempt - due)
+	lateSince := max(l.previousAttempt, due+lateThreshold)
+	l.lateTime += max(attempt-lateSince, 0)
+	l.previousAttempt = attempt
+}
+
+// achievedRate returns the elements per second a loaded run moved, dequeued over the time from
+// the start barrier, offset 0, to lastDequeue. It returns 0 when lastDequeue is not positive,
+// since no time passed to move anything in.
+func achievedRate(dequeued int, lastDequeue time.Duration) float64 {
+	if lastDequeue <= 0 {
+		return 0
+	}
+	return float64(dequeued) / lastDequeue.Seconds()
+}
+
+// sustained reports whether a loaded run kept up with its schedule. achieved and offered are
+// rates in elements per second. lateTimes holds each producer's lateTime, and runDuration runs
+// from the start barrier to the last dequeue. The run is sustained when achieved is at least 98%
+// of offered and every producer, judged on its own, was late for less than 1% of runDuration.
+func sustained(achieved, offered float64, lateTimes []time.Duration,
+	runDuration time.Duration,
+) bool {
+	const minAchievedFraction = 0.98
+	const maxLateFraction = 0.01
+	if achieved < minAchievedFraction*offered {
+		return false
+	}
+	lateBudget := maxLateFraction * float64(runDuration)
+	for _, late := range lateTimes {
+		if float64(late) >= lateBudget {
+			return false
+		}
+	}
+	return true
+}
+
+// capReached reports whether a loaded run has gone on for twice its nominal length, the point at
+// which producers stop offering load. elapsed is measured from the start barrier.
+func capReached(elapsed, nominal time.Duration) bool {
+	return elapsed >= 2*nominal
+}

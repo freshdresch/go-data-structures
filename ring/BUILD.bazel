@@ -17,3 +17,19 @@ go_test(
     ],
     visibility = ["//:__subpackages__"],
 )
+
+go_test(
+    name = "ring_bench",
+    size = "large",
+    srcs = [
+        "bench_harness_test.go",
+        "bench_test.go",
+    ],
+    tags = ["exclusive"],
+    deps = [
+        ":ring",
+        "@com_github_stretchr_testify//assert:assert",
+        "@com_github_stretchr_testify//require:require",
+    ],
+    visibility = ["//:__subpackages__"],
+)

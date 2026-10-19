@@ -771,6 +771,10 @@ func TestBuffer_RandomOperationsKeepInvariants(t *testing.T) {
 			operation := random.IntN(operationCount)
 			expected = applyRandomOperation(t, random, b, operation, expected)
 			assertInvariants(t, b)
+			if t.Failed() {
+				t.Fatalf("invariants broken at iteration %d, step %d, operation %d",
+					iteration, step, operation)
+			}
 			assert.Equal(t, len(expected), b.Len(),
 				"iteration %d, step %d, operation %d", iteration, step, operation)
 			assert.True(t, slices.Equal(expected, b.Slice()),
@@ -1015,19 +1019,25 @@ func makeBuffer[T any](t *testing.T, vals []T, capacity int) *Buffer[T] {
 
 func assertInvariants[T any](t *testing.T, b *Buffer[T]) {
 	t.Helper()
+
+	// Check the bounds before Slice, which panics on a broken buffer, so the failure is
+	// reported here instead.
+	startOK := assert.GreaterOrEqual(t, b.start, 0, "start >= 0")
+	lenOK := assert.GreaterOrEqual(t, b.Len(), 0, "len >= 0")
+	boundsOK := assert.LessOrEqual(t, b.start+b.Len(), b.Cap(), "start+len <= capacity")
+	highWaterOK := assert.LessOrEqual(t, b.highWater, b.Cap(), "highWater <= Cap()")
+	if !startOK || !lenOK || !boundsOK || !highWaterOK {
+		return
+	}
+
 	slice := b.Slice()
 
 	assert.Equal(t, b.Len(), len(slice), "Len() must equal len(Slice())")
-	assert.LessOrEqual(t, b.Len(), b.Cap(), "Len() <= Cap()")
-	assert.GreaterOrEqual(t, b.start, 0, "start >= 0")
-	assert.GreaterOrEqual(t, b.Len(), 0, "len >= 0")
-	assert.LessOrEqual(t, b.start+b.Len(), b.Cap(), "start+len <= capacity")
 
 	if b.Len() == 0 {
 		assert.Equal(t, 0, b.start, "start must be 0 when buffer is empty")
 	}
 
-	assert.LessOrEqual(t, b.highWater, b.Cap(), "highWater <= Cap()")
 	var zero T
 	for index, value := range b.data[b.highWater:] {
 		assert.Equal(t, zero, value, "element at index %d is above highWater", b.highWater+index)

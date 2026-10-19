@@ -1,7 +1,17 @@
 // Package set provides a generic Set type built on a Go map.
+//
+// This package does not have any special handling for non-reflexive elements (elements e
+// where e != e), such as floating-point NaNs.
 package set
 
-import "iter"
+import (
+	"iter"
+	"maps"
+)
+
+// Predicate reports whether element satisfies a condition. It is an alias, so any function
+// of this shape can be passed, including a value of the caller's own named function type.
+type Predicate[K any] = func(element K) bool
 
 // Set is a collection of unique elements built on a Go map. The zero value is an
 // empty Set that is ready to use. A Set must not be copied after first use. Pass a
@@ -18,22 +28,46 @@ func New[K comparable]() *Set[K] {
 	}
 }
 
+// Of returns a pointer to a new Set holding the elements. Duplicate elements are stored
+// once. Of does not keep a reference to elements, so changing the slice afterward does
+// not change the Set.
+func Of[K comparable](elements ...K) *Set[K] {
+	result := &Set[K]{
+		entries: make(map[K]struct{}, len(elements)),
+	}
+	for _, element := range elements {
+		result.Add(element)
+	}
+	return result
+}
+
 // FromSlice returns a pointer to a new Set holding the elements of keys. Duplicate
 // elements are stored once. FromSlice does not modify keys.
 func FromSlice[K comparable](keys []K) *Set[K] {
+	return Of(keys...)
+}
+
+// Collect returns a pointer to a new Set holding the elements yielded by seq. Duplicate
+// elements are stored once, as with maps.Collect. For an empty sequence, Collect returns
+// a usable empty Set.
+func Collect[K comparable](seq iter.Seq[K]) *Set[K] {
 	result := New[K]()
-	for _, key := range keys {
-		result.Add(key)
-	}
+	result.AddAll(seq)
 	return result
+}
+
+// ensureEntries creates the underlying map if the Set is a zero value. Every method that
+// adds to the receiver calls it, so the zero value stays usable.
+func (s *Set[K]) ensureEntries() {
+	if s.entries == nil {
+		s.entries = make(map[K]struct{})
+	}
 }
 
 // Add adds a single element to the Set. If the element is already in the Set, Add
 // does nothing. Add modifies the receiver.
 func (s *Set[K]) Add(element K) {
-	if s.entries == nil {
-		s.entries = make(map[K]struct{})
-	}
+	s.ensureEntries()
 	s.entries[element] = struct{}{}
 }
 
@@ -41,6 +75,24 @@ func (s *Set[K]) Add(element K) {
 // does nothing. Remove modifies the receiver.
 func (s *Set[K]) Remove(element K) {
 	delete(s.entries, element)
+}
+
+// RemoveFunc deletes every element of the Set for which predicate returns true. It is
+// the Set form of Java's removeIf. RemoveFunc modifies the receiver, and predicate must
+// not modify the Set.
+func (s *Set[K]) RemoveFunc(predicate Predicate[K]) {
+	maps.DeleteFunc(s.entries, func(element K, _ struct{}) bool {
+		return predicate(element)
+	})
+}
+
+// smallerFirst returns the Set with fewer elements first. When both have the same number
+// of elements, it returns second first.
+func smallerFirst[K comparable](first, second *Set[K]) (smaller, larger *Set[K]) {
+	if len(first.entries) < len(second.entries) {
+		return first, second
+	}
+	return second, first
 }
 
 // Difference returns a new Set with the elements of the receiver that are not in
@@ -67,22 +119,10 @@ func (s *Set[K]) Difference(other *Set[K]) *Set[K] {
 // storage with either Set. Elements are copied by value, so pointer elements still
 // point to the same values. Intersection does not modify the receiver or other.
 func (s *Set[K]) Intersection(other *Set[K]) *Set[K] {
-	var (
-		smallerMap map[K]struct{}
-		largerMap  map[K]struct{}
-	)
-
-	if len(s.entries) < len(other.entries) {
-		smallerMap = s.entries
-		largerMap = other.entries
-	} else {
-		smallerMap = other.entries
-		largerMap = s.entries
-	}
-
+	smaller, larger := smallerFirst(s, other)
 	result := New[K]()
-	for element := range smallerMap {
-		if _, ok := largerMap[element]; !ok {
+	for element := range smaller.entries {
+		if !larger.Contains(element) {
 			continue
 		}
 		result.entries[element] = struct{}{}
@@ -96,22 +136,10 @@ func (s *Set[K]) Intersection(other *Set[K]) *Set[K] {
 // with either Set. Elements are copied by value, so pointer elements still point to
 // the same values. Union does not modify the receiver or other.
 func (s *Set[K]) Union(other *Set[K]) *Set[K] {
-	var (
-		smallerSet *Set[K]
-		largerSet  *Set[K]
-	)
-
 	// Cloning the larger set leaves fewer elements to add one at a time.
-	if len(s.entries) < len(other.entries) {
-		smallerSet = s
-		largerSet = other
-	} else {
-		smallerSet = other
-		largerSet = s
-	}
-
-	result := largerSet.Clone()
-	for element := range smallerSet.entries {
+	smaller, larger := smallerFirst(s, other)
+	result := larger.Clone()
+	for element := range smaller.entries {
 		result.entries[element] = struct{}{}
 	}
 	return result
@@ -141,22 +169,71 @@ func (s *Set[K]) Contains(element K) bool {
 	return ok
 }
 
+// ContainsFunc reports whether any element of the Set satisfies predicate. It stops at
+// the first element for which predicate returns true, so predicate might not be called for
+// every element. ContainsFunc does not modify the receiver, and predicate must not modify
+// the Set.
+func (s *Set[K]) ContainsFunc(predicate Predicate[K]) bool {
+	for element := range s.entries {
+		if predicate(element) {
+			return true
+		}
+	}
+	return false
+}
+
+// Filter returns a new Set holding the elements for which predicate returns true. These
+// are the elements that RemoveFunc would delete.
+//
+// Filter copies the elements into a new Set, so the result does not share storage with
+// the receiver. Elements are copied by value, so pointer elements still point to the same
+// values. Filter does not modify the receiver, and predicate must not modify the Set.
+func (s *Set[K]) Filter(predicate Predicate[K]) *Set[K] {
+	result := New[K]()
+	for element := range s.entries {
+		if predicate(element) {
+			result.entries[element] = struct{}{}
+		}
+	}
+	return result
+}
+
 // Equals reports whether the two Sets have identical contents. Equals does not modify
 // the receiver or other.
 func (s *Set[K]) Equals(other *Set[K]) bool {
-	if len(s.entries) != len(other.entries) {
+	return len(s.entries) == len(other.entries) && s.IsSubset(other)
+}
+
+// IsSubset reports whether every element of the receiver is in other. An empty Set is a
+// subset of every Set. IsSubset does not modify the receiver or other.
+func (s *Set[K]) IsSubset(other *Set[K]) bool {
+	if len(s.entries) > len(other.entries) {
 		return false
 	}
-	for element := range s.entries {
-		if !other.Contains(element) {
+	return other.ContainsAll(s.All())
+}
+
+// IsSuperset reports whether every element of other is in the receiver. Every Set is a
+// superset of an empty Set. IsSuperset does not modify the receiver or other.
+func (s *Set[K]) IsSuperset(other *Set[K]) bool {
+	return other.IsSubset(s)
+}
+
+// IsDisjoint reports whether the receiver and other have no element in common. An empty
+// Set is disjoint from every Set, including itself. IsDisjoint does not modify the
+// receiver or other.
+func (s *Set[K]) IsDisjoint(other *Set[K]) bool {
+	smaller, larger := smallerFirst(s, other)
+	for element := range smaller.entries {
+		if larger.Contains(element) {
 			return false
 		}
 	}
 	return true
 }
 
-// Empty reports whether the Set has no elements. Empty does not modify the receiver.
-func (s *Set[K]) Empty() bool {
+// IsEmpty reports whether the Set has no elements. IsEmpty does not modify the receiver.
+func (s *Set[K]) IsEmpty() bool {
 	return len(s.entries) == 0
 }
 
@@ -213,10 +290,19 @@ func (s *Set[K]) Clone() *Set[K] {
 // Update adds the elements of other to the receiver. Update modifies the receiver in
 // place and does not modify other.
 func (s *Set[K]) Update(other *Set[K]) {
-	if s.entries == nil {
-		s.entries = make(map[K]struct{})
-	}
+	s.ensureEntries()
 	for element := range other.entries {
+		s.entries[element] = struct{}{}
+	}
+}
+
+// AddAll adds every element yielded by seq to the receiver. It is the sequence form of
+// Update. s.AddAll(s.All()) is allowed, because it only rewrites existing elements.
+// Otherwise seq must not modify or iterate the receiver while AddAll runs. AddAll modifies
+// the receiver in place.
+func (s *Set[K]) AddAll(seq iter.Seq[K]) {
+	s.ensureEntries()
+	for element := range seq {
 		s.entries[element] = struct{}{}
 	}
 }
@@ -227,4 +313,63 @@ func (s *Set[K]) DifferenceUpdate(other *Set[K]) {
 	for element := range other.entries {
 		delete(s.entries, element)
 	}
+}
+
+// RemoveAll deletes every element yielded by seq from the receiver. It is the sequence
+// form of DifferenceUpdate. It removes only the elements seq yields. Use Clear to empty the
+// Set. A sequence derived from the receiver is safe, so s.RemoveAll(s.All()) empties s.
+// RemoveAll modifies the receiver in place.
+func (s *Set[K]) RemoveAll(seq iter.Seq[K]) {
+	for element := range seq {
+		delete(s.entries, element)
+	}
+}
+
+// IntersectionUpdate removes from the receiver every element that is not in other. It is
+// the in-place form of Intersection and the Set form of Java's retainAll. It costs time in
+// proportion to the smaller of the two Sets. It replaces the underlying map, which releases
+// the old storage to the garbage collector. IntersectionUpdate modifies the receiver in
+// place and does not modify other.
+func (s *Set[K]) IntersectionUpdate(other *Set[K]) {
+	smaller, larger := smallerFirst(s, other)
+	kept := make(map[K]struct{}, len(smaller.entries))
+	for element := range smaller.entries {
+		if larger.Contains(element) {
+			kept[element] = struct{}{}
+		}
+	}
+	s.entries = kept
+}
+
+// DisjunctionUpdate sets the receiver to the elements that are in exactly one of the
+// receiver and other. It is the in-place form of Disjunction. Passing the receiver itself
+// as other empties the receiver. DisjunctionUpdate modifies the receiver in place and does
+// not modify other.
+func (s *Set[K]) DisjunctionUpdate(other *Set[K]) {
+	// Clearing gives the same result as deleting every element, and releases the old storage.
+	if other == s {
+		s.Clear()
+		return
+	}
+
+	s.ensureEntries()
+	for element := range other.entries {
+		if s.Contains(element) {
+			delete(s.entries, element)
+			continue
+		}
+		s.entries[element] = struct{}{}
+	}
+}
+
+// ContainsAll reports whether every element yielded by seq is in the receiver. It is the
+// sequence form of IsSuperset. It stops reading seq at the first element the receiver does
+// not contain, and an empty sequence gives true. ContainsAll does not modify the receiver.
+func (s *Set[K]) ContainsAll(seq iter.Seq[K]) bool {
+	for element := range seq {
+		if !s.Contains(element) {
+			return false
+		}
+	}
+	return true
 }

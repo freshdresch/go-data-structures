@@ -1,6 +1,9 @@
 package set
 
 import (
+	"cmp"
+	"iter"
+	"maps"
 	"slices"
 	"testing"
 
@@ -9,7 +12,7 @@ import (
 
 func TestMakingEmptySet(t *testing.T) {
 	empty := New[string]()
-	assert.True(t, empty.Empty())
+	assert.True(t, empty.IsEmpty())
 }
 
 func TestMakingSetFromSlice(t *testing.T) {
@@ -28,7 +31,7 @@ func TestMakingSetFromSlice(t *testing.T) {
 
 func TestZeroValueSet(t *testing.T) {
 	var zero Set[int]
-	assert.True(t, zero.Empty())
+	assert.True(t, zero.IsEmpty())
 
 	zero.Add(1)
 	zero.Add(2)
@@ -180,7 +183,7 @@ func TestCloneSafety(t *testing.T) {
 	assert.True(t, cars.Equals(other))
 
 	cars.Clear()
-	assert.True(t, cars.Empty())
+	assert.True(t, cars.IsEmpty())
 
 	assert.Equal(t, 3, other.Len())
 	assert.True(t, other.Contains("honda"))
@@ -328,7 +331,7 @@ func TestZeroValueSetOperations(t *testing.T) {
 			result.Add(99)
 			assert.True(t, result.Contains(99))
 			assert.False(t, populated.Contains(99))
-			assert.True(t, zero.Empty())
+			assert.True(t, zero.IsEmpty())
 		})
 	}
 }
@@ -338,19 +341,440 @@ func TestZeroValueSetMethods(t *testing.T) {
 	assert.Equal(t, []int{}, zero.ToSlice())
 
 	clone := zero.Clone()
-	assert.True(t, clone.Empty())
+	assert.True(t, clone.IsEmpty())
 	clone.Add(99)
 	assert.True(t, clone.Contains(99))
 
 	var cleared Set[int]
 	cleared.Clear()
-	assert.True(t, cleared.Empty())
+	assert.True(t, cleared.IsEmpty())
 	cleared.Add(1)
 	assert.True(t, cleared.Contains(1))
 
 	var subtracted Set[int]
 	subtracted.DifferenceUpdate(FromSlice([]int{1, 2}))
-	assert.True(t, subtracted.Empty())
+	assert.True(t, subtracted.IsEmpty())
 	subtracted.Add(99)
 	assert.True(t, subtracted.Contains(99))
+}
+
+// isEven is a named function type, to check that Predicate accepts it.
+type isEven func(int) bool
+
+// sortedElements returns the elements of set in ascending order.
+func sortedElements[K cmp.Ordered](set *Set[K]) []K {
+	elements := set.ToSlice()
+	slices.Sort(elements)
+	return elements
+}
+
+// yieldsTwice yields 7 twice, to check that duplicates are stored once.
+var yieldsTwice iter.Seq[int] = func(yield func(int) bool) {
+	if !yield(7) {
+		return
+	}
+	yield(7)
+}
+
+func TestContainsFunc(t *testing.T) {
+	even := func(element int) bool { return element%2 == 0 }
+
+	var zero Set[int]
+	assert.False(t, zero.ContainsFunc(even))
+	assert.False(t, New[int]().ContainsFunc(even))
+
+	odds := FromSlice([]int{1, 3, 5})
+	assert.False(t, odds.ContainsFunc(even))
+	assert.True(t, odds.ContainsFunc(func(int) bool { return true }))
+
+	mixed := FromSlice([]int{1, 2, 3})
+	assert.True(t, mixed.ContainsFunc(even))
+
+	calls := 0
+	countCalls := func(int) bool {
+		calls++
+		return true
+	}
+	assert.True(t, FromSlice([]int{1, 2, 3}).ContainsFunc(countCalls))
+	assert.Equal(t, 1, calls)
+}
+
+func TestRemoveFunc(t *testing.T) {
+	even := func(element int) bool { return element%2 == 0 }
+
+	mixed := FromSlice([]int{1, 2, 3, 4})
+	mixed.RemoveFunc(even)
+	assert.Equal(t, []int{1, 3}, sortedElements(mixed))
+
+	all := FromSlice([]int{2, 4})
+	all.RemoveFunc(even)
+	assert.True(t, all.IsEmpty())
+
+	none := FromSlice([]int{1, 3})
+	none.RemoveFunc(even)
+	assert.Equal(t, []int{1, 3}, sortedElements(none))
+
+	var zero Set[int]
+	zero.RemoveFunc(even)
+	assert.True(t, zero.IsEmpty())
+
+	empty := New[int]()
+	empty.RemoveFunc(even)
+	assert.True(t, empty.IsEmpty())
+}
+
+func TestFilter(t *testing.T) {
+	even := func(element int) bool { return element%2 == 0 }
+	numbers := FromSlice([]int{1, 2, 3, 4})
+
+	evens := numbers.Filter(even)
+	assert.Equal(t, []int{2, 4}, sortedElements(evens))
+	assert.Equal(t, []int{1, 2, 3, 4}, sortedElements(numbers))
+
+	none := numbers.Filter(func(int) bool { return false })
+	assert.True(t, none.IsEmpty())
+	none.Add(99)
+	assert.True(t, none.Contains(99))
+
+	all := numbers.Filter(func(int) bool { return true })
+	assert.Equal(t, []int{1, 2, 3, 4}, sortedElements(all))
+	all.Add(100)
+	assert.False(t, numbers.Contains(100))
+
+	var zero Set[int]
+	zeroResult := zero.Filter(even)
+	assert.True(t, zeroResult.IsEmpty())
+	zeroResult.Add(1)
+	assert.True(t, zero.IsEmpty())
+	assert.True(t, New[int]().Filter(even).IsEmpty())
+
+	// Adding to the result does not change the receiver.
+	evens.Add(100)
+	assert.False(t, numbers.Contains(100))
+}
+
+func TestPredicateKinds(t *testing.T) {
+	plain := func(element int) bool { return element%2 == 0 }
+	tests := []struct {
+		name      string
+		predicate Predicate[int]
+	}{
+		{"function literal", func(element int) bool { return element%2 == 0 }},
+		{"plain function variable", plain},
+		{"named function type", isEven(plain)},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			numbers := FromSlice([]int{1, 2, 3, 4})
+			assert.True(t, numbers.ContainsFunc(test.predicate))
+			assert.Equal(t, []int{2, 4}, sortedElements(numbers.Filter(test.predicate)))
+
+			numbers.RemoveFunc(test.predicate)
+			assert.Equal(t, []int{1, 3}, sortedElements(numbers))
+		})
+	}
+}
+
+func TestOf(t *testing.T) {
+	empty := Of[int]()
+	assert.True(t, empty.IsEmpty())
+	empty.Add(1)
+	assert.True(t, empty.Contains(1))
+
+	numbers := Of(1, 2, 2, 3)
+	assert.Equal(t, []int{1, 2, 3}, sortedElements(numbers))
+
+	input := []int{1, 2}
+	spread := Of(input...)
+	input[0] = 99
+	assert.Equal(t, []int{1, 2}, sortedElements(spread))
+	assert.False(t, spread.Contains(99))
+}
+
+func TestCollect(t *testing.T) {
+	cars := FromSlice([]string{"porsche", "toyota"})
+	copied := Collect(cars.All())
+	assert.Equal(t, []string{"porsche", "toyota"}, sortedElements(copied))
+
+	counts := map[string]int{"honda": 1, "ford": 2}
+	keys := Collect(maps.Keys(counts))
+	assert.Equal(t, []string{"ford", "honda"}, sortedElements(keys))
+
+	empty := Collect(slices.Values([]int{}))
+	assert.True(t, empty.IsEmpty())
+	empty.Add(1)
+	assert.True(t, empty.Contains(1))
+
+	duplicates := Collect(yieldsTwice)
+	assert.Equal(t, []int{7}, sortedElements(duplicates))
+}
+
+func TestAddAll(t *testing.T) {
+	target := FromSlice([]int{3})
+
+	target.AddAll(FromSlice([]int{1, 2}).All())
+	assert.Equal(t, []int{1, 2, 3}, sortedElements(target))
+
+	target.AddAll(slices.Values([]int{}))
+	assert.Equal(t, []int{1, 2, 3}, sortedElements(target))
+
+	target.AddAll(yieldsTwice)
+	assert.Equal(t, []int{1, 2, 3, 7}, sortedElements(target))
+
+	var zero Set[int]
+	zero.AddAll(slices.Values([]int{5}))
+	assert.Equal(t, []int{5}, sortedElements(&zero))
+
+	var emptyTarget Set[int]
+	emptyTarget.AddAll(slices.Values([]int{}))
+	assert.True(t, emptyTarget.IsEmpty())
+	emptyTarget.Add(1)
+	assert.True(t, emptyTarget.Contains(1))
+
+	// Adding a set's own elements leaves it unchanged.
+	self := FromSlice([]int{1, 2})
+	self.AddAll(self.All())
+	assert.Equal(t, []int{1, 2}, sortedElements(self))
+}
+
+func TestRemoveAll(t *testing.T) {
+	target := FromSlice([]int{1, 2, 3, 4})
+
+	target.RemoveAll(FromSlice([]int{2, 4}).All())
+	assert.Equal(t, []int{1, 3}, sortedElements(target))
+
+	target.RemoveAll(slices.Values([]int{}))
+	assert.Equal(t, []int{1, 3}, sortedElements(target))
+
+	target.RemoveAll(slices.Values([]int{99}))
+	assert.Equal(t, []int{1, 3}, sortedElements(target))
+
+	target.RemoveAll(slices.Values([]int{1, 1}))
+	assert.Equal(t, []int{3}, sortedElements(target))
+
+	var zero Set[int]
+	zero.RemoveAll(slices.Values([]int{1}))
+	assert.True(t, zero.IsEmpty())
+	zero.Add(1)
+	assert.True(t, zero.Contains(1))
+
+	// Removing a set's own elements empties it.
+	self := FromSlice([]int{1, 2})
+	self.RemoveAll(self.All())
+	assert.True(t, self.IsEmpty())
+}
+
+// relationCase is a receiver and argument pair with the expected result of each relation.
+// The sets are built by newPair, so each test gets its own copies to modify.
+type relationCase struct {
+	name       string
+	newPair    func() (receiver, argument *Set[int])
+	isSubset   bool
+	isSuperset bool
+	isDisjoint bool
+	equals     bool
+}
+
+// pairOf returns a newPair function for two distinct sets holding the given elements.
+func pairOf(receiver, argument []int) func() (*Set[int], *Set[int]) {
+	return func() (*Set[int], *Set[int]) {
+		return FromSlice(receiver), FromSlice(argument)
+	}
+}
+
+func relationCases() []relationCase {
+	return []relationCase{
+		{
+			name:       "equal sets",
+			newPair:    pairOf([]int{1, 2}, []int{1, 2}),
+			isSubset:   true,
+			isSuperset: true,
+			isDisjoint: false,
+			equals:     true,
+		},
+		{
+			name:       "proper subset",
+			newPair:    pairOf([]int{1}, []int{1, 2}),
+			isSubset:   true,
+			isSuperset: false,
+			isDisjoint: false,
+			equals:     false,
+		},
+		{
+			name:       "proper superset",
+			newPair:    pairOf([]int{1, 2}, []int{1}),
+			isSubset:   false,
+			isSuperset: true,
+			isDisjoint: false,
+			equals:     false,
+		},
+		{
+			name:       "overlapping",
+			newPair:    pairOf([]int{1, 2}, []int{2, 3}),
+			isSubset:   false,
+			isSuperset: false,
+			isDisjoint: false,
+			equals:     false,
+		},
+		{
+			name:       "disjoint",
+			newPair:    pairOf([]int{1, 2}, []int{3, 4}),
+			isSubset:   false,
+			isSuperset: false,
+			isDisjoint: true,
+			equals:     false,
+		},
+		{
+			name:       "empty receiver",
+			newPair:    pairOf([]int{}, []int{1, 2}),
+			isSubset:   true,
+			isSuperset: false,
+			isDisjoint: true,
+			equals:     false,
+		},
+		{
+			name:       "empty argument",
+			newPair:    pairOf([]int{1, 2}, []int{}),
+			isSubset:   false,
+			isSuperset: true,
+			isDisjoint: true,
+			equals:     false,
+		},
+		{
+			name: "two zero values",
+			newPair: func() (*Set[int], *Set[int]) {
+				return &Set[int]{}, &Set[int]{}
+			},
+			isSubset:   true,
+			isSuperset: true,
+			isDisjoint: true,
+			equals:     true,
+		},
+		{
+			name: "zero receiver",
+			newPair: func() (*Set[int], *Set[int]) {
+				return &Set[int]{}, FromSlice([]int{1, 2})
+			},
+			isSubset:   true,
+			isSuperset: false,
+			isDisjoint: true,
+			equals:     false,
+		},
+		{
+			name: "zero argument",
+			newPair: func() (*Set[int], *Set[int]) {
+				return FromSlice([]int{1, 2}), &Set[int]{}
+			},
+			isSubset:   false,
+			isSuperset: true,
+			isDisjoint: true,
+			equals:     false,
+		},
+		{
+			name: "same non-empty set",
+			newPair: func() (*Set[int], *Set[int]) {
+				same := FromSlice([]int{1, 2})
+				return same, same
+			},
+			isSubset:   true,
+			isSuperset: true,
+			isDisjoint: false,
+			equals:     true,
+		},
+		{
+			name: "same zero-value set",
+			newPair: func() (*Set[int], *Set[int]) {
+				same := &Set[int]{}
+				return same, same
+			},
+			isSubset:   true,
+			isSuperset: true,
+			isDisjoint: true,
+			equals:     true,
+		},
+	}
+}
+
+func TestRelations(t *testing.T) {
+	for _, test := range relationCases() {
+		t.Run(test.name, func(t *testing.T) {
+			receiver, argument := test.newPair()
+			assert.Equal(t, test.isSubset, receiver.IsSubset(argument))
+			assert.Equal(t, test.isSuperset, receiver.IsSuperset(argument))
+			assert.Equal(t, test.isDisjoint, receiver.IsDisjoint(argument))
+			assert.Equal(t, test.equals, receiver.Equals(argument))
+		})
+	}
+}
+
+func TestContainsAll(t *testing.T) {
+	numbers := FromSlice([]int{1, 2, 3})
+
+	assert.True(t, numbers.ContainsAll(FromSlice([]int{1, 3}).All()))
+	assert.False(t, numbers.ContainsAll(slices.Values([]int{1, 4})))
+	assert.False(t, numbers.ContainsAll(slices.Values([]int{4, 5})))
+	assert.True(t, numbers.ContainsAll(slices.Values([]int{})))
+	assert.True(t, numbers.ContainsAll(slices.Values([]int{2, 2})))
+	assert.True(t, FromSlice([]int{7}).ContainsAll(yieldsTwice))
+
+	var zero Set[int]
+	assert.True(t, zero.ContainsAll(slices.Values([]int{})))
+	assert.False(t, zero.ContainsAll(slices.Values([]int{1})))
+
+	reads := 0
+	missingFirst := func(yield func(int) bool) {
+		for _, element := range []int{99, 1, 2} {
+			reads++
+			if !yield(element) {
+				return
+			}
+		}
+	}
+	assert.False(t, numbers.ContainsAll(missingFirst))
+	assert.Equal(t, 1, reads)
+}
+
+func TestInPlaceOperationsMatchCopyingForms(t *testing.T) {
+	for _, test := range relationCases() {
+		t.Run(test.name, func(t *testing.T) {
+			receiver, argument := test.newPair()
+			if receiver == argument {
+				original := sortedElements(receiver)
+				receiver.IntersectionUpdate(receiver)
+				assert.Equal(t, original, sortedElements(receiver))
+				receiver.DisjunctionUpdate(receiver)
+				assert.True(t, receiver.IsEmpty())
+				return
+			}
+
+			originalArgument := sortedElements(argument)
+
+			intersected := receiver.Clone()
+			intersected.IntersectionUpdate(argument)
+			expected := sortedElements(receiver.Intersection(argument))
+			assert.Equal(t, expected, sortedElements(intersected))
+			assert.Equal(t, originalArgument, sortedElements(argument))
+
+			disjoined := receiver.Clone()
+			disjoined.DisjunctionUpdate(argument)
+			expected = sortedElements(receiver.Disjunction(argument))
+			assert.Equal(t, expected, sortedElements(disjoined))
+			assert.Equal(t, originalArgument, sortedElements(argument))
+		})
+	}
+}
+
+func TestDisjunctionUpdateZeroValueReceiver(t *testing.T) {
+	var zero Set[int]
+	zero.DisjunctionUpdate(FromSlice([]int{1, 2}))
+	assert.Equal(t, []int{1, 2}, sortedElements(&zero))
+}
+
+func TestIntersectionUpdateZeroValueReceiver(t *testing.T) {
+	var zero Set[int]
+	zero.IntersectionUpdate(FromSlice([]int{1, 2}))
+	assert.True(t, zero.IsEmpty())
+	zero.Add(3)
+	assert.True(t, zero.Contains(3))
 }

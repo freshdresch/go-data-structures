@@ -22,3 +22,6 @@ go.work
 
 # any bazel directories
 bazel-*
+
+# Mac litter
+.DS_Store

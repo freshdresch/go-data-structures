@@ -197,14 +197,20 @@ func produce[T any](target queue[T], buf []T, total, producer int, fill fillFunc
 	for sent := 0; sent < total; {
 		batch := buf[:min(len(buf), total-sent)]
 		fill(batch, producer, int64(sent))
-		for unsent := batch; len(unsent) > 0; {
-			moved := target.enqueue(unsent)
-			if moved == 0 {
-				runtime.Gosched()
-			}
-			unsent = unsent[moved:]
-		}
+		enqueueAll(target, batch)
 		sent += len(batch)
+	}
+}
+
+// enqueueAll enqueues every element of items on target, retrying the unsent remainder and
+// yielding whenever an attempt moves nothing. A full queue is normal backpressure, so it retries.
+func enqueueAll[T any](target queue[T], items []T) {
+	for unsent := items; len(unsent) > 0; {
+		moved := target.enqueue(unsent)
+		if moved == 0 {
+			runtime.Gosched()
+		}
+		unsent = unsent[moved:]
 	}
 }
 

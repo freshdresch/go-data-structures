@@ -631,3 +631,33 @@ func TestHistogram(t *testing.T) {
 		}
 	})
 }
+
+// TestHandoffAccounting checks that every handoff run records each of its round trips once, and
+// that it returns, which shows the ponger stopped. Each run has accountingDeadline to finish.
+func TestHandoffAccounting(t *testing.T) {
+	const roundTrips = 10_000
+	for _, impl := range handoffImpls() {
+		t.Run("impl="+impl.name, func(t *testing.T) {
+			type runOutcome struct {
+				result handoffResult
+				err    error
+			}
+			outcomes := make(chan runOutcome, 1)
+			go func() {
+				result, err := impl.run(noopTimer{}, roundTrips)
+				outcomes <- runOutcome{result: result, err: err}
+			}()
+			var outcome runOutcome
+			select {
+			case outcome = <-outcomes:
+			case <-time.After(accountingDeadline):
+				// The test is failing anyway, so the stuck goroutine is abandoned, not joined.
+				t.Fatalf("run did not finish within %v, likely the ponger did not stop",
+					accountingDeadline)
+			}
+			require.NoError(t, outcome.err)
+			assert.Equal(t, roundTrips, outcome.result.recorded)
+			assert.Equal(t, roundTrips, outcome.result.latency.count())
+		})
+	}
+}

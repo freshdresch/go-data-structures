@@ -101,24 +101,14 @@ type ringSingleQueue[T any] struct {
 
 // enqueue moves only items[0], so it returns 0 or 1.
 func (q *ringSingleQueue[T]) enqueue(items []T) int {
-	err := q.ring.Enqueue(items[0])
-	if errors.Is(err, ring.ErrFull) {
-		return 0
-	}
-	if err != nil {
-		panic(err)
-	}
-	return 1
+	return movedOrPanic(q.ring.Enqueue(items[0]), ring.ErrFull, 1)
 }
 
 // dequeue fills only dst[0], so it returns 0 or 1.
 func (q *ringSingleQueue[T]) dequeue(dst []T) int {
 	elem, err := q.ring.Dequeue()
-	if errors.Is(err, ring.ErrEmpty) {
+	if movedOrPanic(err, ring.ErrEmpty, 1) == 0 {
 		return 0
-	}
-	if err != nil {
-		panic(err)
 	}
 	dst[0] = elem
 	return 1
@@ -132,27 +122,29 @@ type ringBulkQueue[T any] struct {
 }
 
 func (q *ringBulkQueue[T]) enqueue(items []T) int {
-	err := q.ring.EnqueueBulk(items, uint32(len(items)), nil)
-	if errors.Is(err, ring.ErrFull) {
-		return 0
-	}
-	if err != nil {
-		panic(err)
-	}
-	return len(items)
+	return movedOrPanic(q.ring.EnqueueBulk(items, uint32(len(items)), nil), ring.ErrFull, len(items))
 }
 
 // dequeue copies the elements DequeueBulk returns into dst, because today's DequeueBulk returns a
 // new slice.
 func (q *ringBulkQueue[T]) dequeue(dst []T) int {
 	elems, err := q.ring.DequeueBulk(uint32(len(dst)), nil)
-	if errors.Is(err, ring.ErrEmpty) {
+	if movedOrPanic(err, ring.ErrEmpty, len(dst)) == 0 {
+		return 0
+	}
+	return copy(dst, elems)
+}
+
+// movedOrPanic returns 0 when err is the call's expected failure, and moved when err is nil. Any
+// other error is a test bug, so it panics with it.
+func movedOrPanic(err, failure error, moved int) int {
+	if errors.Is(err, failure) {
 		return 0
 	}
 	if err != nil {
 		panic(err)
 	}
-	return copy(dst, elems)
+	return moved
 }
 
 // chanPollQueue uses a channel as a polled, non-blocking queue, moving one element at a time

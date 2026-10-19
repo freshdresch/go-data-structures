@@ -22,6 +22,7 @@ go_test(
     name = "ring_bench",
     size = "large",
     srcs = [
+        "alloc_test.go",
         "bench_adapters_test.go",
         "bench_harness_test.go",
         "bench_test.go",

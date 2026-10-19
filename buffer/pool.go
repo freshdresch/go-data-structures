@@ -1,42 +1,61 @@
-// package buffer provides a buffer primitive that encourages re-use of the same
-// fixed length buffer, as opposed to the dynamic nature of slices.
 package buffer
 
 import "sync"
 
-// Pool manages reusable Buffers of a fixed capacity.
+// Pool hands out reusable Buffers that all have the same capacity. The zero value Pool is not
+// usable. Create one with NewPool.
 type Pool[T any] struct {
-	pool  sync.Pool
-	clear bool // whether to wipe the buffer contents before returning to the pool
+	pool      sync.Pool
+	capacity  int
+	zeroOnPut bool // whether Put wipes every element the released buffer ever held
 }
 
-// NewPool creates a pool of Buffers with the given capacity.
-func NewPool[T any](bufCap int, clear bool) *Pool[T] {
+// NewPool returns a Pool of Buffers with the given capacity. If zeroOnPut is true, Put wipes
+// every element each released buffer ever held, including ones already removed. It panics if
+// capacity is negative.
+func NewPool[T any](capacity int, zeroOnPut bool) *Pool[T] {
+	if capacity < 0 {
+		panic("buffer: negative capacity")
+	}
 	return &Pool[T]{
-		clear: clear,
+		capacity:  capacity,
+		zeroOnPut: zeroOnPut,
 		pool: sync.Pool{
 			New: func() any {
-				return NewBuffer[T](bufCap)
+				return NewBuffer[T](capacity)
 			},
 		},
 	}
 }
 
-// Get retrieves a Buffer from the pool.
+// Get returns a buffer with Len() == 0 and Cap() equal to the pool's capacity. It may allocate a
+// new buffer. Without zeroOnPut, the backing array may hold stale values that Grow exposes.
 func (p *Pool[T]) Get() *Buffer[T] {
 	return p.pool.Get().(*Buffer[T])
 }
 
-// Put returns a Buffer to the pool (reset before returning).
-func (p *Pool[T]) Put(b *Buffer[T]) {
-	if b == nil {
+// Put resets released and may return it to the pool for reuse. When the pool was created with
+// zeroOnPut, it also wipes every element released ever held, including ones already removed. A
+// buffer whose Cap() differs from the pool's capacity is reset but not kept, so Get always
+// returns a buffer of the pool's capacity. The caller must not use released after Put, because
+// another goroutine may get it next. Put(nil) does nothing.
+func (p *Pool[T]) Put(released *Buffer[T]) {
+	if released == nil {
 		return
 	}
 
-	if p.clear {
-		b.ResetAndZero()
+	if p.zeroOnPut {
+		released.resetAndZeroAll()
 	} else {
-		b.Reset()
+		released.Reset()
 	}
-	p.pool.Put(b)
+
+	if p.accepts(released) {
+		p.pool.Put(released)
+	}
+}
+
+// accepts reports whether released has the pool's capacity.
+func (p *Pool[T]) accepts(released *Buffer[T]) bool {
+	return released.Cap() == p.capacity
 }

@@ -8,10 +8,10 @@ go_library(
     importpath = "github.com/freshdresch/go-data-structures",
     deps = [
         "//buffer",
-        "//maps",
         "//ring",
         "//set",
-        "//slices",
+        "//xmaps",
+        "//xslices",
     ],
     visibility = ["//visibility:public"],
 )

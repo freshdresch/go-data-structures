@@ -1,15 +1,16 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
-    name = "slices",
+    name = "xslices",
     srcs = ["slices.go"],
+    importpath = "github.com/freshdresch/go-data-structures/xslices",
     visibility = ["//visibility:public"],
 )
 
 go_test(
-    name = "slices_test",
+    name = "xslices_test",
     srcs = ["slices_test.go"],
-    embed = [":slices"],
+    embed = [":xslices"],
     deps = [
         "@com_github_stretchr_testify//assert:assert",
     ],

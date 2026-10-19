@@ -1,18 +1,41 @@
+// Package ring provides a fixed-size, lock-free ring buffer modeled on DPDK's rte_ring.
 package ring
 
 import (
 	"errors"
 	"fmt"
+	"math"
 	"runtime"
 	"sync/atomic"
 )
 
-// Ring is a Go ring implementation heavily inspired by rte_ring from DPDK. It provides a fixed-size
-// ring buffer that can function as anything between an SPSC and MPMC queue.
+// ErrInvalidCount is returned by New, wrapped, when the count is not a power of two, is less
+// than 2, or exceeds math.MaxInt.
+var ErrInvalidCount = errors.New("ring: count must be a power of two and at least 2")
+
+// ErrFull is returned unwrapped by Enqueue and EnqueueBulk when the ring does not have enough
+// free slots for the request. The caller may retry.
+var ErrFull = errors.New("ring: not enough free slots")
+
+// ErrEmpty is returned unwrapped by Dequeue and DequeueBulk when the ring does not have enough
+// occupied entries for the request. The caller may retry.
+var ErrEmpty = errors.New("ring: not enough occupied entries")
+
+// ErrShortBatch is returned by EnqueueBulk, wrapped, when numElems exceeds the length of the
+// batch.
+var ErrShortBatch = errors.New("ring: batch is shorter than the requested count")
+
+// ErrExceedsCapacity is returned by EnqueueBulk and DequeueBulk, wrapped, when numElems exceeds
+// the ring's capacity. Such a request can never succeed, so retrying it is pointless.
+var ErrExceedsCapacity = errors.New("ring: requested count exceeds the ring's capacity")
+
+// Ring is a Go ring implementation heavily inspired by rte_ring from DPDK. It provides a
+// fixed-size ring buffer that can function as anything between an SPSC and MPMC queue.
 //
 // However, there is a notable difference in that Go does not provide the relaxed memory model,
-// acquire/release fences, and ordering guarantees that the DPDK C implementation leverages. We try
-// to be as performant as we can, in the face of working only in the realm of sequential consistency.
+// acquire/release fences, and ordering guarantees that the DPDK C implementation leverages. We
+// try to be as performant as we can, in the face of working only in the realm of sequential
+// consistency.
 //
 // The ring defaults to an SPSC queue in the base implementation, and multi-producer/multi-consumer
 // semantics can be added through functional options. For example: to create an MPMC queue,
@@ -28,197 +51,201 @@ import (
 type Ring[T any] struct {
 	entries []T
 
-	prodHead *uint32 /* The head index for the producer: used for reservation. */
-	prodTail *uint32 /* The tail index for the producer: used for publication. */
+	prodHead *uint32 // The head index for the producer: used for reservation.
+	prodTail *uint32 // The tail index for the producer: used for publication.
 
-	consHead *uint32 /* The head index for the consumer: used for reservation*/
-	consTail *uint32 /* The tail index for the consumer: used for publication. */
+	consHead *uint32 // The head index for the consumer: used for reservation.
+	consTail *uint32 // The tail index for the consumer: used for publication.
 
-	size     uint32 /* Backing array length. */
-	mask     uint32 /* Mask for bounding the index of the ring. */
-	capacity uint32 /* Usable slots in the ring. */
+	size     uint32 // Backing array length.
+	mask     uint32 // Mask for bounding the index of the ring.
+	capacity uint32 // Usable slots in the ring.
 
-	multiProd bool /* Multi-Producer enqueue instead of single. */
-	multiCons bool /* Multi-Consumer dequeue instead of single. */
+	multiProd bool // Multi-Producer enqueue instead of single.
+	multiCons bool // Multi-Consumer dequeue instead of single.
 
-	_ [2]byte /* padding for better cache alignment */
+	_ [2]byte // padding for better cache alignment
 }
 
-type RingOption[T any] func(*Ring[T])
+type config struct {
+	multiProd bool
+	multiCons bool
+}
 
-func WithMultiProdEnqueue[T any]() RingOption[T] {
-	return func(ring *Ring[T]) {
-		ring.multiProd = true
+// Option configures a Ring at construction.
+type Option func(*config)
+
+// WithMultiProdEnqueue returns an Option that makes the enqueue methods safe for concurrent use by
+// multiple producers.
+func WithMultiProdEnqueue() Option {
+	return func(cfg *config) {
+		cfg.multiProd = true
 	}
 }
 
-func WithMultiConsDequeue[T any]() RingOption[T] {
-	return func(ring *Ring[T]) {
-		ring.multiCons = true
+// WithMultiConsDequeue returns an Option that makes the dequeue methods safe for concurrent use by
+// multiple consumers.
+func WithMultiConsDequeue() Option {
+	return func(cfg *config) {
+		cfg.multiCons = true
 	}
 }
 
-func NewRing[T any](count uint32, opts ...RingOption[T]) (*Ring[T], error) {
-	if count < 2 || (count&(count-1)) != 0 {
-		return nil, fmt.Errorf("count must be a power of two and >= 2; got %d", count)
+// New returns an empty Ring with count slots, of which count - 1 are usable. Without options, the
+// ring allows one producer and one consumer at a time. It returns an error wrapping
+// ErrInvalidCount when count is not a power of two, is less than 2, or exceeds math.MaxInt.
+func New[T any](count uint32, options ...Option) (*Ring[T], error) {
+	isPowerOfTwo := count&(count-1) == 0
+	if count < 2 || !isPowerOfTwo || uint64(count) > uint64(math.MaxInt) {
+		return nil, fmt.Errorf("new ring with count %d: %w", count, ErrInvalidCount)
 	}
+
+	var cfg config
+	for _, option := range options {
+		option(&cfg)
+	}
+
 	mask := count - 1
-
 	ring := &Ring[T]{
-		entries:  make([]T, int(count)),
-		size:     count,
-		mask:     mask,
-		capacity: mask,
-		prodHead: new(uint32),
-		prodTail: new(uint32),
-		consHead: new(uint32),
-		consTail: new(uint32),
+		entries:   make([]T, int(count)),
+		size:      count,
+		mask:      mask,
+		capacity:  mask,
+		prodHead:  new(uint32),
+		prodTail:  new(uint32),
+		consHead:  new(uint32),
+		consTail:  new(uint32),
+		multiProd: cfg.multiProd,
+		multiCons: cfg.multiCons,
 	}
-
-	*ring.prodHead = 0
-	*ring.prodTail = 0
-	*ring.consHead = 0
-	*ring.consTail = 0
-
-	for _, opt := range opts {
-		opt(ring)
-	}
-
 	return ring, nil
 }
 
-/**
- * Reset flushes the entries in the ring by resetting its state.
- *
- * WARNING: Make sure to only do this while the ring is not in use!
- *
- * This reset function does not change the params of how the ring was initialized, it only resets
- * the consumer and producer indices to show the ring is empty.
- */
+// Capacity returns the number of usable slots in the ring, which is one less than the count
+// given to New.
+func (ring *Ring[T]) Capacity() uint32 {
+	return ring.capacity
+}
+
+// Reset empties the ring by resetting its indices.
+//
+// WARNING: Make sure to only do this while the ring is not in use!
+//
+// Reset does not change how the ring was configured. It only resets the producer and consumer
+// indices so the ring is empty.
 func (ring *Ring[T]) Reset() {
-	/* Just use atomics so we don't have to worry about single or multi */
+	// Just use atomics so we don't have to worry about single or multi
 	atomic.StoreUint32(ring.prodHead, 0)
 	atomic.StoreUint32(ring.prodTail, 0)
 	atomic.StoreUint32(ring.consHead, 0)
 	atomic.StoreUint32(ring.consTail, 0)
 }
 
-/**
- * Count returns the number of occupied entries in the ring.
- *
- * Returns:
- *   The number of occupied entries.
- */
+// Count returns the number of occupied entries in the ring.
 func (ring *Ring[T]) Count() uint32 {
 	prodTail := atomic.LoadUint32(ring.prodTail)
 	consTail := atomic.LoadUint32(ring.consTail)
-	var count uint32 = prodTail - consTail
+	count := prodTail - consTail
 	if count > ring.capacity {
 		return ring.capacity
 	}
 	return count
 }
 
-/**
- * Free returns the number of empty entries in the ring.
- *
- * Returns:
- *   The number of empty entries.
- */
+// Free returns the number of empty entries in the ring.
 func (ring *Ring[T]) Free() uint32 {
 	return ring.capacity - ring.Count()
 }
 
-/**
- * Full returns whether the ring is full or not.
- *
- * Returns:
- *   `true` if the ring is full, or `false` if it is not full.
- */
+// Full reports whether the ring is full.
 func (ring *Ring[T]) Full() bool {
 	return ring.Free() == 0
 }
 
-/**
- * Empty returns whether the ring is empty or not.
- *
- * Returns:
- *   `true` if the ring is empty, or `false` if it is not empty.
- */
+// Empty reports whether the ring is empty.
 func (ring *Ring[T]) Empty() bool {
 	prodTail := atomic.LoadUint32(ring.prodTail)
 	consTail := atomic.LoadUint32(ring.consTail)
 	return consTail == prodTail
 }
 
-/**
- * Enqueue places one object in the ring.
- *
- * Params:
- *   element - the object we want to enqueue into the ring.
- *
- * Returns:
- *   `nil` if the element was successfully enqueued, or an error explaining why if not.
- */
+// Enqueue places one element in the ring. It returns ErrFull, unwrapped, when the ring has no
+// free slot.
+//
+// Enqueue is safe for concurrent use with other enqueues only when the ring was created with
+// WithMultiProdEnqueue. It is always safe to run alongside dequeues.
 func (ring *Ring[T]) Enqueue(element T) error {
 	var elems [1]T
 	elems[0] = element
 
 	numEnqueued := ring.doEnqueue(elems[:], 1, nil, true)
 	if numEnqueued != 1 {
-		return errors.New("no space in the ring")
+		return ErrFull
 	}
 	return nil
 }
 
-/**
- * EnqueueBulk places a slice of elements onto the ring. The `bulk` descriptor signifies that we do
- * not want any partial batches enqueued: either the entire batch gets enqueued, or we bail out and
- * enqueue nothing at all.
- *
- * Params:
- *   elems - the slice of elements we want to enqueue into the ring.
- *   numElems - the number of elements in the batch.
- *   freeSpace - a pointer where we will fill in the amount of available entries in the ring.
- *
- * Returns:
- *   `nil` if the entire batch was successfully enqueued, or an error explaining why we could not
- *   enqueue the batch.
- */
+// EnqueueBulk places the first numElems elements of elems in the ring. Either all of them are
+// enqueued and it returns nil, or none are and it returns an error.
+//
+// It checks, in order, that numElems is at most len(elems), that numElems is at most Capacity,
+// and that the ring has numElems free slots. The first failing check decides the error. These
+// return an error wrapping ErrShortBatch, an error wrapping ErrExceedsCapacity, and ErrFull
+// unwrapped. A failed call leaves the ring unchanged. A numElems of zero succeeds.
+//
+// If freeSpace is non-nil, it is written on every return with the number of free slots after the
+// call.
+//
+// EnqueueBulk is safe for concurrent use with other enqueues only when the ring was created with
+// WithMultiProdEnqueue. It is always safe to run alongside dequeues.
 func (ring *Ring[T]) EnqueueBulk(
 	elems []T,
 	numElems uint32,
 	freeSpace *uint32,
 ) error {
+	if uint64(numElems) > uint64(len(elems)) {
+		updateValidPtr(freeSpace, ring.freeEntries())
+		return fmt.Errorf(
+			"enqueue %d elements from a batch of %d: %w",
+			numElems,
+			len(elems),
+			ErrShortBatch,
+		)
+	}
+	if numElems > ring.capacity {
+		updateValidPtr(freeSpace, ring.freeEntries())
+		return fmt.Errorf(
+			"enqueue %d elements, capacity %d: %w",
+			numElems,
+			ring.capacity,
+			ErrExceedsCapacity,
+		)
+	}
+
 	numEnqueued := ring.doEnqueue(elems, numElems, freeSpace, true)
 	if numEnqueued != numElems {
-		return fmt.Errorf(
-			"needed %d empty slots in the ring, but only %d were free",
-			numElems,
-			numEnqueued,
-		)
+		return ErrFull
 	}
 	return nil
 }
 
-/**
- * EnqueueBurst places a slice of elements onto the ring. The 'burst' descriptor signifies that,
- * in the circumstance where our ring does not have enough space for the whole batch, we will enqueue
- * as many elements in the batch as the ring can hold.
- *
- * Params:
- *   elems - the slice of elements we want to enqueue into the ring.
- *   numElems - the number of elements in the batch.
- *   freeSpace - a pointer where we will fill in the amount of available entries in the ring.
- *
- * Returns:
- *   the number of elements successfully enqueued (on the closed interval [0, numElems]).
- */
+// EnqueueBurst places as many of the first numElems elements of elems in the ring as it has free
+// slots for. It returns the number enqueued, which is between 0 and numElems inclusive.
+//
+// It panics when numElems exceeds len(elems), before touching the ring or freeSpace. Otherwise, if
+// freeSpace is non-nil, it is written on every return with the number of free slots after the
+// call.
+//
+// EnqueueBurst is safe for concurrent use with other enqueues only when the ring was created with
+// WithMultiProdEnqueue. It is always safe to run alongside dequeues.
 func (ring *Ring[T]) EnqueueBurst(
 	elems []T,
 	numElems uint32,
 	freeSpace *uint32,
 ) uint32 {
+	if uint64(numElems) > uint64(len(elems)) {
+		panic(fmt.Sprintf("ring: burst count %d exceeds batch length %d", numElems, len(elems)))
+	}
 	return ring.doEnqueue(
 		elems,
 		numElems,
@@ -227,64 +254,65 @@ func (ring *Ring[T]) EnqueueBurst(
 	)
 }
 
-/**
- * Dequeue removes the oldest object from the ring.
- *
- * Returns:
- *   1. The dequeued element.
- *   2. `nil` if the element was successfully dequeued, or an error explaining why if not.
- */
+// Dequeue removes and returns the oldest element in the ring. It returns the zero value and
+// ErrEmpty, unwrapped, when the ring is empty.
+//
+// Dequeue is safe for concurrent use with other dequeues only when the ring was created with
+// WithMultiConsDequeue. It is always safe to run alongside enqueues.
 func (ring *Ring[T]) Dequeue() (T, error) {
 	elems, numDequeued := ring.doDequeue(1, nil, true)
 	if numDequeued != 1 {
-		return getZeroVal[T](), errors.New("no elements in the ring")
+		var zero T
+		return zero, ErrEmpty
 	}
 	return elems[0], nil
 }
 
-/**
- * DequeueBulk removes a chunk of elements from the ring. The `bulk` descriptor signifies that we do
- * not want any partial batches dequeued: either the entire batch gets dequeued, or we bail out and
- * dequeue nothing at all.
- *
- * Params:
- *   numElems - the number of elements in the batch.
- *   avail - a pointer where we will fill in the amount of occupied entries in the ring.
- *
- * Returns:
- *   1. The slice of elements we dequeued from the ring.
- *   2. `nil` if the entire batch was successfully dequeued, or an error explaining why we could not
- *      dequeue the batch.
- */
+// DequeueBulk removes and returns the numElems oldest elements in the ring. Either all of them are
+// dequeued and it returns them with a nil error, or none are and it returns a nil slice and an
+// error.
+//
+// It checks, in order, that numElems is at most Capacity and that the ring has numElems occupied
+// entries. The first failing check decides the error. These return an error wrapping
+// ErrExceedsCapacity and ErrEmpty unwrapped. A failed call leaves the ring unchanged. A numElems
+// of zero succeeds with a nil slice.
+//
+// If avail is non-nil, it is written on every return with the number of occupied entries after
+// the call.
+//
+// DequeueBulk is safe for concurrent use with other dequeues only when the ring was created with
+// WithMultiConsDequeue. It is always safe to run alongside enqueues.
 func (ring *Ring[T]) DequeueBulk(
 	numElems uint32,
 	avail *uint32,
 ) ([]T, error) {
-	elems, numDequeued := ring.doDequeue(numElems, avail, true)
-	if numDequeued != numElems {
-		return []T{}, fmt.Errorf(
-			"needed %d occupied entries in the ring, but only %d were occupied",
+	if numElems > ring.capacity {
+		updateValidPtr(avail, ring.occupiedEntries())
+		return nil, fmt.Errorf(
+			"dequeue %d elements, capacity %d: %w",
 			numElems,
-			numDequeued,
+			ring.capacity,
+			ErrExceedsCapacity,
 		)
 	}
 
+	elems, numDequeued := ring.doDequeue(numElems, avail, true)
+	if numDequeued != numElems {
+		return nil, ErrEmpty
+	}
 	return elems, nil
 }
 
-/**
- * DequeueBurst remove a chunk of elements from the ring. The 'burst' descriptor signifies that,
- * in the circumstance where our ring does have enough entries to fulfill our requested batch size,
- * we will accept a partial batch and dequeue all of the ring's elements.
- *
- * Params:
- *   numElems - the number of elements in the batch.
- *   available - a pointer where we will fill in the amount of occupied entries in the ring.
- *
- * Returns:
- *   1. The slice of elements we dequeued from the ring.
- *   2. The number of elements successfully dequeued (on the closed interval [0, numElems]).
- */
+// DequeueBurst removes and returns up to numElems of the oldest elements in the ring, taking all
+// of them when the ring does not have enough. It returns the elements and their count, which is
+// between 0 and numElems inclusive. When nothing is dequeued, including for a numElems of zero,
+// the slice is nil.
+//
+// If avail is non-nil, it is written on every return with the number of occupied entries after
+// the call.
+//
+// DequeueBurst is safe for concurrent use with other dequeues only when the ring was created with
+// WithMultiConsDequeue. It is always safe to run alongside enqueues.
 func (ring *Ring[T]) DequeueBurst(
 	numElems uint32,
 	avail *uint32,
@@ -393,21 +421,16 @@ func (ring *Ring[T]) doDequeue(
 	return elems, numElems
 }
 
-/**
- * moveProdHead moves the ring's producer head for an enqueue operation.
- *
- * Params:
- *   numItems - The number of items we want to enqueue, i.e., how far the head should be moved.
- *   oldHead - Saves the producer head value from *before* the move (where the enqueue starts).
- *   newHead - Saves the producer head value from *after* the move (where the enqueue ends).
- *   fixed - If we are doing a bulk enqueue (where we enqueue the entire batch size, or don't enqueue
- *       anything).
- *
- * Returns:
- *   1. The actual number of items enqueued. This can lie anywhere between 0 and numItems
- *      (inclusive). If it is a fixed enqueue, then 0 or numItems are the only possible values.
- *   2. Returns the number of free entries in the ring before the head was moved.
- */
+// moveProdHead moves the ring's producer head for an enqueue operation.
+//
+// numItems is the number of items to enqueue, which is how far the head should move. oldHead
+// receives the producer head from before the move, where the enqueue starts, and newHead receives
+// it from after the move, where the enqueue ends. fixed is true for a bulk enqueue, which enqueues
+// the entire batch or nothing.
+//
+// It returns the number of items reserved, between 0 and numItems inclusive, which is 0 or
+// numItems for a fixed enqueue. It also returns the number of free entries in the ring before the
+// head was moved.
 func (ring *Ring[T]) moveProdHead(
 	numItems uint32,
 	oldHead *uint32,
@@ -451,21 +474,16 @@ func (ring *Ring[T]) moveProdHead(
 	}
 }
 
-/**
- * moveConsHead moves the ring's consumer head for a dequeue operation.
- *
- * Params:
- *   numItems - The number of items we want to dequeue, i.e., how far the head should be moved.
- *   oldHead - Saves the consumer head value from *before* the move (where the dequeue starts).
- *   newHead - Saves the consumer head value from *after* the move (where the dequeue ends).
- *   fixed - If we are doing a bulk enqueue (where we dequeue the entire batch size, or don't
- *       dequeue anything).
- *
- * Returns:
- *   1. The actual number of items dequeued. This can lie anywhere between 0 and numItems
- *      (inclusive). If it is a fixed dequeue, then 0 or numItems are the only possible values.
- *   2. Returns the number of occupied entries in the ring before the head was moved.
- */
+// moveConsHead moves the ring's consumer head for a dequeue operation.
+//
+// numItems is the number of items to dequeue, which is how far the head should move. oldHead
+// receives the consumer head from before the move, where the dequeue starts, and newHead receives
+// it from after the move, where the dequeue ends. fixed is true for a bulk dequeue, which dequeues
+// the entire batch or nothing.
+//
+// It returns the number of items reserved, between 0 and numItems inclusive, which is 0 or
+// numItems for a fixed dequeue. It also returns the number of occupied entries in the ring before
+// the head was moved.
 func (ring *Ring[T]) moveConsHead(
 	numItems uint32,
 	oldHead *uint32,
@@ -522,7 +540,22 @@ func updateValidPtr(ptr *uint32, val uint32) {
 	*ptr = val
 }
 
-func getZeroVal[T any]() T {
-	var zval T
-	return zval
+// freeEntries returns the number of slots a producer could reserve right now. It loads the
+// producer head before the consumer tail, as moveProdHead does. It clamps the result to the
+// capacity, because a consumer tail that advances after the head was loaded can make the value
+// overshoot.
+func (ring *Ring[T]) freeEntries() uint32 {
+	head := atomic.LoadUint32(ring.prodHead)
+	free := ring.capacity + atomic.LoadUint32(ring.consTail) - head
+	return min(free, ring.capacity)
+}
+
+// occupiedEntries returns the number of entries a consumer could reserve right now. It loads the
+// consumer head before the producer tail, as moveConsHead does. It clamps the result to the
+// capacity, because a producer tail that advances after the head was loaded can make the value
+// overshoot.
+func (ring *Ring[T]) occupiedEntries() uint32 {
+	head := atomic.LoadUint32(ring.consHead)
+	occupied := atomic.LoadUint32(ring.prodTail) - head
+	return min(occupied, ring.capacity)
 }

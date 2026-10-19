@@ -1,15 +1,16 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
-    name = "maps",
+    name = "xmaps",
     srcs = ["maps.go"],
+    importpath = "github.com/freshdresch/go-data-structures/xmaps",
     visibility = ["//visibility:public"],
 )
 
 go_test(
-    name = "maps_test",
+    name = "xmaps_test",
     srcs = ["maps_test.go"],
-    embed = [":maps"],
+    embed = [":xmaps"],
     deps = [
         "@com_github_stretchr_testify//assert:assert",
     ],

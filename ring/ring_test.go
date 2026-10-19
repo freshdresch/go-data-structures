@@ -13,48 +13,48 @@ import (
 
 func TestRingCreation(t *testing.T) {
 	// not a power of 2, should error
-	_, err := NewRing[uintptr](13)
+	_, err := New[uintptr](13)
 	assert.Error(t, err)
 
-	_, err = NewRing[uintptr](6)
+	_, err = New[uintptr](6)
 	assert.Error(t, err)
 
-	simple, err := NewRing[uintptr](64)
+	simple, err := New[uintptr](64)
 	assert.NoError(t, err)
 	assertNewRing[uintptr](t, simple, 64)
 	assert.False(t, simple.multiProd)
 	assert.False(t, simple.multiCons)
 
-	mpsc, err := NewRing[uintptr](64, WithMultiProdEnqueue[uintptr]())
+	mpsc, err := New[uintptr](64, WithMultiProdEnqueue())
 	assert.NoError(t, err)
 	assertNewRing[uintptr](t, mpsc, 64)
 	assert.True(t, mpsc.multiProd)
 	assert.False(t, mpsc.multiCons)
 
-	spmc, err := NewRing[uintptr](64, WithMultiConsDequeue[uintptr]())
+	spmc, err := New[uintptr](64, WithMultiConsDequeue())
 	assert.NoError(t, err)
 	assertNewRing[uintptr](t, spmc, 64)
 	assert.False(t, spmc.multiProd)
 	assert.True(t, spmc.multiCons)
 
-	mpmc, err := NewRing[uintptr](
+	mpmc, err := New[uintptr](
 		64,
-		WithMultiProdEnqueue[uintptr](),
-		WithMultiConsDequeue[uintptr](),
+		WithMultiProdEnqueue(),
+		WithMultiConsDequeue(),
 	)
 	assert.NoError(t, err)
 	assertNewRing[uintptr](t, mpmc, 64)
 	assert.True(t, mpmc.multiProd)
 	assert.True(t, mpmc.multiCons)
 
-	large, err := NewRing[uintptr](1 << 16)
+	large, err := New[uintptr](1 << 16)
 	assert.NoError(t, err)
 	assertNewRing(t, large, 1<<16)
 }
 
 func TestRingCount(t *testing.T) {
 	buflen := 32
-	buffer, err := NewRing[string](uint32(buflen))
+	buffer, err := New[string](uint32(buflen))
 	require.NotNil(t, buffer)
 	require.NoError(t, err)
 
@@ -68,7 +68,7 @@ func TestRingCount(t *testing.T) {
 	}
 
 	err = buffer.Enqueue(item)
-	assert.ErrorContains(t, err, "no space in the ring")
+	assert.ErrorIs(t, err, ErrFull)
 
 	assert.Equal(t, buffer.Count(), uint32(buflen-1))
 
@@ -79,12 +79,12 @@ func TestRingCount(t *testing.T) {
 	}
 
 	_, err = buffer.Dequeue()
-	assert.ErrorContains(t, err, "no elements in the ring")
+	assert.ErrorIs(t, err, ErrEmpty)
 }
 
 func TestRingReset(t *testing.T) {
 	buflen := 32
-	buffer, err := NewRing[string](uint32(buflen))
+	buffer, err := New[string](uint32(buflen))
 	require.NotNil(t, buffer)
 	require.NoError(t, err)
 
@@ -122,11 +122,11 @@ func TestRingReset(t *testing.T) {
 	assert.Equal(t, buffer.Count(), uint32(0))
 
 	_, err = buffer.Dequeue()
-	assert.ErrorContains(t, err, "no elements in the ring")
+	assert.ErrorIs(t, err, ErrEmpty)
 }
 
 func TestSPSCRingBuffer(t *testing.T) {
-	buffer, err := NewRing[string](32)
+	buffer, err := New[string](32)
 	require.NotNil(t, buffer)
 	require.NoError(t, err)
 
@@ -145,7 +145,7 @@ func TestSPSCRingBuffer(t *testing.T) {
 		assert.NoError(t, err)
 	}
 	err = buffer.Enqueue(item)
-	assert.ErrorContains(t, err, "no space in the ring")
+	assert.ErrorIs(t, err, ErrFull)
 
 	// Test buffer empty
 	for i := 0; i < 31; i++ {
@@ -154,14 +154,14 @@ func TestSPSCRingBuffer(t *testing.T) {
 	}
 
 	_, err = buffer.Dequeue()
-	assert.ErrorContains(t, err, "no elements in the ring")
+	assert.ErrorIs(t, err, ErrEmpty)
 }
 
 func TestSPMCRingBuffer(t *testing.T) {
 	dequeuedStrings := map[string]struct{}{}
 
-	buffer, err := NewRing[string](
-		32, WithMultiConsDequeue[string](),
+	buffer, err := New[string](
+		32, WithMultiConsDequeue(),
 	)
 	require.NotNil(t, buffer)
 	require.NoError(t, err)
@@ -201,12 +201,12 @@ func TestSPMCRingBuffer(t *testing.T) {
 
 	// make sure any future dequeues would have failed
 	_, err = buffer.Dequeue()
-	assert.ErrorContains(t, err, "no elements in the ring")
+	assert.ErrorIs(t, err, ErrEmpty)
 }
 
 func TestMPSCRingBuffer(t *testing.T) {
-	buffer, err := NewRing[string](
-		32, WithMultiProdEnqueue[string](),
+	buffer, err := New[string](
+		32, WithMultiProdEnqueue(),
 	)
 	require.NotNil(t, buffer)
 	require.NoError(t, err)
@@ -256,10 +256,10 @@ func TestMPSCRingBuffer(t *testing.T) {
 }
 
 func TestMPMCRingBuffer(t *testing.T) {
-	buffer, err := NewRing[string](
+	buffer, err := New[string](
 		32,
-		WithMultiProdEnqueue[string](),
-		WithMultiConsDequeue[string](),
+		WithMultiProdEnqueue(),
+		WithMultiConsDequeue(),
 	)
 	require.NotNil(t, buffer)
 	require.NoError(t, err)
@@ -333,7 +333,7 @@ func TestMPMCRingBuffer(t *testing.T) {
 
 func TestRingBufferWraparound(t *testing.T) {
 	buflen := 32
-	buffer, err := NewRing[uint32](uint32(buflen))
+	buffer, err := New[uint32](uint32(buflen))
 	require.NoError(t, err)
 	require.NotNil(t, buffer)
 
@@ -347,7 +347,7 @@ func TestRingBufferWraparound(t *testing.T) {
 	assert.True(t, buffer.Full())
 
 	err = buffer.Enqueue(uint32(buflen - 1))
-	assert.ErrorContains(t, err, "no space in the ring")
+	assert.ErrorIs(t, err, ErrFull)
 
 	// Make room at the start of the queue
 	_, err = buffer.Dequeue()
@@ -362,7 +362,7 @@ func TestRingBufferWraparound(t *testing.T) {
 
 func TestRingBufferMultipleWraparounds(t *testing.T) {
 	buflen := 8
-	buffer, err := NewRing[uint32](uint32(buflen))
+	buffer, err := New[uint32](uint32(buflen))
 	require.NoError(t, err)
 	require.NotNil(t, buffer)
 
@@ -396,10 +396,10 @@ func TestRingBufferMultipleWraparounds(t *testing.T) {
 func TestMPMC_OutOfOrderPublication(t *testing.T) {
 	const ringSize = 8
 
-	r, err := NewRing[int](
+	r, err := New[int](
 		ringSize,
-		WithMultiProdEnqueue[int](),
-		WithMultiConsDequeue[int](),
+		WithMultiProdEnqueue(),
+		WithMultiConsDequeue(),
 	)
 	require.NoError(t, err)
 
@@ -476,12 +476,14 @@ func TestMPMC_OutOfOrderPublication(t *testing.T) {
 
 func BenchmarkSPSCRingBufferSeq(b *testing.B) {
 	buflen := 1024
-	buffer, _ := NewRing[string](uint32(buflen))
+	// The count is a valid power of two, so New cannot fail.
+	buffer, _ := New[string](uint32(buflen))
 
 	item := "test"
 	b.SetBytes(int64(len(item)))
 	b.ResetTimer()
 
+	// The benchmark measures call cost including failed calls, so the error is not checked.
 	for i := 0; i < b.N; i++ {
 		_ = buffer.Enqueue(item)
 		_, _ = buffer.Dequeue()
@@ -490,13 +492,15 @@ func BenchmarkSPSCRingBufferSeq(b *testing.B) {
 
 func BenchmarkSPSCRingBufferSeqBatch(b *testing.B) {
 	buflen := 1024
-	buffer, _ := NewRing[string](uint32(buflen))
+	// The count is a valid power of two, so New cannot fail.
+	buffer, _ := New[string](uint32(buflen))
 
 	item := "test"
 	batchSize := 10
 	b.SetBytes(int64(len(item) * batchSize))
 	b.ResetTimer()
 
+	// The benchmark measures call cost including failed calls, so the error is not checked.
 	for i := 0; i < b.N; i++ {
 		for j := 0; j < batchSize; j++ {
 			_ = buffer.Enqueue(item)
@@ -509,7 +513,8 @@ func BenchmarkSPSCRingBufferSeqBatch(b *testing.B) {
 
 func BenchmarkSPSCRingBufferContention(b *testing.B) {
 	buflen := 1024
-	buffer, _ := NewRing[string](uint32(buflen))
+	// The count is a valid power of two, so New cannot fail.
+	buffer, _ := New[string](uint32(buflen))
 
 	item := "test"
 	b.SetBytes(int64(len(item) * 2))
@@ -520,12 +525,14 @@ func BenchmarkSPSCRingBufferContention(b *testing.B) {
 
 	go func() {
 		defer wg.Done()
+		// The benchmark measures call cost including failed calls, so the error is not checked.
 		for i := 0; i < b.N; i++ {
 			_ = buffer.Enqueue(item)
 		}
 	}()
 	go func() {
 		defer wg.Done()
+		// The benchmark measures call cost including failed calls, so the error is not checked.
 		for i := 0; i < b.N; i++ {
 			_, _ = buffer.Dequeue()
 		}
@@ -535,15 +542,17 @@ func BenchmarkSPSCRingBufferContention(b *testing.B) {
 
 func BenchmarkSPMCRingBufferSeq(b *testing.B) {
 	buflen := 1024
-	buffer, _ := NewRing[string](
+	// The count is a valid power of two, so New cannot fail.
+	buffer, _ := New[string](
 		uint32(buflen),
-		WithMultiConsDequeue[string](),
+		WithMultiConsDequeue(),
 	)
 
 	item := "test"
 	b.SetBytes(int64(len(item)))
 	b.ResetTimer()
 
+	// The benchmark measures call cost including failed calls, so the error is not checked.
 	for i := 0; i < b.N; i++ {
 		_ = buffer.Enqueue(item)
 		_, _ = buffer.Dequeue()
@@ -552,9 +561,10 @@ func BenchmarkSPMCRingBufferSeq(b *testing.B) {
 
 func BenchmarkSPMCRingBufferParallel(b *testing.B) {
 	buflen := 1024
-	buffer, _ := NewRing[string](
+	// The count is a valid power of two, so New cannot fail.
+	buffer, _ := New[string](
 		uint32(buflen),
-		WithMultiConsDequeue[string](),
+		WithMultiConsDequeue(),
 	)
 
 	numConsumers := 4
@@ -568,12 +578,14 @@ func BenchmarkSPMCRingBufferParallel(b *testing.B) {
 	for i := 0; i < numConsumers; i++ {
 		go func() {
 			defer wg.Done()
+			// The benchmark measures call cost including failed calls, so the error is not checked.
 			for j := 0; j < b.N; j++ {
 				_, _ = buffer.Dequeue()
 			}
 		}()
 	}
 
+	// The benchmark measures call cost including failed calls, so the error is not checked.
 	for i := 0; i < b.N*numConsumers; i++ {
 		_ = buffer.Enqueue(item)
 	}
@@ -582,15 +594,17 @@ func BenchmarkSPMCRingBufferParallel(b *testing.B) {
 
 func BenchmarkMPSCRingBufferSeq(b *testing.B) {
 	buflen := 1024
-	buffer, _ := NewRing[string](
+	// The count is a valid power of two, so New cannot fail.
+	buffer, _ := New[string](
 		uint32(buflen),
-		WithMultiProdEnqueue[string](),
+		WithMultiProdEnqueue(),
 	)
 
 	item := "test"
 	b.SetBytes(int64(len(item)))
 	b.ResetTimer()
 
+	// The benchmark measures call cost including failed calls, so the error is not checked.
 	for i := 0; i < b.N; i++ {
 		_ = buffer.Enqueue(item)
 		_, _ = buffer.Dequeue()
@@ -599,9 +613,10 @@ func BenchmarkMPSCRingBufferSeq(b *testing.B) {
 
 func BenchmarkMPSCRingBufferParallel(b *testing.B) {
 	buflen := 1024
-	buffer, _ := NewRing[string](
+	// The count is a valid power of two, so New cannot fail.
+	buffer, _ := New[string](
 		uint32(buflen),
-		WithMultiProdEnqueue[string](),
+		WithMultiProdEnqueue(),
 	)
 
 	numProducers := 4
@@ -615,12 +630,14 @@ func BenchmarkMPSCRingBufferParallel(b *testing.B) {
 	for i := 0; i < numProducers; i++ {
 		go func() {
 			defer wg.Done()
+			// The benchmark measures call cost including failed calls, so the error is not checked.
 			for j := 0; j < b.N; j++ {
 				_ = buffer.Enqueue(item)
 			}
 		}()
 	}
 
+	// The benchmark measures call cost including failed calls, so the error is not checked.
 	for i := 0; i < b.N*numProducers; i++ {
 		_, _ = buffer.Dequeue()
 	}
@@ -629,16 +646,18 @@ func BenchmarkMPSCRingBufferParallel(b *testing.B) {
 
 func BenchmarkMPMCRingBufferSeq(b *testing.B) {
 	buflen := 1024
-	buffer, _ := NewRing[string](
+	// The count is a valid power of two, so New cannot fail.
+	buffer, _ := New[string](
 		uint32(buflen),
-		WithMultiProdEnqueue[string](),
-		WithMultiConsDequeue[string](),
+		WithMultiProdEnqueue(),
+		WithMultiConsDequeue(),
 	)
 
 	item := "test"
 	b.SetBytes(int64(len(item)))
 	b.ResetTimer()
 
+	// The benchmark measures call cost including failed calls, so the error is not checked.
 	for i := 0; i < b.N; i++ {
 		_ = buffer.Enqueue(item)
 		_, _ = buffer.Dequeue()
@@ -647,10 +666,11 @@ func BenchmarkMPMCRingBufferSeq(b *testing.B) {
 
 func BenchmarkMPMCRingBufferParallel(b *testing.B) {
 	buflen := 1024
-	buffer, _ := NewRing[string](
+	// The count is a valid power of two, so New cannot fail.
+	buffer, _ := New[string](
 		uint32(buflen),
-		WithMultiProdEnqueue[string](),
-		WithMultiConsDequeue[string](),
+		WithMultiProdEnqueue(),
+		WithMultiConsDequeue(),
 	)
 
 	numProducers := 4
@@ -665,6 +685,7 @@ func BenchmarkMPMCRingBufferParallel(b *testing.B) {
 	for i := 0; i < numProducers; i++ {
 		go func() {
 			defer producerWG.Done()
+			// The benchmark measures call cost including failed calls, so the error is not checked.
 			for j := 0; j < b.N; j++ {
 				_ = buffer.Enqueue(item)
 			}
@@ -677,6 +698,7 @@ func BenchmarkMPMCRingBufferParallel(b *testing.B) {
 	for i := 0; i < numConsumers; i++ {
 		go func() {
 			defer consumerWG.Done()
+			// The benchmark measures call cost including failed calls, so the error is not checked.
 			for j := 0; j < b.N; j++ {
 				_, _ = buffer.Dequeue()
 			}

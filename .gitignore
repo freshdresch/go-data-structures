@@ -25,3 +25,8 @@ bazel-*
 
 # Mac litter
 .DS_Store
+
+# ignore design documents and implementation plan documents that are not worthwhile to keep
+# docs we actually care about will be in the docs folder
+designs/
+implementation-plans/

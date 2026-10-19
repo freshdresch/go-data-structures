@@ -1,14 +1,15 @@
 package set
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
 
 func TestMakingEmptySet(t *testing.T) {
-	set := NewSet[string]()
-	assert.True(t, set.Empty())
+	empty := New[string]()
+	assert.True(t, empty.Empty())
 }
 
 func TestMakingSetFromSlice(t *testing.T) {
@@ -16,33 +17,55 @@ func TestMakingSetFromSlice(t *testing.T) {
 		"one",
 		"two",
 		"three",
-		"three", // the duplicate should not affect the set
+		"three", // The duplicate should not affect the set.
 	}
-	s := NewSetFromSlice[string](inputSlice)
-	assert.True(t, s.Exists("one"))
-	assert.True(t, s.Exists("two"))
-	assert.True(t, s.Exists("three"))
-	assert.Equal(t, 3, s.Len())
+	words := FromSlice(inputSlice)
+	assert.True(t, words.Contains("one"))
+	assert.True(t, words.Contains("two"))
+	assert.True(t, words.Contains("three"))
+	assert.Equal(t, 3, words.Len())
+}
+
+func TestZeroValueSet(t *testing.T) {
+	var zero Set[int]
+	assert.True(t, zero.Empty())
+
+	zero.Add(1)
+	zero.Add(2)
+	assert.Equal(t, 2, zero.Len())
+	assert.True(t, zero.Contains(1))
+	assert.False(t, zero.Contains(3))
+
+	var updated Set[int]
+	updated.Update(&zero)
+	assert.Equal(t, 2, updated.Len())
+	assert.True(t, updated.Contains(2))
+
+	elements := 0
+	for range updated.All() {
+		elements++
+	}
+	assert.Equal(t, 2, elements)
 }
 
 func TestAddAndRemove(t *testing.T) {
-	s := NewSet[string]()
-	s.Add("porsche")
-	s.Add("jaguar")
-	s.Add("toyota")
+	cars := New[string]()
+	cars.Add("porsche")
+	cars.Add("jaguar")
+	cars.Add("toyota")
 
-	assert.True(t, s.Exists("porsche"))
-	assert.True(t, s.Exists("jaguar"))
-	assert.True(t, s.Exists("toyota"))
-	assert.False(t, s.Exists("honda"))
-	assert.False(t, s.Exists("ford"))
-	assert.False(t, s.Exists("jeep"))
+	assert.True(t, cars.Contains("porsche"))
+	assert.True(t, cars.Contains("jaguar"))
+	assert.True(t, cars.Contains("toyota"))
+	assert.False(t, cars.Contains("honda"))
+	assert.False(t, cars.Contains("ford"))
+	assert.False(t, cars.Contains("jeep"))
 
-	// test the no-op add too
-	length := s.Len()
-	s.Add("porsche")
-	assert.True(t, s.Exists("porsche"))
-	assert.Equal(t, length, s.Len())
+	// Test the no-op add too.
+	length := cars.Len()
+	cars.Add("porsche")
+	assert.True(t, cars.Contains("porsche"))
+	assert.Equal(t, length, cars.Len())
 
 	other := &Set[string]{
 		entries: map[string]struct{}{
@@ -50,95 +73,123 @@ func TestAddAndRemove(t *testing.T) {
 			"ford":  {},
 			"jeep":  {},
 		},
-		length: 3,
 	}
 
-	s.Update(other)
+	cars.Update(other)
 
-	// test all of the elements, even the ones we didn't expect to change,
-	// just to make sure no funny business is happening
-	assert.True(t, s.Exists("porsche"))
-	assert.True(t, s.Exists("jaguar"))
-	assert.True(t, s.Exists("toyota"))
-	assert.True(t, s.Exists("honda"))
-	assert.True(t, s.Exists("ford"))
-	assert.True(t, s.Exists("jeep"))
+	// Test all of the elements, even the ones we did not expect to change, just to make
+	// sure no funny business is happening.
+	assert.True(t, cars.Contains("porsche"))
+	assert.True(t, cars.Contains("jaguar"))
+	assert.True(t, cars.Contains("toyota"))
+	assert.True(t, cars.Contains("honda"))
+	assert.True(t, cars.Contains("ford"))
+	assert.True(t, cars.Contains("jeep"))
 
-	s.Remove("porsche")
+	cars.Remove("porsche")
 
-	assert.False(t, s.Exists("porsche"))
-	assert.True(t, s.Exists("jaguar"))
-	assert.True(t, s.Exists("toyota"))
-	assert.True(t, s.Exists("honda"))
-	assert.True(t, s.Exists("ford"))
-	assert.True(t, s.Exists("jeep"))
+	assert.False(t, cars.Contains("porsche"))
+	assert.True(t, cars.Contains("jaguar"))
+	assert.True(t, cars.Contains("toyota"))
+	assert.True(t, cars.Contains("honda"))
+	assert.True(t, cars.Contains("ford"))
+	assert.True(t, cars.Contains("jeep"))
 
-	// test the no-op remove too
-	length = s.Len()
-	s.Remove("fiat")
-	assert.Equal(t, length, s.Len())
+	// Test the no-op remove too.
+	length = cars.Len()
+	cars.Remove("fiat")
+	assert.Equal(t, length, cars.Len())
 
-	// add one more element to the Set that we are going to bulk subtract
+	// Add one more element to the Set that we are going to bulk subtract.
 	other.Add("jaguar")
-	s.DifferenceUpdate(other)
+	cars.DifferenceUpdate(other)
 
-	assert.False(t, s.Exists("porsche"))
-	assert.False(t, s.Exists("jaguar"))
-	assert.True(t, s.Exists("toyota"))
-	assert.False(t, s.Exists("honda"))
-	assert.False(t, s.Exists("ford"))
-	assert.False(t, s.Exists("jeep"))
+	assert.False(t, cars.Contains("porsche"))
+	assert.False(t, cars.Contains("jaguar"))
+	assert.True(t, cars.Contains("toyota"))
+	assert.False(t, cars.Contains("honda"))
+	assert.False(t, cars.Contains("ford"))
+	assert.False(t, cars.Contains("jeep"))
 
-	// test the skipping of values in the bulk update functions
-	// now `set` will have `toyota` and `porsche`
-	s.Add("porsche")
-	assert.Equal(t, 2, s.Len())
+	// Elements that are already present, or absent, do not change the length after a bulk update.
+	// Now cars will have `toyota` and `porsche`.
+	cars.Add("porsche")
+	assert.Equal(t, 2, cars.Len())
 
 	other = &Set[string]{
 		entries: map[string]struct{}{
 			"honda":   {},
 			"porsche": {},
 		},
-		length: 2,
 	}
-	s.Update(other)
-	assert.Equal(t, 3, s.Len())
+	cars.Update(other)
+	assert.Equal(t, 3, cars.Len())
 
 	other = &Set[string]{
 		entries: map[string]struct{}{
 			"honda":  {},
 			"jaguar": {},
 		},
-		length: 2,
 	}
-	s.DifferenceUpdate(other)
-	assert.Equal(t, 2, s.Len())
+	cars.DifferenceUpdate(other)
+	assert.Equal(t, 2, cars.Len())
+}
+
+func TestAllYieldsEveryElement(t *testing.T) {
+	cars := FromSlice([]string{"porsche", "jaguar", "toyota"})
+
+	seen := make(map[string]int)
+	for element := range cars.All() {
+		seen[element]++
+	}
+
+	assert.Equal(t, map[string]int{"porsche": 1, "jaguar": 1, "toyota": 1}, seen)
+}
+
+func TestAllStopsWhenLoopBreaks(t *testing.T) {
+	numbers := FromSlice([]int{1, 2, 3, 4, 5})
+
+	calls := 0
+	numbers.All()(func(int) bool {
+		calls++
+		return false
+	})
+
+	assert.Equal(t, 1, calls)
+}
+
+func TestToSliceReturnsEveryElement(t *testing.T) {
+	numbers := FromSlice([]int{3, 1, 2, 2})
+
+	elements := numbers.ToSlice()
+	slices.Sort(elements)
+
+	assert.Equal(t, []int{1, 2, 3}, elements)
 }
 
 func TestCloneSafety(t *testing.T) {
-	s := &Set[string]{
+	cars := &Set[string]{
 		entries: map[string]struct{}{
 			"honda": {},
 			"ford":  {},
 			"jeep":  {},
 		},
-		length: 3,
 	}
 
-	other := s.Clone()
-	assert.True(t, s.Equals(other))
+	other := cars.Clone()
+	assert.True(t, cars.Equals(other))
 
-	s.Clear()
-	assert.True(t, s.Empty())
+	cars.Clear()
+	assert.True(t, cars.Empty())
 
 	assert.Equal(t, 3, other.Len())
-	assert.True(t, other.Exists("honda"))
-	assert.True(t, other.Exists("ford"))
-	assert.True(t, other.Exists("jeep"))
+	assert.True(t, other.Contains("honda"))
+	assert.True(t, other.Contains("ford"))
+	assert.True(t, other.Contains("jeep"))
 }
 
 func TestLogicalSetOperations(t *testing.T) {
-	s := &Set[string]{
+	cars := &Set[string]{
 		entries: map[string]struct{}{
 			"porsche": {},
 			"toyota":  {},
@@ -146,7 +197,6 @@ func TestLogicalSetOperations(t *testing.T) {
 			"ford":    {},
 			"jeep":    {},
 		},
-		length: 5,
 	}
 
 	other := &Set[string]{
@@ -157,7 +207,6 @@ func TestLogicalSetOperations(t *testing.T) {
 			"chevy": {},
 			"dodge": {},
 		},
-		length: 5,
 	}
 
 	expected := &Set[string]{
@@ -166,39 +215,35 @@ func TestLogicalSetOperations(t *testing.T) {
 			"ford":  {},
 			"jeep":  {},
 		},
-		length: 3,
 	}
-	assert.True(t, s.Intersection(other).Equals(expected))
+	assert.True(t, cars.Intersection(other).Equals(expected))
 
 	expected = &Set[string]{
 		entries: map[string]struct{}{
-			// make sure order doesn't matter
+			// Make sure order does not matter.
 			"chevy":   {},
 			"dodge":   {},
 			"porsche": {},
 			"toyota":  {},
 		},
-		length: 4,
 	}
-	assert.True(t, s.Disjunction(other).Equals(expected))
+	assert.True(t, cars.SymmetricDifference(other).Equals(expected))
 
 	expected = &Set[string]{
 		entries: map[string]struct{}{
 			"chevy": {},
 			"dodge": {},
 		},
-		length: 2,
 	}
-	assert.True(t, other.Difference(s).Equals(expected))
+	assert.True(t, other.Difference(cars).Equals(expected))
 
 	expected = &Set[string]{
 		entries: map[string]struct{}{
 			"porsche": {},
 			"toyota":  {},
 		},
-		length: 2,
 	}
-	assert.True(t, s.Difference(other).Equals(expected))
+	assert.True(t, cars.Difference(other).Equals(expected))
 
 	expected = &Set[string]{
 		entries: map[string]struct{}{
@@ -210,20 +255,100 @@ func TestLogicalSetOperations(t *testing.T) {
 			"chevy":   {},
 			"dodge":   {},
 		},
-		length: 7,
 	}
-	assert.True(t, s.Union(other).Equals(expected))
+	assert.True(t, cars.Union(other).Equals(expected))
 
-	// test the sets with imbalanced lengths
+	// Test the sets with imbalanced lengths.
 	other = &Set[string]{
 		entries: map[string]struct{}{
 			"honda": {},
 			"dodge": {},
 		},
-		length: 2,
 	}
 
-	assert.Equal(t, 1, other.Intersection(s).Len())
-	assert.Equal(t, 6, other.Union(s).Len())
-	assert.False(t, other.Equals(s))
+	assert.Equal(t, 1, other.Intersection(cars).Len())
+	assert.Equal(t, 6, other.Union(cars).Len())
+	assert.False(t, other.Equals(cars))
+}
+
+func TestEqualsSameLengthDifferentElements(t *testing.T) {
+	assert.False(t, FromSlice([]int{1, 2}).Equals(FromSlice([]int{1, 3})))
+}
+
+func TestSymmetricDifference(t *testing.T) {
+	cars := FromSlice([]string{"porsche", "toyota", "honda"})
+	other := FromSlice([]string{"honda", "ford"})
+
+	expected := FromSlice([]string{"porsche", "toyota", "ford"})
+	assert.True(t, cars.SymmetricDifference(other).Equals(expected))
+	assert.True(t, other.SymmetricDifference(cars).Equals(expected))
+
+	// The receiver and the argument are not modified.
+	assert.Equal(t, 3, cars.Len())
+	assert.True(t, cars.Contains("honda"))
+	assert.Equal(t, 2, other.Len())
+
+	empty := New[string]()
+	assert.True(t, cars.SymmetricDifference(empty).Equals(cars))
+}
+
+func TestZeroValueSetOperations(t *testing.T) {
+	tests := []struct {
+		name           string
+		run            func(receiver, argument *Set[int]) *Set[int]
+		zeroIsReceiver bool
+		expected       []int
+	}{
+		{"Union, zero receiver", (*Set[int]).Union, true, []int{1, 2}},
+		{"Union, zero argument", (*Set[int]).Union, false, []int{1, 2}},
+		{"Intersection, zero receiver", (*Set[int]).Intersection, true, []int{}},
+		{"Intersection, zero argument", (*Set[int]).Intersection, false, []int{}},
+		{"Difference, zero receiver", (*Set[int]).Difference, true, []int{}},
+		{"Difference, zero argument", (*Set[int]).Difference, false, []int{1, 2}},
+		{"SymmetricDifference, zero receiver", (*Set[int]).SymmetricDifference, true, []int{1, 2}},
+		{"SymmetricDifference, zero argument", (*Set[int]).SymmetricDifference, false, []int{1, 2}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var zero Set[int]
+			populated := FromSlice([]int{1, 2})
+			receiver, argument := populated, &zero
+			if test.zeroIsReceiver {
+				receiver, argument = &zero, populated
+			}
+
+			result := test.run(receiver, argument)
+
+			elements := result.ToSlice()
+			slices.Sort(elements)
+			assert.Equal(t, test.expected, elements)
+
+			// The result is a usable, independent Set.
+			result.Add(99)
+			assert.True(t, result.Contains(99))
+		})
+	}
+}
+
+func TestZeroValueSetMethods(t *testing.T) {
+	var zero Set[int]
+	assert.Equal(t, []int{}, zero.ToSlice())
+
+	clone := zero.Clone()
+	assert.True(t, clone.Empty())
+	clone.Add(99)
+	assert.True(t, clone.Contains(99))
+
+	var cleared Set[int]
+	cleared.Clear()
+	assert.True(t, cleared.Empty())
+	cleared.Add(1)
+	assert.True(t, cleared.Contains(1))
+
+	var subtracted Set[int]
+	subtracted.DifferenceUpdate(FromSlice([]int{1, 2}))
+	assert.True(t, subtracted.Empty())
+	subtracted.Add(99)
+	assert.True(t, subtracted.Contains(99))
 }

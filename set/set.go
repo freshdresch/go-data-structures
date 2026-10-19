@@ -1,92 +1,78 @@
+// Package set provides a generic Set type built on a Go map.
 package set
 
-// Set is a collection of operations built on top of the golang map, in order to
-// provide the primitives one would expect from a Set type.
-//
-// It maintains its length during every add/remove operation, to avoid the linear
-// cost of determining its length with len(entries).
+import "iter"
+
+// Set is a collection of unique elements built on a Go map. The zero value is an
+// empty Set that is ready to use. A Set must not be copied after first use. Pass a
+// *Set instead.
 type Set[K comparable] struct {
 	entries map[K]struct{}
-	length  int
 }
 
-// NewSet returns a pointer to a freshly constructed Set, instantiated to its
-// zero value.
-func NewSet[K comparable]() *Set[K] {
+// New returns a pointer to a new, empty Set. The zero value of Set is also an empty,
+// ready-to-use Set.
+func New[K comparable]() *Set[K] {
 	return &Set[K]{
 		entries: make(map[K]struct{}),
-		length:  0,
 	}
 }
 
-// NewSetFromSlice returns a pointer to a freshly constructed Set, instantiated
-// to the contents of the input slice.
-func NewSetFromSlice[K comparable](keys []K) *Set[K] {
-	s := Set[K]{
-		entries: make(map[K]struct{}),
-		length:  0,
-	}
+// FromSlice returns a pointer to a new Set holding the elements of keys. Duplicate
+// elements are stored once. FromSlice does not modify keys.
+func FromSlice[K comparable](keys []K) *Set[K] {
+	result := New[K]()
 	for _, key := range keys {
-		s.Add(key)
+		result.Add(key)
 	}
-	return &s
-}
-
-// Add adds a single element to the Set. If the element is in the set, the
-// operation is a no-op.
-func (s *Set[K]) Add(element K) {
-	if _, ok := s.entries[element]; ok {
-		return
-	}
-	s.entries[element] = struct{}{}
-	s.length++
-}
-
-// Remove deletes an element from the Set. If the element is not in the set, the
-// operation is a no-op.
-func (s *Set[K]) Remove(element K) {
-	if _, ok := s.entries[element]; !ok {
-		return
-	}
-	delete(s.entries, element)
-	s.length--
-}
-
-// Difference returns a set containing the set difference between the receiver
-// Set and the argument Set (in the direction `receiver - argument`).
-//
-// Note: This requires a deep-copy and does not modify the receiver. Usually this
-// will only be a partial deep-copy, as we avoid copying the elements that would
-// be deleted due to the set difference.
-func (s *Set[K]) Difference(other *Set[K]) *Set[K] {
-	result := NewSet[K]()
-	added := 0
-	for element := range s.entries {
-		if other.Exists(element) {
-			continue
-		}
-		result.entries[element] = struct{}{}
-		added++
-	}
-
-	result.length += added
 	return result
 }
 
-// Intersection returns a set containing the set intersection between the
-// receiver Set and the argument Set.
+// Add adds a single element to the Set. If the element is already in the Set, Add
+// does nothing. Add modifies the receiver.
+func (s *Set[K]) Add(element K) {
+	if s.entries == nil {
+		s.entries = make(map[K]struct{})
+	}
+	s.entries[element] = struct{}{}
+}
+
+// Remove deletes an element from the Set. If the element is not in the Set, Remove
+// does nothing. Remove modifies the receiver.
+func (s *Set[K]) Remove(element K) {
+	delete(s.entries, element)
+}
+
+// Difference returns a new Set with the elements of the receiver that are not in
+// other. The result is in the direction `receiver - other`.
 //
-// Note: This requires a deep-copy and does not modify the receiver or argument.
-// Usually this will only be a partial deep-copy, as we avoid copying the
-// elements that are not resident in both sets.
+// Difference copies the elements into a new Set, so the result does not share storage
+// with either Set. Elements are copied by value, so pointer elements still point to
+// the same values. Difference does not modify the receiver or other.
+func (s *Set[K]) Difference(other *Set[K]) *Set[K] {
+	result := New[K]()
+	for element := range s.entries {
+		if other.Contains(element) {
+			continue
+		}
+		result.entries[element] = struct{}{}
+	}
+	return result
+}
+
+// Intersection returns a new Set with the elements that are in both the receiver and
+// other.
+//
+// Intersection copies the elements into a new Set, so the result does not share
+// storage with either Set. Elements are copied by value, so pointer elements still
+// point to the same values. Intersection does not modify the receiver or other.
 func (s *Set[K]) Intersection(other *Set[K]) *Set[K] {
 	var (
 		smallerMap map[K]struct{}
 		largerMap  map[K]struct{}
 	)
 
-	// iterate through the smaller set
-	if s.length < other.length {
+	if len(s.entries) < len(other.entries) {
 		smallerMap = s.entries
 		largerMap = other.entries
 	} else {
@@ -94,32 +80,29 @@ func (s *Set[K]) Intersection(other *Set[K]) *Set[K] {
 		largerMap = s.entries
 	}
 
-	result := NewSet[K]()
-	added := 0
+	result := New[K]()
 	for element := range smallerMap {
 		if _, ok := largerMap[element]; !ok {
 			continue
 		}
 		result.entries[element] = struct{}{}
-		added++
 	}
-
-	result.length += added
 	return result
 }
 
-// Union returns a set containing the result of the union operation between the
-// receiver Set and the argument Set.
+// Union returns a new Set with the elements that are in the receiver, other, or both.
 //
-// Note: This requires a deep-copy and does not modify the receiver or argument.
+// Union copies the elements into a new Set, so the result does not share storage
+// with either Set. Elements are copied by value, so pointer elements still point to
+// the same values. Union does not modify the receiver or other.
 func (s *Set[K]) Union(other *Set[K]) *Set[K] {
 	var (
 		smallerSet *Set[K]
 		largerSet  *Set[K]
 	)
 
-	// we want to deep-copy the larger set to get more work out of the way
-	if s.length < other.length {
+	// Cloning the larger set leaves fewer elements to add one at a time.
+	if len(s.entries) < len(other.entries) {
 		smallerSet = s
 		largerSet = other
 	} else {
@@ -128,27 +111,20 @@ func (s *Set[K]) Union(other *Set[K]) *Set[K] {
 	}
 
 	result := largerSet.Clone()
-	added := 0
 	for element := range smallerSet.entries {
-		if _, ok := result.entries[element]; ok {
-			continue
-		}
 		result.entries[element] = struct{}{}
-		added++
 	}
-
-	result.length += added
 	return result
 }
 
-// Disjunction returns a set containing the symmetric difference between the
-// receiver Set and the argument Set. This can be calculated as the difference
-// between the Union and the Intersection of the two sets.
+// SymmetricDifference returns a new Set with the elements that are in exactly one of
+// the receiver and other. It is calculated as the Union minus the Intersection.
 //
-// Note: This requires a deep-copy and does not modify the receiver or argument.
-func (s *Set[K]) Disjunction(other *Set[K]) *Set[K] {
-	// we will do the deep copy in the Union, so we can modify that copy
-	// in-place afterward
+// SymmetricDifference copies the elements into a new Set, so the result does not share
+// storage with either Set. Elements are copied by value, so pointer elements still
+// point to the same values. SymmetricDifference does not modify the receiver or other.
+func (s *Set[K]) SymmetricDifference(other *Set[K]) *Set[K] {
+	// Union returns a new Set, so the result can be modified in place afterward.
 	result := s.Union(other)
 	intersection := s.Intersection(other)
 	for element := range intersection.entries {
@@ -157,80 +133,97 @@ func (s *Set[K]) Disjunction(other *Set[K]) *Set[K] {
 	return result
 }
 
-// Exists returns whether or not the element exists in the Set.
-func (s *Set[K]) Exists(element K) bool {
+// Contains reports whether the element is in the Set. Contains does not modify the
+// receiver.
+func (s *Set[K]) Contains(element K) bool {
 	_, ok := s.entries[element]
 	return ok
 }
 
-// Equals returns whether the two sets have identical contents.
+// Equals reports whether the two Sets have identical contents. Equals does not modify
+// the receiver or other.
 func (s *Set[K]) Equals(other *Set[K]) bool {
-	if s.length != other.length {
+	if len(s.entries) != len(other.entries) {
 		return false
 	}
-
-	return s.Intersection(other).Len() == s.length
+	for element := range s.entries {
+		if !other.Contains(element) {
+			return false
+		}
+	}
+	return true
 }
 
-// Empty returns whether the Set contains any elements or not.
+// Empty reports whether the Set has no elements. Empty does not modify the receiver.
 func (s *Set[K]) Empty() bool {
-	return s.length == 0
+	return len(s.entries) == 0
 }
 
-// Len returns the number of elements in the Set.
+// Len returns the number of elements in the Set. Len does not modify the receiver.
 func (s *Set[K]) Len() int {
-	return s.length
+	return len(s.entries)
 }
 
-// Clear empties the map and sets the length to 0.
+// All returns an iterator over the elements of the Set, in unspecified order. Each
+// element is yielded once, and iteration stops early when yield returns false. The
+// Set must not be modified while the iterator is in use. All does not modify the
+// receiver.
+func (s *Set[K]) All() iter.Seq[K] {
+	return func(yield func(K) bool) {
+		for element := range s.entries {
+			if !yield(element) {
+				return
+			}
+		}
+	}
+}
+
+// ToSlice returns the elements of the Set in unspecified order, in a newly allocated
+// slice with capacity for every element. ToSlice does not modify the receiver.
+func (s *Set[K]) ToSlice() []K {
+	elements := make([]K, 0, len(s.entries))
+	for element := range s.entries {
+		elements = append(elements, element)
+	}
+	return elements
+}
+
+// Clear removes every element from the Set. It replaces the underlying map, which
+// releases the old storage to the garbage collector. Clear modifies the receiver.
 func (s *Set[K]) Clear() {
 	s.entries = make(map[K]struct{})
-	s.length = 0
 }
 
-// Clone creates a deep copy of the Set.
+// Clone returns a new Set with the same elements as the receiver. The elements are
+// copied by value, so pointer elements still point to the same values. Clone does not
+// modify the receiver.
 func (s *Set[K]) Clone() *Set[K] {
 	result := &Set[K]{
-		entries: make(map[K]struct{}, s.length),
-		length:  s.length,
+		entries: make(map[K]struct{}, len(s.entries)),
 	}
 
-	for elem := range s.entries {
-		result.entries[elem] = struct{}{}
+	for element := range s.entries {
+		result.entries[element] = struct{}{}
 	}
 
 	return result
 }
 
-// Update adds the contents of the argument Set to the receiver Set.
-//
-// Note: this modifies the receiver Set in-place, but does not modify the
-// argument Set.
+// Update adds the elements of other to the receiver. Update modifies the receiver in
+// place and does not modify other.
 func (s *Set[K]) Update(other *Set[K]) {
-	added := 0
-	for element := range other.entries {
-		if _, ok := s.entries[element]; ok {
-			continue
-		}
-		s.entries[element] = struct{}{}
-		added++
+	if s.entries == nil {
+		s.entries = make(map[K]struct{})
 	}
-	s.length += added
+	for element := range other.entries {
+		s.entries[element] = struct{}{}
+	}
 }
 
-// DifferenceUpdate removes the contents of the argument Set from the receiver
-// Set.
-//
-// Note: this modifies the receiver Set in-place, but does not modify the
-// argument Set.
+// DifferenceUpdate removes the elements of other from the receiver. DifferenceUpdate
+// modifies the receiver in place and does not modify other.
 func (s *Set[K]) DifferenceUpdate(other *Set[K]) {
-	removed := 0
 	for element := range other.entries {
-		if _, ok := s.entries[element]; !ok {
-			continue
-		}
 		delete(s.entries, element)
-		removed++
 	}
-	s.length -= removed
 }

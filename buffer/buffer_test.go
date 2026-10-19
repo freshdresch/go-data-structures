@@ -1,8 +1,9 @@
-// package buffer provides a different buffer primitive that encourages reuse of the same fixed-capacity
-// buffer, as opposed to the dynamic nature of slices.
 package buffer
 
 import (
+	"math/rand/v2"
+	"slices"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -145,10 +146,23 @@ func TestBuffer_CompactAndZero(t *testing.T) {
 	})
 
 	t.Run("compact and zero an already compact buffer", func(t *testing.T) {
-		b := makeBuffer[int](t, []int{1, 2, 3}, 5)
+		b := makeBuffer[int](t, []int{1, 2, 3, 4, 5}, 5)
+		b.Truncate(3) // leaves 4 and 5 as stale values in the tail
 		b.CompactAndZero()
 		assert.Equal(t, 0, b.start)
 		assert.Equal(t, 3, b.Len())
+		assert.Equal(t, []int{1, 2, 3, 0, 0}, b.data)
+		assert.Equal(t, 3, b.highWater)
+	})
+
+	t.Run("compact and zero an empty buffer that was written", func(t *testing.T) {
+		b := makeBuffer[int](t, []int{1, 2, 3}, 5)
+		b.Truncate(0)
+		b.CompactAndZero()
+		assert.Equal(t, 0, b.start)
+		assert.Equal(t, 0, b.Len())
+		assert.Equal(t, []int{0, 0, 0, 0, 0}, b.data)
+		assert.Equal(t, 0, b.highWater)
 	})
 
 	t.Run("compact and zero with a small gap", func(t *testing.T) {
@@ -358,6 +372,42 @@ func TestBuffer_ConsumeRightAndZero(t *testing.T) {
 	})
 }
 
+func TestBuffer_PanicMessages(t *testing.T) {
+	const truncateMessage = "buffer: truncate out of range"
+	const consumeMessage = "buffer: consume out of range"
+
+	methods := []struct {
+		name    string
+		message string
+		call    func(b *Buffer[int], count int)
+	}{
+		{"Truncate", truncateMessage, func(b *Buffer[int], count int) { b.Truncate(count) }},
+		{"TruncateAndZero", truncateMessage, func(b *Buffer[int], count int) {
+			b.TruncateAndZero(count)
+		}},
+		{"Consume", consumeMessage, func(b *Buffer[int], count int) { b.Consume(count) }},
+		{"ConsumeAndZero", consumeMessage, func(b *Buffer[int], count int) {
+			b.ConsumeAndZero(count)
+		}},
+		{"ConsumeRight", consumeMessage, func(b *Buffer[int], count int) { b.ConsumeRight(count) }},
+		{"ConsumeRightAndZero", consumeMessage, func(b *Buffer[int], count int) {
+			b.ConsumeRightAndZero(count)
+		}},
+	}
+
+	for _, method := range methods {
+		t.Run(method.name+" with negative count", func(t *testing.T) {
+			b := makeBuffer[int](t, []int{1, 2, 3, 4, 5}, 5)
+			assert.PanicsWithValue(t, method.message, func() { method.call(b, -1) })
+		})
+
+		t.Run(method.name+" with count above Len", func(t *testing.T) {
+			b := makeBuffer[int](t, []int{1, 2, 3, 4, 5}, 5)
+			assert.PanicsWithValue(t, method.message, func() { method.call(b, 6) })
+		})
+	}
+}
+
 func TestBuffer_Grow(t *testing.T) {
 	t.Run("grow zero elements", func(t *testing.T) {
 		b := NewBuffer[int](5)
@@ -382,9 +432,7 @@ func TestBuffer_Grow(t *testing.T) {
 		assert.Equal(t, []int{0, 0, 0}, growSlice)
 
 		// make sure we can access elements after growing
-		for i, elem := range []int{1, 2, 3} {
-			growSlice[i] = elem
-		}
+		copy(growSlice, []int{1, 2, 3})
 		assert.Equal(t, 3, b.Len())
 		assert.Equal(t, 3, len(growSlice))
 	})
@@ -401,9 +449,7 @@ func TestBuffer_Grow(t *testing.T) {
 		assert.Equal(t, []int{0, 0, 0, 0, 0}, growSlice)
 
 		// make sure we can access elements after growing
-		for i, elem := range []int{1, 2, 3, 4, 5} {
-			growSlice[i] = elem
-		}
+		copy(growSlice, []int{1, 2, 3, 4, 5})
 		assert.Equal(t, 5, b.Len())
 		assert.Equal(t, 5, len(growSlice))
 
@@ -433,17 +479,15 @@ func TestBuffer_Grow(t *testing.T) {
 
 		// Manually shift start so a compaction is necessary
 		b.start = 1
-		b.len = 4
+		b.length = 4
 		require.Equal(t, []int{1, 2, 3, 4}, b.Slice())
 
 		// Only 3 slots in the tail, so growing by 4 requires compacting.
 		growSlice := b.Grow(4)
 
-		// After compaction:
-		//  - [1, 2, 3, 4] was copied to the front of the slice.
-		//  - The fifth entry is the old location of '4' before the copy, and it will not be
-		//    overwritten, so it should be another '4'.
-		//  - The rest of the slice should have the pre-existing contents [5, 6, 7].
+		// After compaction, [1, 2, 3, 4] has been copied to the front of the backing array. The fifth
+		// entry is the old location of 4 before the copy. Nothing overwrote it, so it still
+		// holds 4. The rest of the slice keeps its pre-existing contents, 5, 6, and 7.
 		assert.Equal(t, 8, b.Len())
 		assert.Equal(t, 4, len(growSlice))
 		assert.Equal(t, []int{1, 2, 3, 4, 4, 5, 6, 7}, b.Slice())
@@ -492,9 +536,7 @@ func TestBuffer_GrowAndZero(t *testing.T) {
 		assert.Equal(t, []int{0, 0, 0}, growSlice)
 
 		// make sure we can access elements after growing
-		for i, elem := range []int{1, 2, 3} {
-			growSlice[i] = elem
-		}
+		copy(growSlice, []int{1, 2, 3})
 		assert.Equal(t, 3, b.Len())
 		assert.Equal(t, 3, len(growSlice))
 	})
@@ -511,9 +553,7 @@ func TestBuffer_GrowAndZero(t *testing.T) {
 		assert.Equal(t, []int{0, 0, 0, 0, 0}, growSlice)
 
 		// make sure we can access elements after growing
-		for i, elem := range []int{1, 2, 3, 4, 5} {
-			growSlice[i] = elem
-		}
+		copy(growSlice, []int{1, 2, 3, 4, 5})
 		assert.Equal(t, 5, b.Len())
 		assert.Equal(t, 5, len(growSlice))
 
@@ -543,14 +583,14 @@ func TestBuffer_GrowAndZero(t *testing.T) {
 
 		// Manually shift start so a compaction is necessary
 		b.start = 1
-		b.len = 4
+		b.length = 4
 		require.Equal(t, []int{1, 2, 3, 4}, b.Slice())
 
 		// Only 3 slots in the tail, so growing by 4 requires compacting.
 		growSlice := b.GrowAndZero(4)
 
-		// After compaction, which should move [1, 2, 3, 4] to the front and the grown
-		// region should be zeroed.
+		// After compaction, [1, 2, 3, 4] has been moved to the front of the backing array, and
+		// the grown region is zero.
 		assert.Equal(t, 8, b.Len())
 		assert.Equal(t, 4, len(growSlice))
 		assert.Equal(t, []int{1, 2, 3, 4, 0, 0, 0, 0}, b.Slice())
@@ -573,6 +613,267 @@ func TestBuffer_GrowAndZero(t *testing.T) {
 		b := makeBuffer[int](t, []int{1, 2, 3, 4, 5}, 5)
 		assert.Panics(t, func() { b.GrowAndZero(-1) })
 	})
+}
+
+func TestBuffer_Available(t *testing.T) {
+	t.Run("empty buffer", func(t *testing.T) {
+		b := NewBuffer[int](5)
+		assert.Equal(t, 5, b.Available())
+	})
+
+	t.Run("partly full buffer", func(t *testing.T) {
+		b := makeBuffer[int](t, []int{1, 2}, 5)
+		assert.Equal(t, 3, b.Available())
+	})
+
+	t.Run("full buffer", func(t *testing.T) {
+		b := makeBuffer[int](t, []int{1, 2, 3, 4, 5}, 5)
+		assert.Equal(t, 0, b.Available())
+	})
+}
+
+func TestBuffer_GrowAndZero_ZeroesAfterCompact(t *testing.T) {
+	b := makeBuffer[int](t, []int{1, 2, 3, 4, 5}, 5)
+	b.Truncate(3) // leaves 4 and 5 as stale values in the tail
+	b.Consume(1)  // start is 1, and the live elements are {2, 3}
+	require.Equal(t, 1, b.start)
+
+	// Only 2 slots remain in the tail, so growing by 3 compacts first.
+	grown := b.GrowAndZero(3)
+	assert.Equal(t, []int{2, 3, 0, 0, 0}, b.Slice())
+	for index, value := range grown {
+		assert.Zero(t, value, "grown element at index %d", index)
+	}
+}
+
+func TestBuffer_HighWaterTracksWrites(t *testing.T) {
+	b := NewBuffer[int](8)
+	assert.Equal(t, 0, b.highWater)
+
+	b.Append(1, 2)
+	assert.Equal(t, 2, b.highWater)
+
+	b.Grow(2)
+	assert.Equal(t, 4, b.highWater)
+
+	b.GrowAndZero(3)
+	assert.Equal(t, 7, b.highWater)
+
+	b.Truncate(1)
+	assert.Equal(t, 7, b.highWater)
+}
+
+func TestBuffer_ReturnedSlicesAreCapped(t *testing.T) {
+	t.Run("Slice", func(t *testing.T) {
+		b := makeBuffer[int](t, []int{1, 2, 3}, 5)
+		slice := b.Slice()
+		assert.Equal(t, len(slice), cap(slice))
+
+		_ = append(b.Slice(), 9)
+		assert.Equal(t, []int{1, 2, 3, 0, 0}, b.data)
+	})
+
+	t.Run("Grow", func(t *testing.T) {
+		b := makeBuffer[int](t, []int{1}, 5)
+		grown := b.Grow(2)
+		assert.Equal(t, len(grown), cap(grown))
+	})
+
+	t.Run("GrowAndZero", func(t *testing.T) {
+		b := makeBuffer[int](t, []int{1}, 5)
+		grown := b.GrowAndZero(2)
+		assert.Equal(t, len(grown), cap(grown))
+	})
+}
+
+func TestBuffer_AppendToSliceDoesNotDefeatGrowAndZero(t *testing.T) {
+	b := NewBuffer[int](5)
+	b.Append(1, 2)
+	_ = append(b.Slice(), 7, 8, 9)
+	b.Consume(1)
+
+	assert.Equal(t, []int{0, 0, 0, 0}, b.GrowAndZero(4))
+}
+
+func TestBuffer_AvailableBuffer(t *testing.T) {
+	t.Run("capacity is the tail free space", func(t *testing.T) {
+		b := makeBuffer[int](t, []int{1, 2, 3}, 6)
+		b.Consume(1)
+
+		available := b.AvailableBuffer()
+		assert.Equal(t, 0, len(available))
+		assert.Equal(t, 3, cap(available))
+	})
+
+	t.Run("raises highWater to Cap", func(t *testing.T) {
+		b := makeBuffer[int](t, []int{1, 2}, 6)
+		require.Equal(t, 2, b.highWater)
+
+		b.AvailableBuffer()
+		assert.Equal(t, 6, b.highWater)
+	})
+
+	t.Run("append within capacity is committed by Append", func(t *testing.T) {
+		b := makeBuffer[int](t, []int{1, 2}, 6)
+
+		dst := b.AvailableBuffer()
+		dst = append(dst, 3, 4, 5)
+		assert.Same(t, &b.data[2], &dst[0])
+		b.Append(dst...)
+
+		assert.Equal(t, []int{1, 2, 3, 4, 5}, b.Slice())
+		assert.Equal(t, 5, b.Len())
+	})
+
+	t.Run("append that outgrows the tail is committed by Append", func(t *testing.T) {
+		b := makeBuffer[int](t, []int{1, 2, 3, 4}, 6)
+		b.Consume(2) // the live elements are {3, 4}, with 2 slots in the tail and 4 free in all
+
+		dst := b.AvailableBuffer()
+		dst = append(dst, 5, 6, 7)
+		b.Append(dst...)
+
+		assert.Equal(t, []int{3, 4, 5, 6, 7}, b.Slice())
+		assert.Equal(t, 5, b.Len())
+	})
+
+	t.Run("abandoned write is zeroed by CompactAndZero", func(t *testing.T) {
+		b := makeBuffer[int](t, []int{1, 2}, 6)
+		_ = append(b.AvailableBuffer(), 3, 4, 5)
+		require.Equal(t, []int{1, 2, 3, 4, 5, 0}, b.data)
+
+		b.CompactAndZero()
+
+		assert.Equal(t, []int{1, 2, 0, 0, 0, 0}, b.data)
+	})
+}
+
+func TestBuffer_AvailableBufferAllocationFree(t *testing.T) {
+	b := NewBuffer[byte](16)
+
+	allocations := testing.AllocsPerRun(100, func() {
+		dst := b.AvailableBuffer()
+		dst = strconv.AppendInt(dst, 12345, 10)
+		b.Append(dst...)
+		b.Reset()
+	})
+
+	assert.Equal(t, 0.0, allocations)
+}
+
+func TestBuffer_RandomOperationsKeepInvariants(t *testing.T) {
+	random := rand.New(rand.NewPCG(1, 2))
+
+	for iteration := range 2000 {
+		b := NewBuffer[int](random.IntN(9))
+		var expected []int
+		for step := range 50 {
+			operation := random.IntN(operationCount)
+			expected = applyRandomOperation(t, random, b, operation, expected)
+			assertInvariants(t, b)
+			assert.Equal(t, len(expected), b.Len(),
+				"iteration %d, step %d, operation %d", iteration, step, operation)
+			assert.True(t, slices.Equal(expected, b.Slice()),
+				"iteration %d, step %d, operation %d, contents: got %v, want %v",
+				iteration, step, operation, b.Slice(), expected)
+			if t.Failed() {
+				t.FailNow()
+			}
+		}
+	}
+}
+
+const operationCount = 16
+
+// applyRandomOperation applies the mutating method selected by operation to b, with counts chosen
+// so the call never panics. Every value it writes is nonzero, so a stale value is distinguishable
+// from a zeroed one. It returns the live contents that b should hold after the operation. It does
+// not modify expected.
+func applyRandomOperation(
+	t *testing.T, random *rand.Rand, b *Buffer[int], operation int, expected []int,
+) []int {
+	t.Helper()
+
+	switch operation {
+	case 0:
+		count := random.IntN(b.Available() + 1)
+		values := make([]int, count)
+		fillNonzero(random, values)
+		b.Append(values...)
+		return append(slices.Clone(expected), values...)
+	case 1:
+		grown := b.Grow(random.IntN(b.Available() + 1))
+		fillNonzero(random, grown)
+		return append(slices.Clone(expected), grown...)
+	case 2:
+		grown := b.GrowAndZero(random.IntN(b.Available() + 1))
+		for index, value := range grown {
+			assert.Zero(t, value, "GrowAndZero element at index %d", index)
+		}
+		fillNonzero(random, grown)
+		return append(slices.Clone(expected), grown...)
+	case 3:
+		newLength := random.IntN(b.Len() + 1)
+		b.Truncate(newLength)
+		return slices.Clone(expected[:newLength])
+	case 4:
+		newLength := random.IntN(b.Len() + 1)
+		b.TruncateAndZero(newLength)
+		return slices.Clone(expected[:newLength])
+	case 5:
+		count := random.IntN(b.Len() + 1)
+		b.Consume(count)
+		return slices.Clone(expected[count:])
+	case 6:
+		count := random.IntN(b.Len() + 1)
+		b.ConsumeAndZero(count)
+		return slices.Clone(expected[count:])
+	case 7:
+		count := random.IntN(b.Len() + 1)
+		b.ConsumeRight(count)
+		return slices.Clone(expected[:len(expected)-count])
+	case 8:
+		count := random.IntN(b.Len() + 1)
+		b.ConsumeRightAndZero(count)
+		return slices.Clone(expected[:len(expected)-count])
+	case 9:
+		b.Compact()
+		return expected
+	case 10:
+		b.CompactAndZero()
+		return expected
+	case 11:
+		b.Reset()
+		return nil
+	case 12:
+		b.ResetAndZero()
+		return nil
+	case 13:
+		b.resetAndZeroAll()
+		return nil
+	case 14:
+		// An abandoned write leaves the live contents unchanged.
+		dst := b.AvailableBuffer()
+		values := make([]int, cap(dst))
+		fillNonzero(random, values)
+		_ = append(dst, values...)
+		return expected
+	// A commit that still aliases the buffer always fits the tail, so only a reallocated
+	// commit can make Append compact.
+	case 15:
+		dst := b.AvailableBuffer()
+		values := make([]int, random.IntN(b.Available()+1))
+		fillNonzero(random, values)
+		b.Append(append(dst, values...)...)
+		return append(slices.Clone(expected), values...)
+	}
+	return expected
+}
+
+func fillNonzero(random *rand.Rand, values []int) {
+	for index := range values {
+		values[index] = random.IntN(100) + 1
+	}
 }
 
 func TestBuffer_Reset(t *testing.T) {
@@ -724,5 +1025,11 @@ func assertInvariants[T any](t *testing.T, b *Buffer[T]) {
 
 	if b.Len() == 0 {
 		assert.Equal(t, 0, b.start, "start must be 0 when buffer is empty")
+	}
+
+	assert.LessOrEqual(t, b.highWater, b.Cap(), "highWater <= Cap()")
+	var zero T
+	for index, value := range b.data[b.highWater:] {
+		assert.Equal(t, zero, value, "element at index %d is above highWater", b.highWater+index)
 	}
 }

@@ -17,15 +17,11 @@ const (
 	allocCalls = allocRuns + 1
 	// allocBatch is how many elements each burst and bulk call moves.
 	allocBatch = 8
-	// dequeueAllocs is how many allocations a successful dequeue makes today. RING_DESIGN change 2
-	// makes dequeue allocation-free and changes this to 0.
-	dequeueAllocs = 1.0
 )
 
 // TestAllocs checks how many allocations each ring call makes, on its success path and on its
-// bare ErrFull and ErrEmpty paths. A successful dequeue makes dequeueAllocs allocations, and
-// nothing else allocates. It skips under -race, because the race detector changes allocation
-// behavior.
+// bare ErrFull and ErrEmpty paths, none of which allocate. It skips under -race, because the race
+// detector changes allocation behavior.
 func TestAllocs(t *testing.T) {
 	if raceEnabled {
 		t.Skip("allocation counts differ under the race detector")
@@ -61,12 +57,12 @@ func testAllocs[T any](t *testing.T, fill fillFunc[T]) {
 				fillRing(t, created, fill, allocCalls*batch)
 				allocs, moved := measureAllocs(dequeue)
 				assert.Equal(t, allocCalls*batch, moved)
-				assert.Equal(t, dequeueAllocs, allocs)
+				assert.Zero(t, allocs)
 			})
 
 			t.Run("errFull", func(t *testing.T) {
 				created, enqueue, _ := newAllocRing(t, api, elems)
-				fillRing(t, created, fill, int(created.Capacity()))
+				fillRing(t, created, fill, created.Capacity())
 				allocs, moved := measureAllocs(enqueue)
 				assert.Zero(t, moved)
 				assert.Zero(t, allocs)
@@ -83,9 +79,9 @@ func testAllocs[T any](t *testing.T, fill fillFunc[T]) {
 }
 
 // newAllocRing returns an empty SPSC ring with functions that each make one api call on it. The
-// enqueue call sends elems, and the dequeue call asks for len(elems) elements. Each returns how
-// many elements it moved, treating ErrFull and ErrEmpty as 0 moved, and panics on any other
-// error.
+// enqueue call sends elems, and the dequeue call dequeues into a buffer of len(elems). Each
+// returns how many elements it moved, treating ErrFull and ErrEmpty as 0 moved, and panics on any
+// other error.
 func newAllocRing[T any](
 	t *testing.T,
 	api ringAPI,
@@ -97,7 +93,7 @@ func newAllocRing[T any](
 	t.Helper()
 	created, err := newModeRing[T](spscMode)
 	require.NoError(t, err)
-	count := uint32(len(elems))
+	dst := make([]T, len(elems))
 	switch api {
 	case apiSingle:
 		enqueue = func() int {
@@ -109,19 +105,21 @@ func newAllocRing[T any](
 		}
 	case apiBurst:
 		enqueue = func() int {
-			return int(created.EnqueueBurst(elems, count, nil))
+			enqueued, _ := created.EnqueueBurst(elems)
+			return enqueued
 		}
 		dequeue = func() int {
-			_, moved := created.DequeueBurst(count, nil)
-			return int(moved)
+			dequeued, _ := created.DequeueBurst(dst)
+			return dequeued
 		}
 	case apiBulk:
 		enqueue = func() int {
-			return movedOrPanic(created.EnqueueBulk(elems, count, nil), ring.ErrFull, len(elems))
+			_, err := created.EnqueueBulk(elems)
+			return movedOrPanic(err, ring.ErrFull, len(elems))
 		}
 		dequeue = func() int {
-			_, err := created.DequeueBulk(count, nil)
-			return movedOrPanic(err, ring.ErrEmpty, len(elems))
+			_, err := created.DequeueBulk(dst)
+			return movedOrPanic(err, ring.ErrEmpty, len(dst))
 		}
 	default:
 		t.Fatalf("unknown ring API %v", api)
@@ -134,7 +132,8 @@ func fillRing[T any](t *testing.T, target *ring.Ring[T], fill fillFunc[T], n int
 	t.Helper()
 	elems := make([]T, n)
 	fill(elems, 0, 0)
-	require.NoError(t, target.EnqueueBulk(elems, uint32(n), nil))
+	_, err := target.EnqueueBulk(elems)
+	require.NoError(t, err)
 }
 
 // measureAllocs returns the average allocations per call of call over allocRuns runs, and how

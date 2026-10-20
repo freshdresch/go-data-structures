@@ -62,15 +62,13 @@ func newRingQueue[T any](mode benchMode) (*ringQueue[T], error) {
 }
 
 func (q *ringQueue[T]) enqueue(items []T) int {
-	return int(q.ring.EnqueueBurst(items, uint32(len(items)), nil))
+	enqueued, _ := q.ring.EnqueueBurst(items)
+	return enqueued
 }
 
-// dequeue copies the elements DequeueBurst returns into dst, because today's DequeueBurst returns
-// a new slice. The copy disappears with RING_DESIGN change 2, which dequeues into the caller's
-// slice.
 func (q *ringQueue[T]) dequeue(dst []T) int {
-	elems, _ := q.ring.DequeueBurst(uint32(len(dst)), nil)
-	return copy(dst, elems)
+	dequeued, _ := q.ring.DequeueBurst(dst)
+	return dequeued
 }
 
 // newRingAPIQueue returns the adapter that drives a ring built for mode through api.
@@ -122,17 +120,13 @@ type ringBulkQueue[T any] struct {
 }
 
 func (q *ringBulkQueue[T]) enqueue(items []T) int {
-	return movedOrPanic(q.ring.EnqueueBulk(items, uint32(len(items)), nil), ring.ErrFull, len(items))
+	_, err := q.ring.EnqueueBulk(items)
+	return movedOrPanic(err, ring.ErrFull, len(items))
 }
 
-// dequeue copies the elements DequeueBulk returns into dst, because today's DequeueBulk returns a
-// new slice.
 func (q *ringBulkQueue[T]) dequeue(dst []T) int {
-	elems, err := q.ring.DequeueBulk(uint32(len(dst)), nil)
-	if movedOrPanic(err, ring.ErrEmpty, len(dst)) == 0 {
-		return 0
-	}
-	return copy(dst, elems)
+	_, err := q.ring.DequeueBulk(dst)
+	return movedOrPanic(err, ring.ErrEmpty, len(dst))
 }
 
 // movedOrPanic returns 0 when err is the call's expected failure, and moved when err is nil. Any

@@ -3,5 +3,5 @@
 package ring_test
 
 // raceEnabled reports whether the test binary was built with -race, so tests can scale their
-// repetitions down under it.
+// work down or skip under it.
 const raceEnabled = false

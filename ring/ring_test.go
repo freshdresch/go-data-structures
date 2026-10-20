@@ -1301,6 +1301,19 @@ func tagged(producer int, seq uint64) uint64 {
 // values.
 type batchCall func(values []uint64) int
 
+// burstCalls returns batchCalls that move values through ring with EnqueueBurst and DequeueBurst.
+func burstCalls(ring *Ring[uint64]) (enqueue, dequeue batchCall) {
+	enqueue = func(items []uint64) int {
+		enqueued, _ := ring.EnqueueBurst(items)
+		return enqueued
+	}
+	dequeue = func(dst []uint64) int {
+		dequeued, _ := ring.DequeueBurst(dst)
+		return dequeued
+	}
+	return enqueue, dequeue
+}
+
 // A drainState is what the consumers of one stress run share to decide when to stop. expected is
 // the total number of elements the producers send, and the producers' owner sets producersDone
 // once they have all finished.
@@ -1493,14 +1506,7 @@ func TestConcurrentWrap(t *testing.T) {
 			require.NoError(t, err)
 			const startIndex = math.MaxUint32 - 999
 			setIndices(ring, startIndex)
-			enqueue := func(items []uint64) int {
-				enqueued, _ := ring.EnqueueBurst(items)
-				return enqueued
-			}
-			dequeue := func(dst []uint64) int {
-				dequeued, _ := ring.DequeueBurst(dst)
-				return dequeued
-			}
+			enqueue, dequeue := burstCalls(ring)
 
 			perProducer := total / mode.producers
 			results := sendTagged(
@@ -1515,6 +1521,98 @@ func TestConcurrentWrap(t *testing.T) {
 			)
 			assertTaggedDelivery(t, results, mode.producers, perProducer)
 			assert.Less(t, atomic.LoadUint32(ring.consTail), uint32(startIndex))
+		})
+	}
+}
+
+// TestGOMAXPROCSOne checks that every element arrives exactly once and in order on SPSC and MPMC
+// rings with only one CPU. Whether a waiter actually meets an unpublished predecessor depends on
+// preemption timing, so TestWaitForTail tests the wait itself. It does not call t.Parallel,
+// because GOMAXPROCS is process-wide.
+func TestGOMAXPROCSOne(t *testing.T) {
+	const (
+		total = 100_000
+		batch = 8
+	)
+	previous := runtime.GOMAXPROCS(1)
+	t.Cleanup(func() { runtime.GOMAXPROCS(previous) })
+	for _, mode := range stressModes() {
+		t.Run(mode.name, func(t *testing.T) {
+			ring, err := New[uint64](64, mode.options...)
+			require.NoError(t, err)
+			enqueue, dequeue := burstCalls(ring)
+
+			perProducer := total / mode.producers
+			results := sendTagged(
+				t,
+				mode.producers,
+				mode.consumers,
+				perProducer,
+				batch,
+				batch,
+				enqueue,
+				dequeue,
+			)
+			assertTaggedDelivery(t, results, mode.producers, perProducer)
+		})
+	}
+}
+
+// TestWaitForTail checks that waitForTail returns only once the tail equals want, not before and
+// not on some other change. With one CPU the waiter can run only when the test goroutine yields,
+// so each runtime.Gosched hands control to it, and a waiter that returns early is caught
+// reliably. The wrap case catches a wait that compares with < or > instead of equality. It does
+// not call t.Parallel, because GOMAXPROCS is process-wide.
+func TestWaitForTail(t *testing.T) {
+	const yields = 1000
+	previous := runtime.GOMAXPROCS(1)
+	t.Cleanup(func() { runtime.GOMAXPROCS(previous) })
+
+	cases := []struct {
+		name         string
+		start        uint32
+		want         uint32
+		storesBefore []uint32
+	}{
+		{name: "noWrap", start: 0, want: 5, storesBefore: []uint32{4}},
+		{
+			name:         "wrap",
+			start:        math.MaxUint32 - 1,
+			want:         2,
+			storesBefore: []uint32{math.MaxUint32, 0, 1},
+		},
+		{
+			name:         "wrapToZero",
+			start:        math.MaxUint32 - 1,
+			want:         0,
+			storesBefore: []uint32{math.MaxUint32},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tail := tc.start
+			var returned atomic.Bool
+			var waiting sync.WaitGroup
+			waiting.Go(func() {
+				waitForTail(&tail, tc.want)
+				returned.Store(true)
+			})
+
+			for range yields {
+				runtime.Gosched()
+			}
+			require.False(t, returned.Load(), "waitForTail returned with the tail at %d", tc.start)
+
+			for _, value := range tc.storesBefore {
+				atomic.StoreUint32(&tail, value)
+				for range yields {
+					runtime.Gosched()
+				}
+				require.False(t, returned.Load(), "waitForTail returned with the tail at %d", value)
+			}
+
+			atomic.StoreUint32(&tail, tc.want)
+			stressDeadline(t, waiting.Wait)
 		})
 	}
 }

@@ -86,6 +86,11 @@ type Option func(*config)
 
 // WithMultiProdEnqueue returns an Option that makes the enqueue methods safe for concurrent use by
 // multiple producers.
+//
+// A producer stalled between loading the producer head and its compare-and-swap, while a multiple
+// of 2^32 elements pass through, would reserve with a stale count and could overwrite unconsumed
+// elements. DPDK has the same exposure, and that many operations during one stall is far outside
+// practical use.
 func WithMultiProdEnqueue() Option {
 	return func(cfg *config) {
 		cfg.multiProd = true
@@ -94,6 +99,11 @@ func WithMultiProdEnqueue() Option {
 
 // WithMultiConsDequeue returns an Option that makes the dequeue methods safe for concurrent use by
 // multiple consumers.
+//
+// A consumer stalled between loading the consumer head and its compare-and-swap, while a multiple
+// of 2^32 elements pass through, would reserve with a stale count and could return elements
+// twice. DPDK has the same exposure, and that many operations during one stall is far outside
+// practical use.
 func WithMultiConsDequeue() Option {
 	return func(cfg *config) {
 		cfg.multiCons = true
@@ -426,7 +436,6 @@ func (r *Ring[T]) doEnqueue(items []T, fixed bool) (enqueued, free uint32) {
 		next uint32
 	)
 
-	// get the number of entries that we have space to accommodate
 	numEntries, freeBefore := r.moveProdHead(uint32(len(items)), &head, &next, fixed)
 	if numEntries == 0 {
 		// Without a reservation the producer head moveProdHead read may be stale, so the count
@@ -446,18 +455,14 @@ func (r *Ring[T]) doEnqueue(items []T, fixed bool) (enqueued, free uint32) {
 		// avoid the memmove when we can, since it costs more than an assignment for one element
 		r.entries[base] = items[0]
 	} else {
-		// enqueue the elements -- first contiguous chunk
 		copy(r.entries[base:base+end], items[:end])
 
-		// second chunk if wrapped
+		// copy whatever is left after the wrap around
 		copy(r.entries[:numEntries-end], items[end:numEntries])
 	}
 
-	// ensure in-order publication
 	if r.multiProd {
-		for atomic.LoadUint32(r.prodTail) != head {
-			runtime.Gosched()
-		}
+		waitForTail(r.prodTail, head)
 	}
 
 	// atomic store acts as release barrier
@@ -479,7 +484,6 @@ func (r *Ring[T]) doDequeue(dst []T, fixed bool) (dequeued, available uint32) {
 		next uint32
 	)
 
-	// get the number of entries that we can actually dequeue
 	numEntries, availableBefore := r.moveConsHead(uint32(len(dst)), &head, &next, fixed)
 	if numEntries == 0 {
 		// Without a reservation the consumer head moveConsHead read may be stale, so the count
@@ -499,24 +503,45 @@ func (r *Ring[T]) doDequeue(dst []T, fixed bool) (dequeued, available uint32) {
 		// avoid the memmove when we can, since it costs more than an assignment for one element
 		dst[0] = r.entries[base]
 	} else {
-		// dequeue the elements -- first contiguous chunk
 		copy(dst[:end], r.entries[base:base+end])
 
-		// second chunk if wrapped
+		// copy whatever is left after the wrap around
 		copy(dst[end:numEntries], r.entries[:numEntries-end])
 	}
 
-	// ensure in-order consumption
 	if r.multiCons {
-		for atomic.LoadUint32(r.consTail) != head {
-			runtime.Gosched()
-		}
+		waitForTail(r.consTail, head)
 	}
 
-	// update the tail after a successful dequeue
 	atomic.StoreUint32(r.consTail, next)
 
 	return numEntries, availableBefore - numEntries
+}
+
+// tailSpins is how many times waitForTail checks the tail in a plain loop before it starts
+// yielding. 64 is provisional until benchmarks choose the bound.
+const tailSpins = 64
+
+// waitForTail returns once the tail equals want. A producer or consumer that has finished copying
+// calls it to wait for every earlier one on its side to publish, so publication stays in order.
+//
+// The earlier goroutine is usually a few nanoseconds from publishing, so waitForTail first checks
+// the tail up to tailSpins times in a plain loop, which is far cheaper than entering the
+// scheduler. The bound keeps it from burning a whole time slice when the earlier goroutine has
+// been descheduled, and after it waitForTail yields with runtime.Gosched between checks, so the
+// goroutine it waits for gets to run and publish, even with GOMAXPROCS=1. Each check is an atomic
+// load, so the compiler cannot hoist it out of the loop. The load that sees want synchronizes with
+// the earlier goroutine's tail store, so that goroutine's slot writes are published along with
+// ours.
+func waitForTail(tail *uint32, want uint32) {
+	for range tailSpins {
+		if atomic.LoadUint32(tail) == want {
+			return
+		}
+	}
+	for atomic.LoadUint32(tail) != want {
+		runtime.Gosched()
+	}
 }
 
 // moveProdHead moves the ring's producer head for an enqueue operation.

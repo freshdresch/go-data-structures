@@ -86,8 +86,13 @@ func testAllocs[T any](t *testing.T, fill fillFunc[T]) {
 // enqueue call sends elems, and the dequeue call asks for len(elems) elements. Each returns how
 // many elements it moved, treating ErrFull and ErrEmpty as 0 moved, and panics on any other
 // error.
-func newAllocRing[T any](t *testing.T, api ringAPI, elems []T) (
-	created *ring.Ring[T], enqueue, dequeue func() int,
+func newAllocRing[T any](
+	t *testing.T,
+	api ringAPI,
+	elems []T,
+) (
+	created *ring.Ring[T],
+	enqueue, dequeue func() int,
 ) {
 	t.Helper()
 	created, err := newModeRing[T](spscMode)

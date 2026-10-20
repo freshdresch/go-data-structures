@@ -189,7 +189,9 @@ const warmUpPing int64 = -1
 // newQueue builds, and back on pongs, a second one. The pinger waits for each reply before it
 // sends the next element, and both sides poll with a bounded spin. The only error it returns is
 // from newQueue.
-func runHandoff(timer benchTimer, newQueue func() (queue[int64], error),
+func runHandoff(
+	timer benchTimer,
+	newQueue func() (queue[int64], error),
 	roundTrips int,
 ) (handoffResult, error) {
 	pings, err := newQueue()
@@ -397,7 +399,9 @@ func achievedRate(dequeued int, lastDequeue time.Duration) float64 {
 // rates in elements per second. lateTimes holds each producer's lateTime, and runDuration runs
 // from the start barrier to the last dequeue. The run is sustained when achieved is at least 98%
 // of offered and every producer, judged on its own, was late for less than 1% of runDuration.
-func sustained(achieved, offered float64, lateTimes []time.Duration,
+func sustained(
+	achieved, offered float64,
+	lateTimes []time.Duration,
 	runDuration time.Duration,
 ) bool {
 	const minAchievedFraction = 0.98
@@ -580,8 +584,11 @@ func waitUntil(base time.Time, due, now time.Duration) time.Duration {
 // consumer c, whose sink already has base, and returns how many elements it received. Once every
 // producer returns, the owner calls stopConsumers, after which each consumer drains the queue and
 // returns.
-func (r *loadedRun) execute(timer benchTimer, runProducer func(p int, base time.Time) int,
-	runConsumer func(c int) int, stopConsumers func(),
+func (r *loadedRun) execute(
+	timer benchTimer,
+	runProducer func(p int, base time.Time) int,
+	runConsumer func(c int) int,
+	stopConsumers func(),
 ) loadedResult {
 	gcCycles := runTimed(timer, func() {
 		var ready, producerGroup, consumerGroup sync.WaitGroup
@@ -642,8 +649,12 @@ func (r *loadedRun) result(gcCycles uint64) loadedResult {
 // caller rounds total to a multiple of producers*batch. Producers retry a full queue, and
 // consumers poll with a bounded spin. It returns an error when newLoadedRun rejects the run's
 // parameters, or from newQueue.
-func runLoaded(timer benchTimer, newQueue func() (queue[stamped], error),
-	producers, consumers, batch int, rate float64, total int,
+func runLoaded(
+	timer benchTimer,
+	newQueue func() (queue[stamped], error),
+	producers, consumers, batch int,
+	rate float64,
+	total int,
 ) (loadedResult, error) {
 	run, err := newLoadedRun(producers, consumers, batch, rate, total)
 	if err != nil {
@@ -673,7 +684,10 @@ func runLoaded(timer benchTimer, newQueue func() (queue[stamped], error),
 // block in a range loop, so chan wait includes waking a parked consumer. The channel is closed
 // once every producer is done. It returns an error when newLoadedRun rejects the run's
 // parameters.
-func runChanLoaded(timer benchTimer, producers, consumers, batch int, rate float64,
+func runChanLoaded(
+	timer benchTimer,
+	producers, consumers, batch int,
+	rate float64,
 	total int,
 ) (loadedResult, error) {
 	run, err := newLoadedRun(producers, consumers, batch, rate, total)
@@ -733,8 +747,7 @@ func loadedImpls(mode benchMode) []loadedImpl {
 	for _, impl := range adapterImpls[stamped](mode) {
 		impls = append(impls, loadedImpl{
 			name: impl.name,
-			run: func(timer benchTimer, batch int, rate float64, total int,
-			) (loadedResult, error) {
+			run: func(timer benchTimer, batch int, rate float64, total int) (loadedResult, error) {
 				return runLoaded(timer, impl.newQueue, mode.producers, mode.consumers, batch,
 					rate, total)
 			},

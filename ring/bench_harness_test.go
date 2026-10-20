@@ -42,8 +42,12 @@ func (q *stopOrderQueue) dequeue(dst []int64) int {
 
 // consumeReversed is consume with the stopping order reversed: it dequeues first and loads
 // producersDone after. It exists only to prove that TestConsumeStopOrder tells the orders apart.
-func consumeReversed[T any, S sink[T]](source queue[T], producersDone *atomic.Bool, dst []T,
-	recorder S, wait waiter,
+func consumeReversed[T any, S sink[T]](
+	source queue[T],
+	producersDone *atomic.Bool,
+	dst []T,
+	recorder S,
+	wait waiter,
 ) int {
 	received := 0
 	for {
@@ -173,8 +177,7 @@ func accountingCases(mode benchMode) []accountingCase {
 			cases = append(cases, accountingCase{
 				name:  impl.name,
 				batch: batch,
-				run: func(total int, sinks func(consumer int) *recordSink[int64],
-				) (throughputResult, error) {
+				run: func(total int, sinks func(consumer int) *recordSink[int64]) (throughputResult, error) {
 					return runThroughput(noopTimer{}, impl.newQueue, mode.producers,
 						mode.consumers, batch, total, fillInt64, sinks)
 				},
@@ -184,8 +187,7 @@ func accountingCases(mode benchMode) []accountingCase {
 	cases = append(cases, accountingCase{
 		name:  "chan",
 		batch: 1,
-		run: func(total int, sinks func(consumer int) *recordSink[int64],
-		) (throughputResult, error) {
+		run: func(total int, sinks func(consumer int) *recordSink[int64]) (throughputResult, error) {
 			return runChanThroughput(noopTimer{}, mode.producers, mode.consumers, total,
 				fillInt64, sinks), nil
 		},
@@ -333,8 +335,7 @@ func TestRingAPIAccounting(t *testing.T) {
 				tc := accountingCase{
 					name:  api.String(),
 					batch: batch,
-					run: func(total int, sinks func(consumer int) *recordSink[int64],
-					) (throughputResult, error) {
+					run: func(total int, sinks func(consumer int) *recordSink[int64]) (throughputResult, error) {
 						newQueue := func() (queue[int64], error) {
 							return newRingAPIQueue[int64](api, mode)
 						}
@@ -664,7 +665,9 @@ func TestHandoffAccounting(t *testing.T) {
 // lateTracker. attemptAt returns when a batch's first enqueue attempt starts, given its due time,
 // so a test injects the producer's timing without a clock. It returns the tracker and the last
 // attempt.
-func replayProducer(producer, producers, batches, batch int, rate float64,
+func replayProducer(
+	producer, producers, batches, batch int,
+	rate float64,
 	attemptAt func(due time.Duration) time.Duration,
 ) (*lateTracker, time.Duration) {
 	tracker := &lateTracker{}

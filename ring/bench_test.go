@@ -115,8 +115,12 @@ func (r *recordSink[T]) record(batch []T) {
 // the flag, can return while a producer's last elements are still in flight. The dequeue finds the
 // queue empty, then the producer enqueues its last elements and finishes, and then the flag load
 // sees the flag set.
-func consume[T any, S sink[T]](source queue[T], producersDone *atomic.Bool, dst []T,
-	recorder S, wait waiter,
+func consume[T any, S sink[T]](
+	source queue[T],
+	producersDone *atomic.Bool,
+	dst []T,
+	recorder S,
+	wait waiter,
 ) int {
 	received := 0
 	for {
@@ -307,8 +311,12 @@ func newBuffers[T any](count, size int) [][]T {
 // runThroughput moves total elements from producers to consumers through the queue newQueue
 // builds, in batches of batch, and returns what it measured. Consumers yield on every empty
 // poll. The only error it returns is from newQueue.
-func runThroughput[T any, S sink[T]](timer benchTimer, newQueue func() (queue[T], error),
-	producers, consumers, batch, total int, fill fillFunc[T], sinks func(consumer int) S,
+func runThroughput[T any, S sink[T]](
+	timer benchTimer,
+	newQueue func() (queue[T], error),
+	producers, consumers, batch, total int,
+	fill fillFunc[T],
+	sinks func(consumer int) S,
 ) (throughputResult, error) {
 	source, err := newQueue()
 	if err != nil {
@@ -346,8 +354,11 @@ func runThroughput[T any, S sink[T]](timer benchTimer, newQueue func() (queue[T]
 // runChanThroughput moves total elements from producers to consumers through a channel of
 // ringCapacity slots, with blocking sends and range loops, and returns what it measured. The
 // channel is closed once every producer is done.
-func runChanThroughput[T any, S sink[T]](timer benchTimer, producers, consumers, total int,
-	fill fillFunc[T], sinks func(consumer int) S,
+func runChanThroughput[T any, S sink[T]](
+	timer benchTimer,
+	producers, consumers, total int,
+	fill fillFunc[T],
+	sinks func(consumer int) S,
 ) throughputResult {
 	ch := make(chan T, ringCapacity)
 	bufs := newBuffers[T](producers, 1)
@@ -459,9 +470,7 @@ func BenchmarkThroughput(b *testing.B) {
 
 // benchmarkThroughputImpls runs one impl sub-benchmark for each adapter, and one for chan at
 // batch size 1, because chan has no batch operation.
-func benchmarkThroughputImpls[T any](b *testing.B, mode benchMode, batch int,
-	fill fillFunc[T],
-) {
+func benchmarkThroughputImpls[T any](b *testing.B, mode benchMode, batch int, fill fillFunc[T]) {
 	for _, impl := range adapterImpls[T](mode) {
 		b.Run("impl="+impl.name, func(b *testing.B) {
 			setElemBytes[T](b)
@@ -588,7 +597,11 @@ func benchmarkRingAPIElems(b *testing.B, mode benchMode, api ringAPI, batch int)
 // benchmarkRingAPIRun sends api's total for b.N elements through runThroughput. For apiBulk
 // that total is rounded up, but testing still divides by b.N, so ns/op is off by at most
 // batch times producers divided by b.N, which is negligible at the b.N a benchmark settles on.
-func benchmarkRingAPIRun[T any](b *testing.B, mode benchMode, api ringAPI, batch int,
+func benchmarkRingAPIRun[T any](
+	b *testing.B,
+	mode benchMode,
+	api ringAPI,
+	batch int,
 	fill fillFunc[T],
 ) {
 	setElemBytes[T](b)

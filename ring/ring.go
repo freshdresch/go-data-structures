@@ -443,14 +443,10 @@ func (r *Ring[T]) doEnqueue(items []T, fixed bool) (enqueued, free uint32) {
 	}
 
 	// enqueue the elements -- first contiguous chunk
-	for i := uint32(0); i < end; i++ {
-		r.entries[int(base+i)] = items[int(i)]
-	}
+	copy(r.entries[base:base+end], items[:end])
 
 	// second chunk if wrapped
-	for i := end; i < numEntries; i++ {
-		r.entries[int(i-end)] = items[int(i)]
-	}
+	copy(r.entries[:numEntries-end], items[end:numEntries])
 
 	// ensure in-order publication
 	if r.multiProd {
@@ -495,14 +491,10 @@ func (r *Ring[T]) doDequeue(dst []T, fixed bool) (dequeued, available uint32) {
 	}
 
 	// dequeue the elements -- first contiguous chunk
-	for i := uint32(0); i < end; i++ {
-		dst[int(i)] = r.entries[int(base+i)]
-	}
+	copy(dst[:end], r.entries[base:base+end])
 
 	// second chunk if wrapped
-	for i := end; i < numEntries; i++ {
-		dst[int(i)] = r.entries[int(i-end)]
-	}
+	copy(dst[end:numEntries], r.entries[:numEntries-end])
 
 	// ensure in-order consumption
 	if r.multiCons {

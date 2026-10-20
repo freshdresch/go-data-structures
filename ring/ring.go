@@ -20,12 +20,9 @@ var ErrFull = errors.New("ring: not enough free slots")
 // occupied entries for the request. The caller may retry.
 var ErrEmpty = errors.New("ring: not enough occupied entries")
 
-// ErrShortBatch is returned by EnqueueBulk, wrapped, when numElems exceeds the length of the
-// batch.
-var ErrShortBatch = errors.New("ring: batch is shorter than the requested count")
-
-// ErrExceedsCapacity is returned by EnqueueBulk and DequeueBulk, wrapped, when numElems exceeds
-// the ring's capacity. Such a request can never succeed, so retrying it is pointless.
+// ErrExceedsCapacity is returned wrapped by EnqueueBulk when len(items) exceeds the ring's
+// capacity, and by DequeueBulk when numElems does. Such a request can never succeed, so retrying
+// it is pointless.
 var ErrExceedsCapacity = errors.New("ring: requested count exceeds the ring's capacity")
 
 // Ring is a Go ring implementation heavily inspired by rte_ring from DPDK. It provides a
@@ -181,89 +178,64 @@ func (r *Ring[T]) Empty() bool {
 	return r.Count() == 0
 }
 
-// Enqueue places one element in the ring. It returns ErrFull, unwrapped, when the ring has no
-// free slot.
+// Enqueue places item in the ring. It returns ErrFull, unwrapped, when the ring has no free slot.
 //
 // Enqueue is safe for concurrent use with other enqueues only when the ring was created with
 // WithMultiProdEnqueue. It is always safe to run alongside dequeues.
-func (r *Ring[T]) Enqueue(element T) error {
-	var elems [1]T
-	elems[0] = element
-
-	numEnqueued := r.doEnqueue(elems[:], 1, nil, true)
-	if numEnqueued != 1 {
+func (r *Ring[T]) Enqueue(item T) error {
+	items := [1]T{item}
+	enqueued, _ := r.doEnqueue(items[:], true)
+	if enqueued == 0 {
 		return ErrFull
 	}
 	return nil
 }
 
-// EnqueueBulk places the first numElems elements of elems in the ring. Either all of them are
-// enqueued and it returns nil, or none are and it returns an error.
+// EnqueueBulk places all of items in the ring, or none of them. It returns nil when all are
+// enqueued. A zero-length items succeeds and enqueues nothing.
 //
-// It checks, in order, that numElems is at most len(elems), that numElems is at most Capacity,
-// and that the ring has numElems free slots. The first failing check decides the error. These
-// return an error wrapping ErrShortBatch, an error wrapping ErrExceedsCapacity, and ErrFull
-// unwrapped. A failed call leaves the ring unchanged. A numElems of zero succeeds.
+// It checks, in order, that len(items) is at most Capacity and that the ring has len(items) free
+// slots. The first failing check decides the error. These return an error wrapping
+// ErrExceedsCapacity and ErrFull unwrapped. A failed call leaves the ring unchanged.
 //
-// If freeSpace is non-nil, it is written on every return with the number of free slots after the
-// call.
+// free is returned on every path, errors included. It is the number of free slots after the call,
+// between 0 and Capacity inclusive.
 //
 // EnqueueBulk is safe for concurrent use with other enqueues only when the ring was created with
 // WithMultiProdEnqueue. It is always safe to run alongside dequeues.
-func (r *Ring[T]) EnqueueBulk(
-	elems []T,
-	numElems uint32,
-	freeSpace *uint32,
-) error {
-	if uint64(numElems) > uint64(len(elems)) {
-		updateValidPtr(freeSpace, r.freeEntries())
-		return fmt.Errorf(
-			"enqueue %d elements from a batch of %d: %w",
-			numElems,
-			len(elems),
-			ErrShortBatch,
-		)
-	}
-	if numElems > r.capacity() {
-		updateValidPtr(freeSpace, r.freeEntries())
-		return fmt.Errorf(
+func (r *Ring[T]) EnqueueBulk(items []T) (free int, err error) {
+	capacity := int(r.capacity())
+	if len(items) > capacity {
+		return int(r.freeEntries()), fmt.Errorf(
 			"enqueue %d elements, capacity %d: %w",
-			numElems,
-			r.capacity(),
+			len(items),
+			capacity,
 			ErrExceedsCapacity,
 		)
 	}
 
-	numEnqueued := r.doEnqueue(elems, numElems, freeSpace, true)
-	if numEnqueued != numElems {
-		return ErrFull
+	enqueued, freeAfter := r.doEnqueue(items, true)
+	if int(enqueued) != len(items) {
+		return int(freeAfter), ErrFull
 	}
-	return nil
+	return int(freeAfter), nil
 }
 
-// EnqueueBurst places as many of the first numElems elements of elems in the ring as it has free
-// slots for. It returns the number enqueued, which is between 0 and numElems inclusive.
+// EnqueueBurst places as many elements from the front of items in the ring as it has free slots
+// for, and never more than Capacity. It returns the number enqueued, between 0 and len(items)
+// inclusive. A zero-length items enqueues nothing.
 //
-// It panics when numElems exceeds len(elems), before touching the ring or freeSpace. Otherwise, if
-// freeSpace is non-nil, it is written on every return with the number of free slots after the
-// call.
+// free is returned on every path. It is the number of free slots after the call, between 0 and
+// Capacity inclusive.
 //
 // EnqueueBurst is safe for concurrent use with other enqueues only when the ring was created with
 // WithMultiProdEnqueue. It is always safe to run alongside dequeues.
-func (r *Ring[T]) EnqueueBurst(
-	elems []T,
-	numElems uint32,
-	freeSpace *uint32,
-) uint32 {
-	if uint64(numElems) > uint64(len(elems)) {
-		panic(fmt.Sprintf("ring: burst count %d exceeds batch length %d", numElems, len(elems)))
-	}
-	return r.doEnqueue(
-		elems,
-		numElems,
-		freeSpace,
-		false,
-	)
+func (r *Ring[T]) EnqueueBurst(items []T) (enqueued, free int) {
+	// Clamping in int keeps a slice longer than 2^32 from truncating when its length becomes a
+	// uint32 in doEnqueue.
+	clamped := min(len(items), int(r.capacity()))
+	moved, freeAfter := r.doEnqueue(items[:clamped], false)
+	return int(moved), int(freeAfter)
 }
 
 // Dequeue removes and returns the oldest element in the ring. It returns the zero value and
@@ -336,22 +308,26 @@ func (r *Ring[T]) DequeueBurst(
 	)
 }
 
-func (r *Ring[T]) doEnqueue(
-	elems []T,
-	numElems uint32,
-	freeSpace *uint32,
-	fixed bool,
-) uint32 {
+// doEnqueue places elements from the front of items in the ring. fixed is true for a bulk
+// enqueue, which enqueues all of items or nothing. It returns the number enqueued and the number
+// of free slots after the call, which is at most the capacity.
+//
+// Callers pass a slice whose length is already at most the capacity, so converting len(items) to
+// uint32 cannot truncate.
+func (r *Ring[T]) doEnqueue(items []T, fixed bool) (enqueued, free uint32) {
 	var (
 		head uint32
 		next uint32
 	)
 
 	// get the number of entries that we have space to accommodate
-	numEntries, freeBefore := r.moveProdHead(numElems, &head, &next, fixed)
+	numEntries, freeBefore := r.moveProdHead(uint32(len(items)), &head, &next, fixed)
 	if numEntries == 0 {
-		updateValidPtr(freeSpace, freeBefore)
-		return 0
+		// Without a reservation the producer head moveProdHead read may be stale, so the count
+		// can overshoot the capacity. With a reservation the head was current when the consumer
+		// tail was loaded, because the single producer owns the head or the multi-producer CAS
+		// succeeded on it, so capacity + tail - head is already between 0 and the capacity.
+		return 0, min(freeBefore, r.capacity())
 	}
 
 	base := head & r.mask
@@ -362,12 +338,12 @@ func (r *Ring[T]) doEnqueue(
 
 	// enqueue the elements -- first contiguous chunk
 	for i := uint32(0); i < end; i++ {
-		r.entries[int(base+i)] = elems[int(i)]
+		r.entries[int(base+i)] = items[int(i)]
 	}
 
 	// second chunk if wrapped
 	for i := end; i < numEntries; i++ {
-		r.entries[int(i-end)] = elems[int(i)]
+		r.entries[int(i-end)] = items[int(i)]
 	}
 
 	// ensure in-order publication
@@ -380,8 +356,7 @@ func (r *Ring[T]) doEnqueue(
 	// atomic store acts as release barrier
 	atomic.StoreUint32(r.prodTail, next)
 
-	updateValidPtr(freeSpace, freeBefore-numEntries)
-	return numEntries
+	return numEntries, freeBefore - numEntries
 }
 
 func (r *Ring[T]) doDequeue(

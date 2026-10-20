@@ -62,7 +62,8 @@ func newRingQueue[T any](mode benchMode) (*ringQueue[T], error) {
 }
 
 func (q *ringQueue[T]) enqueue(items []T) int {
-	return int(q.ring.EnqueueBurst(items, uint32(len(items)), nil))
+	enqueued, _ := q.ring.EnqueueBurst(items)
+	return enqueued
 }
 
 // dequeue copies the elements DequeueBurst returns into dst, because today's DequeueBurst returns
@@ -122,7 +123,8 @@ type ringBulkQueue[T any] struct {
 }
 
 func (q *ringBulkQueue[T]) enqueue(items []T) int {
-	return movedOrPanic(q.ring.EnqueueBulk(items, uint32(len(items)), nil), ring.ErrFull, len(items))
+	_, err := q.ring.EnqueueBulk(items)
+	return movedOrPanic(err, ring.ErrFull, len(items))
 }
 
 // dequeue copies the elements DequeueBulk returns into dst, because today's DequeueBulk returns a

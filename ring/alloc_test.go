@@ -109,7 +109,8 @@ func newAllocRing[T any](
 		}
 	case apiBurst:
 		enqueue = func() int {
-			return int(created.EnqueueBurst(elems, count, nil))
+			enqueued, _ := created.EnqueueBurst(elems)
+			return enqueued
 		}
 		dequeue = func() int {
 			_, moved := created.DequeueBurst(count, nil)
@@ -117,7 +118,8 @@ func newAllocRing[T any](
 		}
 	case apiBulk:
 		enqueue = func() int {
-			return movedOrPanic(created.EnqueueBulk(elems, count, nil), ring.ErrFull, len(elems))
+			_, err := created.EnqueueBulk(elems)
+			return movedOrPanic(err, ring.ErrFull, len(elems))
 		}
 		dequeue = func() int {
 			_, err := created.DequeueBulk(count, nil)
@@ -134,7 +136,8 @@ func fillRing[T any](t *testing.T, target *ring.Ring[T], fill fillFunc[T], n int
 	t.Helper()
 	elems := make([]T, n)
 	fill(elems, 0, 0)
-	require.NoError(t, target.EnqueueBulk(elems, uint32(n), nil))
+	_, err := target.EnqueueBulk(elems)
+	require.NoError(t, err)
 }
 
 // measureAllocs returns the average allocations per call of call over allocRuns runs, and how

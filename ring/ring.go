@@ -442,11 +442,16 @@ func (r *Ring[T]) doEnqueue(items []T, fixed bool) (enqueued, free uint32) {
 		end = numEntries
 	}
 
-	// enqueue the elements -- first contiguous chunk
-	copy(r.entries[base:base+end], items[:end])
+	if numEntries == 1 {
+		// avoid the memmove when we can, since it costs more than an assignment for one element
+		r.entries[base] = items[0]
+	} else {
+		// enqueue the elements -- first contiguous chunk
+		copy(r.entries[base:base+end], items[:end])
 
-	// second chunk if wrapped
-	copy(r.entries[:numEntries-end], items[end:numEntries])
+		// second chunk if wrapped
+		copy(r.entries[:numEntries-end], items[end:numEntries])
+	}
 
 	// ensure in-order publication
 	if r.multiProd {
@@ -490,11 +495,16 @@ func (r *Ring[T]) doDequeue(dst []T, fixed bool) (dequeued, available uint32) {
 		end = numEntries
 	}
 
-	// dequeue the elements -- first contiguous chunk
-	copy(dst[:end], r.entries[base:base+end])
+	if numEntries == 1 {
+		// avoid the memmove when we can, since it costs more than an assignment for one element
+		dst[0] = r.entries[base]
+	} else {
+		// dequeue the elements -- first contiguous chunk
+		copy(dst[:end], r.entries[base:base+end])
 
-	// second chunk if wrapped
-	copy(dst[end:numEntries], r.entries[:numEntries-end])
+		// second chunk if wrapped
+		copy(dst[end:numEntries], r.entries[:numEntries-end])
+	}
 
 	// ensure in-order consumption
 	if r.multiCons {

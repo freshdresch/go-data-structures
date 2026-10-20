@@ -279,6 +279,31 @@ func TestHarnessAccounting(t *testing.T) {
 // today.
 const accountingDeadline = 30 * time.Second
 
+// runWithin calls run in its own goroutine and returns its result. When run does not return
+// within accountingDeadline, it fails the test with a message that names stuck. When run returns
+// an error, it fails the test with that error.
+func runWithin[R any](t *testing.T, stuck string, run func() (R, error)) R {
+	t.Helper()
+	type outcome struct {
+		result R
+		err    error
+	}
+	outcomes := make(chan outcome, 1)
+	go func() {
+		result, err := run()
+		outcomes <- outcome{result: result, err: err}
+	}()
+	var done outcome
+	select {
+	case done = <-outcomes:
+	case <-time.After(accountingDeadline):
+		// The test is failing anyway, so the stuck goroutine is abandoned, not joined.
+		t.Fatalf("%s: run did not finish within %v", stuck, accountingDeadline)
+	}
+	require.NoError(t, done.err)
+	return done.result
+}
+
 // checkAccounting runs tc once with a recordSink per consumer and checks what they recorded. The
 // run has accountingDeadline to finish.
 func checkAccounting(t *testing.T, tc accountingCase, mode benchMode, total int) {
@@ -288,26 +313,12 @@ func checkAccounting(t *testing.T, tc accountingCase, mode benchMode, total int)
 		sinks[consumer] = &recordSink[int64]{}
 		return sinks[consumer]
 	}
-	type runOutcome struct {
-		result throughputResult
-		err    error
-	}
-	outcomes := make(chan runOutcome, 1)
-	go func() {
-		result, err := tc.run(total, newSink)
-		outcomes <- runOutcome{result: result, err: err}
-	}()
-	var outcome runOutcome
-	select {
-	case outcome = <-outcomes:
-	case <-time.After(accountingDeadline):
-		// The test is failing anyway, so the stuck goroutine is abandoned, not joined.
-		t.Fatalf("%s batch=%d mode=%s total=%d: run did not finish within %v, "+
-			"likely a consumer exited early", tc.name, tc.batch, mode.name, total,
-			accountingDeadline)
-	}
-	require.NoError(t, outcome.err)
-	require.Equal(t, total, outcome.result.received)
+	stuck := fmt.Sprintf("%s batch=%d mode=%s total=%d, likely a consumer exited early",
+		tc.name, tc.batch, mode.name, total)
+	result := runWithin(t, stuck, func() (throughputResult, error) {
+		return tc.run(total, newSink)
+	})
+	require.Equal(t, total, result.received)
 	require.NoError(t, accountingError(sinks, mode.producers, total))
 }
 
@@ -639,26 +650,12 @@ func TestHandoffAccounting(t *testing.T) {
 	const roundTrips = 10_000
 	for _, impl := range handoffImpls() {
 		t.Run("impl="+impl.name, func(t *testing.T) {
-			type runOutcome struct {
-				result handoffResult
-				err    error
-			}
-			outcomes := make(chan runOutcome, 1)
-			go func() {
-				result, err := impl.run(noopTimer{}, roundTrips)
-				outcomes <- runOutcome{result: result, err: err}
-			}()
-			var outcome runOutcome
-			select {
-			case outcome = <-outcomes:
-			case <-time.After(accountingDeadline):
-				// The test is failing anyway, so the stuck goroutine is abandoned, not joined.
-				t.Fatalf("run did not finish within %v, likely the ponger did not stop",
-					accountingDeadline)
-			}
-			require.NoError(t, outcome.err)
-			assert.Equal(t, roundTrips, outcome.result.recorded)
-			assert.Equal(t, roundTrips, outcome.result.latency.count())
+			stuck := fmt.Sprintf("impl=%s, likely the ponger did not stop", impl.name)
+			result := runWithin(t, stuck, func() (handoffResult, error) {
+				return impl.run(noopTimer{}, roundTrips)
+			})
+			assert.Equal(t, roundTrips, result.recorded)
+			assert.Equal(t, roundTrips, result.latency.count())
 		})
 	}
 }
@@ -858,4 +855,153 @@ func TestPacer(t *testing.T) {
 		assert.True(t, capReached(2*nominal, nominal))
 		assert.True(t, capReached(2*nominal+time.Nanosecond, nominal))
 	})
+}
+
+// TestLoadedAccounting checks that every loaded run sends its whole share uncapped, records each
+// element it sends exactly once, in the merged wait and sched histograms, records one lag entry
+// per batch, and dequeues all of them, for every implementation in SPSC and MPMC at batch sizes 1
+// and 32. It also checks that the largest wait is at most the largest sched and that the median
+// wait is far below the run length, which a missing attempt stamp would break. TestLoadedSink pins
+// wait to the attempt stamp. Each run sends 200 ms of elements at 100k/s, rounded up to whole
+// batches, and has accountingDeadline to finish, which shows every goroutine stopped. The capped
+// subtest offers far more load than any run can move and checks that the 2× cap stops it.
+func TestLoadedAccounting(t *testing.T) {
+	const runLength = 200 * time.Millisecond
+	const rate = 100_000
+	for _, mode := range []benchMode{spscMode, mpmcMode} {
+		for _, batch := range []int{1, 32} {
+			total := loadedTotal(rate, runLength, mode.producers, batch)
+			for _, impl := range loadedImpls(mode) {
+				name := fmt.Sprintf("impl=%s/mode=%s/batch=%d", impl.name, mode.name, batch)
+				t.Run(name, func(t *testing.T) {
+					stuck := name + ", likely a goroutine did not stop"
+					result := runWithin(t, stuck, func() (loadedResult, error) {
+						return impl.run(noopTimer{}, batch, rate, total)
+					})
+					require.Equal(t, total, result.sent)
+					assert.False(t, result.capped)
+					assert.Equal(t, result.sent, result.wait.count())
+					assert.Equal(t, result.sent, result.sched.count())
+					assert.Equal(t, result.sent, result.dequeued)
+					assert.Equal(t, result.sent/batch, result.lag.count())
+					// Every element's attempt stamp is at or after its due time, so its queue
+					// wait is at most its schedule latency.
+					assert.LessOrEqual(t, result.wait.max(), result.sched.max())
+					// A missing attempt stamp makes the wait the time since the start barrier,
+					// about half the run at the median.
+					assert.Less(t, result.wait.percentile(50), runLength/10)
+				})
+			}
+		}
+	}
+
+	t.Run("capped", func(t *testing.T) {
+		// At this rate a million elements are due within 100 µs, so every run hits the cap at
+		// 200 µs long before its producers send their shares.
+		const cappedRate = 1e10
+		const cappedLength = 100 * time.Microsecond
+		const batch = 32
+		for _, mode := range []benchMode{spscMode, mpmcMode} {
+			total := loadedTotal(cappedRate, cappedLength, mode.producers, batch)
+			for _, impl := range loadedImpls(mode) {
+				name := fmt.Sprintf("impl=%s/mode=%s/batch=%d", impl.name, mode.name, batch)
+				t.Run(name, func(t *testing.T) {
+					stuck := name + ", likely a goroutine did not stop"
+					result := runWithin(t, stuck, func() (loadedResult, error) {
+						return impl.run(noopTimer{}, batch, cappedRate, total)
+					})
+					assert.True(t, result.capped)
+					assert.Less(t, result.sent, total)
+					assert.Equal(t, result.sent, result.dequeued)
+				})
+			}
+		}
+	})
+}
+
+// TestNewLoadedRunRejects checks that newLoadedRun returns an error for a rate that is not
+// positive and finite, for fewer than 1 producer, consumer, or element per batch, and for a total
+// that is negative or not a multiple of producers*batch. It also checks that valid parameters
+// pass.
+func TestNewLoadedRunRejects(t *testing.T) {
+	cases := []struct {
+		name      string
+		producers int
+		consumers int
+		batch     int
+		rate      float64
+		total     int
+		wantErr   bool
+	}{
+		{name: "rateNaN", producers: 1, consumers: 1, batch: 32, rate: math.NaN(), total: 64,
+			wantErr: true},
+		{name: "rateInf", producers: 1, consumers: 1, batch: 32, rate: math.Inf(1), total: 64,
+			wantErr: true},
+		{name: "rateZero", producers: 1, consumers: 1, batch: 32, rate: 0, total: 64,
+			wantErr: true},
+		{name: "rateNegative", producers: 1, consumers: 1, batch: 32, rate: -1, total: 64,
+			wantErr: true},
+		{name: "noProducers", producers: 0, consumers: 1, batch: 32, rate: 1e5, total: 64,
+			wantErr: true},
+		{name: "noConsumers", producers: 1, consumers: 0, batch: 32, rate: 1e5, total: 64,
+			wantErr: true},
+		{name: "batchZero", producers: 1, consumers: 1, batch: 0, rate: 1e5, total: 64,
+			wantErr: true},
+		{name: "totalNegative", producers: 1, consumers: 1, batch: 32, rate: 1e5, total: -32,
+			wantErr: true},
+		{name: "totalNotMultiple", producers: 1, consumers: 1, batch: 32, rate: 1e5, total: 33,
+			wantErr: true},
+		{name: "valid", producers: 1, consumers: 1, batch: 32, rate: 1e5, total: 64},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := newLoadedRun(tc.producers, tc.consumers, tc.batch, tc.rate, tc.total)
+			if tc.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
+		})
+	}
+}
+
+// TestLoadedSink checks that a loadedSink measures queue wait from an element's attempt stamp and
+// schedule latency from its due time. The base is 10 ms in the past and the element was attempted
+// at 9 ms and due at 1 ms, so wait is about 1 ms and sched about 9 ms. The upper bounds leave 5 ms
+// for scheduling noise, and swapping the two stamps fails both checks.
+func TestLoadedSink(t *testing.T) {
+	const sinceBase = 10 * time.Millisecond
+	const attempt = 9 * time.Millisecond
+	const due = 1 * time.Millisecond
+	const noise = 5 * time.Millisecond
+	sink := &loadedSink{base: time.Now().Add(-sinceBase)}
+	sink.record([]stamped{{attempt: int64(attempt), due: int64(due)}})
+
+	wait := sink.wait.max()
+	assert.GreaterOrEqual(t, wait, sinceBase-attempt)
+	assert.Less(t, wait, sinceBase-attempt+noise)
+	sched := sink.sched.max()
+	assert.GreaterOrEqual(t, sched, sinceBase-due)
+	assert.Less(t, sched, sinceBase-due+noise)
+}
+
+// TestLoadedSmoke makes one real-time loaded run, 200 ms at 100k/s through the ring in SPSC, and
+// checks that the achieved rate is within 10% of the offered rate. It depends on wall-clock
+// timing, so it is skipped under -short and -race. The run has accountingDeadline to finish.
+func TestLoadedSmoke(t *testing.T) {
+	if testing.Short() || raceEnabled {
+		t.Skip("depends on wall-clock timing, so it skips under -short and -race")
+	}
+	const rate = 100_000
+	const runLength = 200 * time.Millisecond
+	const batch = 1
+	impl := loadedImpls(spscMode)[0]
+	require.Equal(t, "ring", impl.name)
+	total := loadedTotal(rate, runLength, spscMode.producers, batch)
+	stuck := "ring mode=SPSC, likely a goroutine did not stop"
+	result := runWithin(t, stuck, func() (loadedResult, error) {
+		return impl.run(noopTimer{}, batch, rate, total)
+	})
+	achieved := achievedRate(result.dequeued, result.lastDequeue)
+	assert.InDelta(t, rate, achieved, 0.1*rate)
 }

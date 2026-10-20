@@ -1,8 +1,10 @@
 package ring_test
 
 import (
+	"fmt"
 	"math"
 	"math/bits"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -416,4 +418,393 @@ func sustained(achieved, offered float64, lateTimes []time.Duration,
 // which producers stop offering load. elapsed is measured from the start barrier.
 func capReached(elapsed, nominal time.Duration) bool {
 	return elapsed >= 2*nominal
+}
+
+// stamped is the element a loaded run sends. attempt is when its batch's first enqueue attempt
+// started, and due is when its batch's last element was due, both in nanoseconds from the start
+// barrier.
+type stamped struct{ attempt, due int64 }
+
+// loadedResult is what one loaded run measured. wait holds each element's queue wait, from its
+// attempt stamp to its dequeue, and sched its schedule latency, from its due time to its dequeue.
+// lag holds how far behind its due time each batch's first enqueue attempt started. lateTimes
+// holds each producer's late time. lastDequeue is the offset from the start barrier of the last
+// dequeue of any consumer. capped reports that the 2× cap stopped at least one producer before it
+// sent its share.
+type loadedResult struct {
+	wait, sched, lag *histogram
+	lateTimes        []time.Duration
+	sent, dequeued   int
+	lastDequeue      time.Duration
+	capped           bool
+	gcCycles         uint64
+	gcPerMelem       float64
+}
+
+// loadedSink records the queue wait and schedule latency of every element one loaded consumer
+// dequeues, and when it last dequeued. It reads the clock once per batch, so later elements are
+// not charged for the clock reads of earlier ones. base is the run's start barrier, set before the
+// consumer's first dequeue.
+type loadedSink struct {
+	base        time.Time
+	wait, sched histogram
+	lastDequeue time.Duration
+}
+
+func (s *loadedSink) record(batch []stamped) {
+	now := time.Since(s.base)
+	for _, elem := range batch {
+		s.wait.record(now - time.Duration(elem.attempt))
+		s.sched.record(now - time.Duration(elem.due))
+	}
+	s.lastDequeue = now
+}
+
+// loadedRun is one loaded run's schedule, plus the state its goroutines write, each producer and
+// consumer into its own slots, for the owner to merge after they all stop. The trackers and sinks
+// are allocated separately, so goroutines writing to neighbors are unlikely to share a cache line,
+// which today follows from their size classes.
+type loadedRun struct {
+	producers, batch int
+	rate             float64
+	// batches is how many batches each producer sends.
+	batches int
+	// nominal is how long the run lasts when every producer keeps to its schedule.
+	nominal  time.Duration
+	trackers []*lateTracker
+	sinks    []*loadedSink
+	sent     []int
+	dequeued []int
+	// capped records, for each producer, that it stopped at the 2× cap before sending its share.
+	capped []bool
+}
+
+// newLoadedRun returns the state for a loaded run of total elements, in which each of producers
+// sends total/(producers*batch) whole batches of batch elements, at rate elements per second in
+// total. The caller rounds total to a multiple of producers*batch. It returns an error when rate
+// is not positive and finite, because the schedule divides by it, when producers, consumers, or
+// batch is less than 1, or when total is negative or not a multiple of producers*batch.
+func newLoadedRun(producers, consumers, batch int, rate float64, total int) (*loadedRun, error) {
+	if math.IsNaN(rate) || math.IsInf(rate, 1) || rate <= 0 {
+		return nil, fmt.Errorf("loaded rate %v elements per second is not positive and finite",
+			rate)
+	}
+	if producers < 1 || consumers < 1 || batch < 1 {
+		return nil, fmt.Errorf("loaded run needs at least 1 producer, consumer, and element per "+
+			"batch, got %d producers, %d consumers, and batch %d", producers, consumers, batch)
+	}
+	if total < 0 || total%(producers*batch) != 0 {
+		return nil, fmt.Errorf("loaded total %d is not a non-negative multiple of %d producers "+
+			"times batch %d", total, producers, batch)
+	}
+	run := &loadedRun{
+		producers: producers,
+		batch:     batch,
+		rate:      rate,
+		batches:   total / (producers * batch),
+		nominal:   time.Duration(float64(total) / rate * float64(time.Second)),
+		trackers:  make([]*lateTracker, producers),
+		sinks:     make([]*loadedSink, consumers),
+		sent:      make([]int, producers),
+		dequeued:  make([]int, consumers),
+		capped:    make([]bool, producers),
+	}
+	for p := range run.trackers {
+		run.trackers[p] = &lateTracker{}
+	}
+	for c := range run.sinks {
+		run.sinks[c] = &loadedSink{}
+	}
+	return run, nil
+}
+
+// loadedTotal returns how many elements a loaded run sends to last length at rate elements per
+// second in total, rounded up to whole batches of batch for each of producers.
+func loadedTotal(rate float64, length time.Duration, producers, batch int) int {
+	elements := int(math.Ceil(rate * length.Seconds()))
+	return wholeBatches(elements, producers, batch)
+}
+
+// wholeBatches returns elements rounded up to a multiple of producers*batch, so every producer of
+// a loaded run sends whole batches.
+func wholeBatches(elements, producers, batch int) int {
+	multiple := producers * batch
+	return (elements + multiple - 1) / multiple * multiple
+}
+
+// pace sends producer's batches through send, each at its dueTime, and returns how many elements
+// it sent. Before each batch it reads the clock and stops once capReached says the run has gone
+// on for twice its nominal length, and then records that the producer was capped. It stamps each
+// batch once, refilling buf, which holds one batch, with the due time and an attempt stamp read
+// from the clock before send makes its first enqueue attempt. Only after the send does it feed
+// the producer's lateTracker that attempt stamp, never the time the send completed, so the
+// histogram write is not part of any element's queue wait.
+func (r *loadedRun) pace(base time.Time, producer int, buf []stamped, send func([]stamped)) int {
+	tracker := r.trackers[producer]
+	sent := 0
+	for k := range r.batches {
+		now := time.Since(base)
+		if capReached(now, r.nominal) {
+			r.capped[producer] = true
+			break
+		}
+		due := dueTime(producer, r.producers, k, r.batch, r.rate)
+		attempt := waitUntil(base, due, now)
+		for i := range buf {
+			buf[i] = stamped{attempt: int64(attempt), due: int64(due)}
+		}
+		send(buf)
+		tracker.observe(attempt, due)
+		sent += len(buf)
+	}
+	return sent
+}
+
+// waitUntil waits until due, an offset from base, and returns the clock reading at which it
+// stopped, which is due or later. now is the current offset. It spins while due is within
+// paceSpinWindow, and otherwise yields, so pacing never holds a CPU for a whole time slice.
+func waitUntil(base time.Time, due, now time.Duration) time.Duration {
+	for now < due {
+		if due-now > paceSpinWindow {
+			runtime.Gosched()
+		}
+		now = time.Since(base)
+	}
+	return now
+}
+
+// execute runs one loaded run as the timed region and returns what it measured. Every producer
+// and consumer starts, calls ready.Done, and blocks on start. The owner waits for all of them,
+// takes base, the start barrier, and then closes start, so goroutine startup never counts as
+// latency. runProducer runs producer p and returns how many elements it sent. runConsumer runs
+// consumer c, whose sink already has base, and returns how many elements it received. Once every
+// producer returns, the owner calls stopConsumers, after which each consumer drains the queue and
+// returns.
+func (r *loadedRun) execute(timer benchTimer, runProducer func(p int, base time.Time) int,
+	runConsumer func(c int) int, stopConsumers func(),
+) loadedResult {
+	gcCycles := runTimed(timer, func() {
+		var ready, producerGroup, consumerGroup sync.WaitGroup
+		start := make(chan struct{})
+		var base time.Time
+		ready.Add(len(r.sinks) + len(r.trackers))
+		for c := range r.sinks {
+			consumerGroup.Go(func() {
+				ready.Done()
+				<-start
+				r.sinks[c].base = base
+				r.dequeued[c] = runConsumer(c)
+			})
+		}
+		for p := range r.trackers {
+			producerGroup.Go(func() {
+				ready.Done()
+				<-start
+				r.sent[p] = runProducer(p, base)
+			})
+		}
+		ready.Wait()
+		base = time.Now()
+		close(start)
+		producerGroup.Wait()
+		stopConsumers()
+		consumerGroup.Wait()
+	})
+	return r.result(gcCycles)
+}
+
+// result merges what the producers and consumers recorded, once they have all stopped.
+func (r *loadedRun) result(gcCycles uint64) loadedResult {
+	result := loadedResult{
+		wait:     &histogram{},
+		sched:    &histogram{},
+		lag:      &histogram{},
+		gcCycles: gcCycles,
+	}
+	for p, tracker := range r.trackers {
+		result.lag.merge(&tracker.lag)
+		result.lateTimes = append(result.lateTimes, tracker.lateTime)
+		result.sent += r.sent[p]
+		result.capped = result.capped || r.capped[p]
+	}
+	for c, recorded := range r.sinks {
+		result.wait.merge(&recorded.wait)
+		result.sched.merge(&recorded.sched)
+		result.lastDequeue = max(result.lastDequeue, recorded.lastDequeue)
+		result.dequeued += r.dequeued[c]
+	}
+	result.gcPerMelem = gcPerMillion(gcCycles, result.dequeued)
+	return result
+}
+
+// runLoaded sends total elements from producers to consumers through the queue newQueue builds,
+// in batches of batch, at rate elements per second in total, and returns what it measured. The
+// caller rounds total to a multiple of producers*batch. Producers retry a full queue, and
+// consumers poll with a bounded spin. It returns an error when newLoadedRun rejects the run's
+// parameters, or from newQueue.
+func runLoaded(timer benchTimer, newQueue func() (queue[stamped], error),
+	producers, consumers, batch int, rate float64, total int,
+) (loadedResult, error) {
+	run, err := newLoadedRun(producers, consumers, batch, rate, total)
+	if err != nil {
+		return loadedResult{}, err
+	}
+	source, err := newQueue()
+	if err != nil {
+		return loadedResult{}, err
+	}
+	bufs := newBuffers[stamped](producers, batch)
+	dsts := newBuffers[stamped](consumers, batch)
+	var producersDone atomic.Bool
+	produceTo := func(p int, base time.Time) int {
+		return run.pace(base, p, bufs[p], func(items []stamped) {
+			enqueueAll(source, items)
+		})
+	}
+	consumeFrom := func(c int) int {
+		return consume(source, &producersDone, dsts[c], run.sinks[c], newWaiter(spinThenYield))
+	}
+	stop := func() { producersDone.Store(true) }
+	return run.execute(timer, produceTo, consumeFrom, stop), nil
+}
+
+// runChanLoaded is runLoaded over a channel of ringCapacity slots. Each producer sends a batch as
+// that many blocking sends back to back, all under the batch's one attempt stamp, and consumers
+// block in a range loop, so chan wait includes waking a parked consumer. The channel is closed
+// once every producer is done. It returns an error when newLoadedRun rejects the run's
+// parameters.
+func runChanLoaded(timer benchTimer, producers, consumers, batch int, rate float64,
+	total int,
+) (loadedResult, error) {
+	run, err := newLoadedRun(producers, consumers, batch, rate, total)
+	if err != nil {
+		return loadedResult{}, err
+	}
+	ch := make(chan stamped, ringCapacity)
+	bufs := newBuffers[stamped](producers, batch)
+	dsts := newBuffers[stamped](consumers, 1)
+	produceTo := func(p int, base time.Time) int {
+		return run.pace(base, p, bufs[p], func(items []stamped) {
+			for _, v := range items {
+				ch <- v
+			}
+		})
+	}
+	consumeFrom := func(c int) int {
+		return consumeChan(ch, dsts[c], run.sinks[c])
+	}
+	stop := func() { close(ch) }
+	return run.execute(timer, produceTo, consumeFrom, stop), nil
+}
+
+// reportLoaded reports a loaded run's wait-*, sched-*, and lag-* latencies, its achieved-rate in
+// elements per second, sustained as 1 or 0, and its GC metrics. offered is the offered rate in
+// elements per second. A run the 2× cap stopped is never sustained.
+func reportLoaded(b *testing.B, result loadedResult, offered float64) {
+	b.Helper()
+	if result.dequeued != result.sent {
+		b.Fatalf("dequeued %d elements, want %d", result.dequeued, result.sent)
+	}
+	reportLatency(b, "wait", result.wait)
+	reportLatency(b, "sched", result.sched)
+	reportLatency(b, "lag", result.lag)
+	achieved := achievedRate(result.dequeued, result.lastDequeue)
+	keptUp := !result.capped && sustained(achieved, offered, result.lateTimes, result.lastDequeue)
+	sustainedMetric := 0.0
+	if keptUp {
+		sustainedMetric = 1
+	}
+	b.ReportMetric(achieved, "achieved-rate")
+	b.ReportMetric(sustainedMetric, "sustained")
+	b.ReportMetric(float64(result.gcCycles), "gc-cycles")
+	b.ReportMetric(result.gcPerMelem, "gc/Melem")
+}
+
+// loadedImpl names an implementation BenchmarkLoaded runs. run sends total elements in batches of
+// batch at rate elements per second in total.
+type loadedImpl struct {
+	name string
+	run  func(timer benchTimer, batch int, rate float64, total int) (loadedResult, error)
+}
+
+// loadedImpls returns every implementation BenchmarkLoaded runs in mode, the adapters and chan.
+func loadedImpls(mode benchMode) []loadedImpl {
+	var impls []loadedImpl
+	for _, impl := range adapterImpls[stamped](mode) {
+		impls = append(impls, loadedImpl{
+			name: impl.name,
+			run: func(timer benchTimer, batch int, rate float64, total int,
+			) (loadedResult, error) {
+				return runLoaded(timer, impl.newQueue, mode.producers, mode.consumers, batch,
+					rate, total)
+			},
+		})
+	}
+	return append(impls, loadedImpl{
+		name: "chan",
+		run: func(timer benchTimer, batch int, rate float64, total int) (loadedResult, error) {
+			return runChanLoaded(timer, mode.producers, mode.consumers, batch, rate, total)
+		},
+	})
+}
+
+// loadedRate is an offered rate BenchmarkLoaded runs at, in elements per second in total, and its
+// name in the sub-benchmark names.
+type loadedRate struct {
+	name string
+	rate float64
+}
+
+// loadedRates lists the offered rates BenchmarkLoaded runs at.
+var loadedRates = []loadedRate{
+	{name: "100k", rate: 100_000},
+	{name: "1M", rate: 1_000_000},
+	{name: "10M", rate: 10_000_000},
+}
+
+// loadedBatches lists the batch sizes BenchmarkLoaded runs at.
+var loadedBatches = []int{1, 32}
+
+// BenchmarkLoaded measures how long elements wait when producers offer a fixed rate, with every
+// producer and consumer started behind a common start barrier. Each run sends two seconds' worth
+// of elements at the offered rate, rounded up to whole batches per producer, and ignores b.N, so
+// it is meant for -benchtime 1x and ns/op is meaningless. Producers stop offering load at twice
+// the nominal length, and such a run reports sustained 0. ring, chanpoll, and mutex consumers poll
+// with a bounded spin. chan consumers block, so chan wait includes waking a parked goroutine.
+func BenchmarkLoaded(b *testing.B) {
+	// runLength is how long a run lasts at the offered rate when it keeps up.
+	const runLength = 2 * time.Second
+	for _, mode := range benchModes {
+		b.Run("mode="+mode.name, func(b *testing.B) {
+			if runtime.GOMAXPROCS(0) < mode.producers+mode.consumers {
+				b.Skipf("GOMAXPROCS %d is below the %d goroutines of mode %s, and the design "+
+					"excludes configurations with fewer CPUs than goroutines",
+					runtime.GOMAXPROCS(0), mode.producers+mode.consumers, mode.name)
+			}
+			for _, batch := range loadedBatches {
+				b.Run(fmt.Sprintf("batch=%d", batch), func(b *testing.B) {
+					for _, offered := range loadedRates {
+						b.Run("rate="+offered.name, func(b *testing.B) {
+							total := loadedTotal(offered.rate, runLength, mode.producers,
+								batch)
+							benchmarkLoadedImpls(b, mode, batch, offered.rate, total)
+						})
+					}
+				})
+			}
+		})
+	}
+}
+
+// benchmarkLoadedImpls runs one impl sub-benchmark for each implementation loadedImpls returns.
+func benchmarkLoadedImpls(b *testing.B, mode benchMode, batch int, rate float64, total int) {
+	for _, impl := range loadedImpls(mode) {
+		b.Run("impl="+impl.name, func(b *testing.B) {
+			result, err := impl.run(b, batch, rate, total)
+			if err != nil {
+				b.Fatal(err)
+			}
+			reportLoaded(b, result, rate)
+		})
+	}
 }

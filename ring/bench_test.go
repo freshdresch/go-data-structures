@@ -31,6 +31,10 @@ const ptrPoolSize = 1024
 // further behind counts as late time.
 const lateThreshold = time.Millisecond
 
+// paceSpinWindow is how close to a batch's due time a loaded producer spins instead of yielding,
+// so it sends on time without holding a CPU for a whole time slice while it waits.
+const paceSpinWindow = 5 * time.Microsecond
+
 // seqBits is how many low bits of a packed int64 element hold the sequence number. The producer
 // ID is in the bits above them.
 const seqBits = 56
@@ -290,6 +294,16 @@ func newThroughputResult(counts []int, gcCycles uint64, total int) throughputRes
 	}
 }
 
+// newBuffers returns count buffers of size elements each, one for each producer or consumer of a
+// run, so no two workers share a buffer.
+func newBuffers[T any](count, size int) [][]T {
+	buffers := make([][]T, count)
+	for i := range buffers {
+		buffers[i] = make([]T, size)
+	}
+	return buffers
+}
+
 // runThroughput moves total elements from producers to consumers through the queue newQueue
 // builds, in batches of batch, and returns what it measured. Consumers yield on every empty
 // poll. The only error it returns is from newQueue.
@@ -300,14 +314,10 @@ func runThroughput[T any, S sink[T]](timer benchTimer, newQueue func() (queue[T]
 	if err != nil {
 		return throughputResult{}, err
 	}
-	bufs := make([][]T, producers)
-	for p := range bufs {
-		bufs[p] = make([]T, batch)
-	}
-	dsts := make([][]T, consumers)
+	bufs := newBuffers[T](producers, batch)
+	dsts := newBuffers[T](consumers, batch)
 	recorders := make([]S, consumers)
-	for c := range dsts {
-		dsts[c] = make([]T, batch)
+	for c := range recorders {
 		recorders[c] = sinks(c)
 	}
 	counts := make([]int, consumers)
@@ -340,14 +350,10 @@ func runChanThroughput[T any, S sink[T]](timer benchTimer, producers, consumers,
 	fill fillFunc[T], sinks func(consumer int) S,
 ) throughputResult {
 	ch := make(chan T, ringCapacity)
-	bufs := make([][]T, producers)
-	for p := range bufs {
-		bufs[p] = make([]T, 1)
-	}
-	dsts := make([][]T, consumers)
+	bufs := newBuffers[T](producers, 1)
+	dsts := newBuffers[T](consumers, 1)
 	recorders := make([]S, consumers)
-	for c := range dsts {
-		dsts[c] = make([]T, 1)
+	for c := range recorders {
 		recorders[c] = sinks(c)
 	}
 	counts := make([]int, consumers)

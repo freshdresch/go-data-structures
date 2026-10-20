@@ -123,8 +123,8 @@ func New[T any](count uint32, options ...Option) (*Ring[T], error) {
 
 // Capacity returns the number of usable slots in the ring, which is one less than the count
 // given to New.
-func (ring *Ring[T]) Capacity() uint32 {
-	return ring.capacity
+func (r *Ring[T]) Capacity() uint32 {
+	return r.capacity
 }
 
 // Reset empties the ring by resetting its indices.
@@ -133,39 +133,39 @@ func (ring *Ring[T]) Capacity() uint32 {
 //
 // Reset does not change how the ring was configured. It only resets the producer and consumer
 // indices so the ring is empty.
-func (ring *Ring[T]) Reset() {
+func (r *Ring[T]) Reset() {
 	// Just use atomics so we don't have to worry about single or multi
-	atomic.StoreUint32(ring.prodHead, 0)
-	atomic.StoreUint32(ring.prodTail, 0)
-	atomic.StoreUint32(ring.consHead, 0)
-	atomic.StoreUint32(ring.consTail, 0)
+	atomic.StoreUint32(r.prodHead, 0)
+	atomic.StoreUint32(r.prodTail, 0)
+	atomic.StoreUint32(r.consHead, 0)
+	atomic.StoreUint32(r.consTail, 0)
 }
 
 // Count returns the number of occupied entries in the ring.
-func (ring *Ring[T]) Count() uint32 {
-	prodTail := atomic.LoadUint32(ring.prodTail)
-	consTail := atomic.LoadUint32(ring.consTail)
+func (r *Ring[T]) Count() uint32 {
+	prodTail := atomic.LoadUint32(r.prodTail)
+	consTail := atomic.LoadUint32(r.consTail)
 	count := prodTail - consTail
-	if count > ring.capacity {
-		return ring.capacity
+	if count > r.capacity {
+		return r.capacity
 	}
 	return count
 }
 
 // Free returns the number of empty entries in the ring.
-func (ring *Ring[T]) Free() uint32 {
-	return ring.capacity - ring.Count()
+func (r *Ring[T]) Free() uint32 {
+	return r.capacity - r.Count()
 }
 
 // Full reports whether the ring is full.
-func (ring *Ring[T]) Full() bool {
-	return ring.Free() == 0
+func (r *Ring[T]) Full() bool {
+	return r.Free() == 0
 }
 
 // Empty reports whether the ring is empty.
-func (ring *Ring[T]) Empty() bool {
-	prodTail := atomic.LoadUint32(ring.prodTail)
-	consTail := atomic.LoadUint32(ring.consTail)
+func (r *Ring[T]) Empty() bool {
+	prodTail := atomic.LoadUint32(r.prodTail)
+	consTail := atomic.LoadUint32(r.consTail)
 	return consTail == prodTail
 }
 
@@ -174,11 +174,11 @@ func (ring *Ring[T]) Empty() bool {
 //
 // Enqueue is safe for concurrent use with other enqueues only when the ring was created with
 // WithMultiProdEnqueue. It is always safe to run alongside dequeues.
-func (ring *Ring[T]) Enqueue(element T) error {
+func (r *Ring[T]) Enqueue(element T) error {
 	var elems [1]T
 	elems[0] = element
 
-	numEnqueued := ring.doEnqueue(elems[:], 1, nil, true)
+	numEnqueued := r.doEnqueue(elems[:], 1, nil, true)
 	if numEnqueued != 1 {
 		return ErrFull
 	}
@@ -198,13 +198,13 @@ func (ring *Ring[T]) Enqueue(element T) error {
 //
 // EnqueueBulk is safe for concurrent use with other enqueues only when the ring was created with
 // WithMultiProdEnqueue. It is always safe to run alongside dequeues.
-func (ring *Ring[T]) EnqueueBulk(
+func (r *Ring[T]) EnqueueBulk(
 	elems []T,
 	numElems uint32,
 	freeSpace *uint32,
 ) error {
 	if uint64(numElems) > uint64(len(elems)) {
-		updateValidPtr(freeSpace, ring.freeEntries())
+		updateValidPtr(freeSpace, r.freeEntries())
 		return fmt.Errorf(
 			"enqueue %d elements from a batch of %d: %w",
 			numElems,
@@ -212,17 +212,17 @@ func (ring *Ring[T]) EnqueueBulk(
 			ErrShortBatch,
 		)
 	}
-	if numElems > ring.capacity {
-		updateValidPtr(freeSpace, ring.freeEntries())
+	if numElems > r.capacity {
+		updateValidPtr(freeSpace, r.freeEntries())
 		return fmt.Errorf(
 			"enqueue %d elements, capacity %d: %w",
 			numElems,
-			ring.capacity,
+			r.capacity,
 			ErrExceedsCapacity,
 		)
 	}
 
-	numEnqueued := ring.doEnqueue(elems, numElems, freeSpace, true)
+	numEnqueued := r.doEnqueue(elems, numElems, freeSpace, true)
 	if numEnqueued != numElems {
 		return ErrFull
 	}
@@ -238,7 +238,7 @@ func (ring *Ring[T]) EnqueueBulk(
 //
 // EnqueueBurst is safe for concurrent use with other enqueues only when the ring was created with
 // WithMultiProdEnqueue. It is always safe to run alongside dequeues.
-func (ring *Ring[T]) EnqueueBurst(
+func (r *Ring[T]) EnqueueBurst(
 	elems []T,
 	numElems uint32,
 	freeSpace *uint32,
@@ -246,7 +246,7 @@ func (ring *Ring[T]) EnqueueBurst(
 	if uint64(numElems) > uint64(len(elems)) {
 		panic(fmt.Sprintf("ring: burst count %d exceeds batch length %d", numElems, len(elems)))
 	}
-	return ring.doEnqueue(
+	return r.doEnqueue(
 		elems,
 		numElems,
 		freeSpace,
@@ -259,8 +259,8 @@ func (ring *Ring[T]) EnqueueBurst(
 //
 // Dequeue is safe for concurrent use with other dequeues only when the ring was created with
 // WithMultiConsDequeue. It is always safe to run alongside enqueues.
-func (ring *Ring[T]) Dequeue() (T, error) {
-	elems, numDequeued := ring.doDequeue(1, nil, true)
+func (r *Ring[T]) Dequeue() (T, error) {
+	elems, numDequeued := r.doDequeue(1, nil, true)
 	if numDequeued != 1 {
 		var zero T
 		return zero, ErrEmpty
@@ -282,21 +282,21 @@ func (ring *Ring[T]) Dequeue() (T, error) {
 //
 // DequeueBulk is safe for concurrent use with other dequeues only when the ring was created with
 // WithMultiConsDequeue. It is always safe to run alongside enqueues.
-func (ring *Ring[T]) DequeueBulk(
+func (r *Ring[T]) DequeueBulk(
 	numElems uint32,
 	avail *uint32,
 ) ([]T, error) {
-	if numElems > ring.capacity {
-		updateValidPtr(avail, ring.occupiedEntries())
+	if numElems > r.capacity {
+		updateValidPtr(avail, r.occupiedEntries())
 		return nil, fmt.Errorf(
 			"dequeue %d elements, capacity %d: %w",
 			numElems,
-			ring.capacity,
+			r.capacity,
 			ErrExceedsCapacity,
 		)
 	}
 
-	elems, numDequeued := ring.doDequeue(numElems, avail, true)
+	elems, numDequeued := r.doDequeue(numElems, avail, true)
 	if numDequeued != numElems {
 		return nil, ErrEmpty
 	}
@@ -313,18 +313,18 @@ func (ring *Ring[T]) DequeueBulk(
 //
 // DequeueBurst is safe for concurrent use with other dequeues only when the ring was created with
 // WithMultiConsDequeue. It is always safe to run alongside enqueues.
-func (ring *Ring[T]) DequeueBurst(
+func (r *Ring[T]) DequeueBurst(
 	numElems uint32,
 	avail *uint32,
 ) ([]T, uint32) {
-	return ring.doDequeue(
+	return r.doDequeue(
 		numElems,
 		avail,
 		false,
 	)
 }
 
-func (ring *Ring[T]) doEnqueue(
+func (r *Ring[T]) doEnqueue(
 	elems []T,
 	numElems uint32,
 	freeSpace *uint32,
@@ -336,43 +336,43 @@ func (ring *Ring[T]) doEnqueue(
 	)
 
 	// get the number of entries that we have space to accommodate
-	numEntries, freeBefore := ring.moveProdHead(numElems, &head, &next, fixed)
+	numEntries, freeBefore := r.moveProdHead(numElems, &head, &next, fixed)
 	if numEntries == 0 {
 		updateValidPtr(freeSpace, freeBefore)
 		return 0
 	}
 
-	base := head & ring.mask
-	end := ring.size - base
+	base := head & r.mask
+	end := r.size - base
 	if end > numEntries {
 		end = numEntries
 	}
 
 	// enqueue the elements -- first contiguous chunk
 	for i := uint32(0); i < end; i++ {
-		ring.entries[int(base+i)] = elems[int(i)]
+		r.entries[int(base+i)] = elems[int(i)]
 	}
 
 	// second chunk if wrapped
 	for i := end; i < numEntries; i++ {
-		ring.entries[int(i-end)] = elems[int(i)]
+		r.entries[int(i-end)] = elems[int(i)]
 	}
 
 	// ensure in-order publication
-	if ring.multiProd {
-		for atomic.LoadUint32(ring.prodTail) != head {
+	if r.multiProd {
+		for atomic.LoadUint32(r.prodTail) != head {
 			runtime.Gosched()
 		}
 	}
 
 	// atomic store acts as release barrier
-	atomic.StoreUint32(ring.prodTail, next)
+	atomic.StoreUint32(r.prodTail, next)
 
 	updateValidPtr(freeSpace, freeBefore-numEntries)
 	return numEntries
 }
 
-func (ring *Ring[T]) doDequeue(
+func (r *Ring[T]) doDequeue(
 	numElems uint32,
 	avail *uint32,
 	fixed bool,
@@ -383,7 +383,7 @@ func (ring *Ring[T]) doDequeue(
 	)
 
 	// get the number of entries that we can actually dequeue
-	numElems, filled := ring.moveConsHead(numElems, &head, &next, fixed)
+	numElems, filled := r.moveConsHead(numElems, &head, &next, fixed)
 	if numElems == 0 {
 		updateValidPtr(avail, filled)
 		return nil, uint32(0)
@@ -391,31 +391,31 @@ func (ring *Ring[T]) doDequeue(
 
 	elems := make([]T, int(numElems))
 
-	base := head & ring.mask
-	end := ring.size - base
+	base := head & r.mask
+	end := r.size - base
 	if end > numElems {
 		end = numElems
 	}
 
 	// dequeue the elements -- first chunk
 	for i := uint32(0); i < end; i++ {
-		elems[int(i)] = ring.entries[int(base+i)]
+		elems[int(i)] = r.entries[int(base+i)]
 	}
 
 	// second chunk if wrapped
 	for i := end; i < numElems; i++ {
-		elems[int(i)] = ring.entries[int(i-end)]
+		elems[int(i)] = r.entries[int(i-end)]
 	}
 
 	// ensure in-order consumption
-	if ring.multiCons {
-		for atomic.LoadUint32(ring.consTail) != head {
+	if r.multiCons {
+		for atomic.LoadUint32(r.consTail) != head {
 			runtime.Gosched()
 		}
 	}
 
 	// update the tail after a successful dequeue
-	atomic.StoreUint32(ring.consTail, next)
+	atomic.StoreUint32(r.consTail, next)
 
 	updateValidPtr(avail, filled-numElems)
 	return elems, numElems
@@ -431,18 +431,18 @@ func (ring *Ring[T]) doDequeue(
 // It returns the number of items reserved, between 0 and numItems inclusive, which is 0 or
 // numItems for a fixed enqueue. It also returns the number of free entries in the ring before the
 // head was moved.
-func (ring *Ring[T]) moveProdHead(
+func (r *Ring[T]) moveProdHead(
 	numItems uint32,
 	oldHead *uint32,
 	newHead *uint32,
 	fixed bool,
 ) (uint32, uint32) {
-	capacity := ring.capacity
+	capacity := r.capacity
 	maxItems := numItems
 
 	for {
-		head := atomic.LoadUint32(ring.prodHead)
-		tail := atomic.LoadUint32(ring.consTail)
+		head := atomic.LoadUint32(r.prodHead)
+		tail := atomic.LoadUint32(r.consTail)
 
 		freeEntries := capacity + tail - head
 		numItems = maxItems
@@ -458,8 +458,8 @@ func (ring *Ring[T]) moveProdHead(
 
 		next := head + numItems
 
-		if ring.multiProd {
-			if atomic.CompareAndSwapUint32(ring.prodHead, head, next) {
+		if r.multiProd {
+			if atomic.CompareAndSwapUint32(r.prodHead, head, next) {
 				*oldHead = head
 				*newHead = next
 				return numItems, freeEntries
@@ -467,7 +467,7 @@ func (ring *Ring[T]) moveProdHead(
 			continue
 		}
 
-		atomic.StoreUint32(ring.prodHead, next)
+		atomic.StoreUint32(r.prodHead, next)
 		*oldHead = head
 		*newHead = next
 		return numItems, freeEntries
@@ -484,7 +484,7 @@ func (ring *Ring[T]) moveProdHead(
 // It returns the number of items reserved, between 0 and numItems inclusive, which is 0 or
 // numItems for a fixed dequeue. It also returns the number of occupied entries in the ring before
 // the head was moved.
-func (ring *Ring[T]) moveConsHead(
+func (r *Ring[T]) moveConsHead(
 	numItems uint32,
 	oldHead *uint32,
 	newHead *uint32,
@@ -497,11 +497,11 @@ func (ring *Ring[T]) moveConsHead(
 	)
 
 	maxItems := numItems
-	multiCons := ring.multiCons
+	multiCons := r.multiCons
 
 	for {
-		head = atomic.LoadUint32(ring.consHead)
-		tail = atomic.LoadUint32(ring.prodTail)
+		head = atomic.LoadUint32(r.consHead)
+		tail = atomic.LoadUint32(r.prodTail)
 
 		filled = tail - head
 		numItems = maxItems
@@ -518,7 +518,7 @@ func (ring *Ring[T]) moveConsHead(
 		next := head + numItems
 
 		if multiCons {
-			if atomic.CompareAndSwapUint32(ring.consHead, head, next) {
+			if atomic.CompareAndSwapUint32(r.consHead, head, next) {
 				*oldHead = head
 				*newHead = next
 				return numItems, filled
@@ -526,7 +526,7 @@ func (ring *Ring[T]) moveConsHead(
 			continue
 		}
 
-		atomic.StoreUint32(ring.consHead, next)
+		atomic.StoreUint32(r.consHead, next)
 		*oldHead = head
 		*newHead = next
 		return numItems, filled
@@ -544,18 +544,18 @@ func updateValidPtr(ptr *uint32, val uint32) {
 // producer head before the consumer tail, as moveProdHead does. It clamps the result to the
 // capacity, because a consumer tail that advances after the head was loaded can make the value
 // overshoot.
-func (ring *Ring[T]) freeEntries() uint32 {
-	head := atomic.LoadUint32(ring.prodHead)
-	free := ring.capacity + atomic.LoadUint32(ring.consTail) - head
-	return min(free, ring.capacity)
+func (r *Ring[T]) freeEntries() uint32 {
+	head := atomic.LoadUint32(r.prodHead)
+	free := r.capacity + atomic.LoadUint32(r.consTail) - head
+	return min(free, r.capacity)
 }
 
 // occupiedEntries returns the number of entries a consumer could reserve right now. It loads the
 // consumer head before the producer tail, as moveConsHead does. It clamps the result to the
 // capacity, because a producer tail that advances after the head was loaded can make the value
 // overshoot.
-func (ring *Ring[T]) occupiedEntries() uint32 {
-	head := atomic.LoadUint32(ring.consHead)
-	occupied := atomic.LoadUint32(ring.prodTail) - head
-	return min(occupied, ring.capacity)
+func (r *Ring[T]) occupiedEntries() uint32 {
+	head := atomic.LoadUint32(r.consHead)
+	occupied := atomic.LoadUint32(r.prodTail) - head
+	return min(occupied, r.capacity)
 }

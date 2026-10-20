@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"runtime"
 	"sync/atomic"
+	"unsafe"
 )
 
 // ErrInvalidCount is returned by New, wrapped, when the count is not a power of two, is less
@@ -36,42 +37,39 @@ var ErrInvalidMaxBatch = errors.New("ring: max batch must be between 1 and the r
 // pointless.
 var ErrExceedsMaxBatch = errors.New("ring: requested count exceeds the ring's maximum batch size")
 
-// Ring is a Go ring implementation heavily inspired by rte_ring from DPDK. It provides a
-// fixed-size ring buffer that can function as anything between an SPSC and MPMC queue.
+// cacheLine is the size each side of a Ring is padded to. It is 128 bytes because that is a full
+// cache line on Apple silicon, and on x86 it covers a 64-byte line plus the neighbor that
+// adjacent-line prefetch pulls in.
+const cacheLine = 128
+
+// Ring is a fixed-size, lock-free ring buffer modeled on DPDK's rte_ring. It works as a FIFO queue
+// anywhere between single-producer single-consumer and multi-producer multi-consumer.
 //
-// However, there is a notable difference in that Go does not provide the relaxed memory model,
-// acquire/release fences, and ordering guarantees that the DPDK C implementation leverages. We
-// try to be as performant as we can, in the face of working only in the realm of sequential
-// consistency.
-//
-// The ring defaults to an SPSC queue in the base implementation, and multi-producer/multi-consumer
-// semantics can be added through functional options. For example: to create an MPMC queue,
-// initialize the ring with both the multi-producer and multi-consumer options.
-//
-// It can incur a non-trivial performance hit in order to hold truly generic elements, so if
-// bleeding-edge performance is desired, stick to the types required by the DPDK ring buffer
-// implementation: a pointer, or 4-byte boundary aligned element. Otherwise, an element could be
-// split between adjacent cache lines.
+// Without options, a ring allows one producer and one consumer at a time. WithMultiProdEnqueue
+// makes the enqueue methods safe for concurrent producers, and WithMultiConsDequeue does the same
+// for the dequeue methods and consumers. WithMaxEnqueueBatch, WithMaxDequeueBatch, and
+// WithMaxBatch limit how many elements one batch call moves.
 //
 // The ring holds exactly count elements, where count is the count given to New.
+//
+// A Ring must not be copied once in use.
 type Ring[T any] struct {
-	entries []T
+	prod headTail[T]
+	_    [cacheLine - unsafe.Sizeof(headTail[byte]{})]byte
+	cons headTail[T]
+	_    [cacheLine - unsafe.Sizeof(headTail[byte]{})]byte
+}
 
-	prodHead *uint32 // The head index for the producer: used for reservation.
-	prodTail *uint32 // The tail index for the producer: used for publication.
-
-	consHead *uint32 // The head index for the consumer: used for reservation.
-	consTail *uint32 // The tail index for the consumer: used for publication.
-
-	mask uint32 // Mask for bounding the index of the ring.
-
-	maxEnqueueBatch uint32 // The most elements one enqueue batch call moves, at most the capacity.
-	maxDequeueBatch uint32 // The most elements one dequeue batch call moves, at most the capacity.
-
-	multiProd bool // Multi-Producer enqueue instead of single.
-	multiCons bool // Multi-Consumer dequeue instead of single.
-
-	_ [2]byte // padding for better cache alignment
+// headTail holds one side's indices and configuration, plus its own copy of the mask and slot
+// array that both sides read, so that every access a side makes on the hot path stays on its own
+// cache line.
+type headTail[T any] struct {
+	head     atomic.Uint32
+	tail     atomic.Uint32
+	mask     uint32
+	maxBatch uint32
+	entries  []T
+	multi    bool // multi-producer on prod, multi-consumer on cons
 }
 
 type config struct {
@@ -188,17 +186,21 @@ func New[T any](count int, options ...Option) (*Ring[T], error) {
 		return nil, err
 	}
 
+	entries := make([]T, count)
+	mask := uint32(count - 1)
 	ring := &Ring[T]{
-		entries:         make([]T, count),
-		mask:            uint32(count - 1),
-		maxEnqueueBatch: uint32(cfg.maxEnqueueBatch),
-		maxDequeueBatch: uint32(cfg.maxDequeueBatch),
-		prodHead:        new(uint32),
-		prodTail:        new(uint32),
-		consHead:        new(uint32),
-		consTail:        new(uint32),
-		multiProd:       cfg.multiProd,
-		multiCons:       cfg.multiCons,
+		prod: headTail[T]{
+			mask:     mask,
+			maxBatch: uint32(cfg.maxEnqueueBatch),
+			entries:  entries,
+			multi:    cfg.multiProd,
+		},
+		cons: headTail[T]{
+			mask:     mask,
+			maxBatch: uint32(cfg.maxDequeueBatch),
+			entries:  entries,
+			multi:    cfg.multiCons,
+		},
 	}
 	return ring, nil
 }
@@ -217,25 +219,25 @@ func checkMaxBatch(op string, maxBatch, count int) error {
 
 // Capacity returns the number of elements the ring holds, which is the count given to New.
 func (r *Ring[T]) Capacity() int {
-	return int(r.capacity())
+	return int(r.cons.capacity())
 }
 
 // MaxEnqueueBatch returns the most elements one enqueue batch call moves: the limit set by
 // WithMaxEnqueueBatch or WithMaxBatch, or the capacity without one.
 func (r *Ring[T]) MaxEnqueueBatch() int {
-	return int(r.maxEnqueueBatch)
+	return int(r.prod.maxBatch)
 }
 
 // MaxDequeueBatch returns the most elements one dequeue batch call moves: the limit set by
 // WithMaxDequeueBatch or WithMaxBatch, or the capacity without one.
 func (r *Ring[T]) MaxDequeueBatch() int {
-	return int(r.maxDequeueBatch)
+	return int(r.cons.maxBatch)
 }
 
 // capacity returns the number of elements the ring holds as a uint32, for the index arithmetic.
 // The count is a power of two, so it is one more than the mask.
-func (r *Ring[T]) capacity() uint32 {
-	return r.mask + 1
+func (h *headTail[T]) capacity() uint32 {
+	return h.mask + 1
 }
 
 // Reset empties the ring by resetting its indices.
@@ -245,11 +247,10 @@ func (r *Ring[T]) capacity() uint32 {
 // Reset does not change how the ring was configured. It only resets the producer and consumer
 // indices so the ring is empty.
 func (r *Ring[T]) Reset() {
-	// Just use atomics so we don't have to worry about single or multi
-	atomic.StoreUint32(r.prodHead, 0)
-	atomic.StoreUint32(r.prodTail, 0)
-	atomic.StoreUint32(r.consHead, 0)
-	atomic.StoreUint32(r.consTail, 0)
+	r.prod.head.Store(0)
+	r.prod.tail.Store(0)
+	r.cons.head.Store(0)
+	r.cons.tail.Store(0)
 }
 
 // Count returns the number of occupied entries in the ring.
@@ -268,9 +269,9 @@ func (r *Ring[T]) Reset() {
 // the enqueues that refill the ring, can make it report more entries than the ring holds. It never
 // exceeds Capacity.
 func (r *Ring[T]) Count() int {
-	consTail := atomic.LoadUint32(r.consTail)
-	prodTail := atomic.LoadUint32(r.prodTail)
-	return int(min(prodTail-consTail, r.capacity()))
+	consTail := r.cons.tail.Load()
+	prodTail := r.prod.tail.Load()
+	return int(min(prodTail-consTail, r.cons.capacity()))
 }
 
 // Free returns the number of empty slots in the ring. It derives from Count, so under concurrency
@@ -319,8 +320,8 @@ func (r *Ring[T]) Enqueue(item T) error {
 func (r *Ring[T]) EnqueueBulk(items []T) (free int, err error) {
 	// The limit is at most the capacity, so one comparison guards both checks on the success
 	// path. It is in int, so a length beyond the uint32 range cannot truncate.
-	if len(items) > int(r.maxEnqueueBatch) {
-		return int(r.freeEntries()), r.bulkLengthError("enqueue", uint64(len(items)), r.maxEnqueueBatch)
+	if len(items) > int(r.prod.maxBatch) {
+		return int(r.freeEntries()), r.prod.bulkLengthError("enqueue", uint64(len(items)))
 	}
 
 	enqueued, freeAfter := r.doEnqueue(items, true)
@@ -342,7 +343,7 @@ func (r *Ring[T]) EnqueueBulk(items []T) (free int, err error) {
 func (r *Ring[T]) EnqueueBurst(items []T) (enqueued, free int) {
 	// Clamping in int keeps a slice longer than 2^32 from truncating when its length becomes a
 	// uint32 in doEnqueue. The limit is at most the capacity, so it bounds both.
-	clamped := min(len(items), int(r.maxEnqueueBatch))
+	clamped := min(len(items), int(r.prod.maxBatch))
 	moved, freeAfter := r.doEnqueue(items[:clamped], false)
 	return int(moved), int(freeAfter)
 }
@@ -379,8 +380,8 @@ func (r *Ring[T]) Dequeue() (T, error) {
 func (r *Ring[T]) DequeueBulk(dst []T) (available int, err error) {
 	// The limit is at most the capacity, so one comparison guards both checks on the success
 	// path. It is in int, so a length beyond the uint32 range cannot truncate.
-	if len(dst) > int(r.maxDequeueBatch) {
-		return int(r.occupiedEntries()), r.bulkLengthError("dequeue", uint64(len(dst)), r.maxDequeueBatch)
+	if len(dst) > int(r.cons.maxBatch) {
+		return int(r.occupiedEntries()), r.cons.bulkLengthError("dequeue", uint64(len(dst)))
 	}
 
 	dequeued, availableAfter := r.doDequeue(dst, true)
@@ -403,24 +404,24 @@ func (r *Ring[T]) DequeueBulk(dst []T) (available int, err error) {
 func (r *Ring[T]) DequeueBurst(dst []T) (dequeued, available int) {
 	// Clamping in int keeps a slice longer than 2^32 from truncating when its length becomes a
 	// uint32 in doDequeue. The limit is at most the capacity, so it bounds both.
-	clamped := min(len(dst), int(r.maxDequeueBatch))
+	clamped := min(len(dst), int(r.cons.maxBatch))
 	moved, availableAfter := r.doDequeue(dst[:clamped], false)
 	return int(moved), int(availableAfter)
 }
 
-// bulkLengthError returns the error for a bulk call that asked to move length elements, more than
-// maxBatch, its direction's limit. It wraps ErrExceedsCapacity when length also exceeds the
-// capacity, and ErrExceedsMaxBatch otherwise. op names the call, enqueue or dequeue, in the
+// bulkLengthError returns the error for a bulk call on this side that asked to move length
+// elements, more than the side's maxBatch. It wraps ErrExceedsCapacity when length also exceeds
+// the capacity, and ErrExceedsMaxBatch otherwise. op names the call, enqueue or dequeue, in the
 // message. Callers check the limit first, so this runs only on the error path. length is a uint64
 // so that neither a slice length nor a uint32 count can wrap negative on a 32-bit target.
-func (r *Ring[T]) bulkLengthError(op string, length uint64, maxBatch uint32) error {
-	capacity := uint64(r.capacity())
+func (h *headTail[T]) bulkLengthError(op string, length uint64) error {
+	capacity := uint64(h.capacity())
 	if length > capacity {
 		return fmt.Errorf("%s %d elements, capacity %d: %w", op, length, capacity, ErrExceedsCapacity)
 	}
 	return fmt.Errorf(
 		"%s %d elements, max %s batch %d: %w",
-		op, length, op, maxBatch, ErrExceedsMaxBatch,
+		op, length, op, h.maxBatch, ErrExceedsMaxBatch,
 	)
 }
 
@@ -442,31 +443,31 @@ func (r *Ring[T]) doEnqueue(items []T, fixed bool) (enqueued, free uint32) {
 		// can overshoot the capacity. With a reservation the head was current when the consumer
 		// tail was loaded, because the single producer owns the head or the multi-producer CAS
 		// succeeded on it, so capacity + tail - head is already between 0 and the capacity.
-		return 0, min(freeBefore, r.capacity())
+		return 0, min(freeBefore, r.prod.capacity())
 	}
 
-	base := head & r.mask
-	end := r.capacity() - base
+	base := head & r.prod.mask
+	end := r.prod.capacity() - base
 	if end > numEntries {
 		end = numEntries
 	}
 
 	if numEntries == 1 {
 		// avoid the memmove when we can, since it costs more than an assignment for one element
-		r.entries[base] = items[0]
+		r.prod.entries[base] = items[0]
 	} else {
-		copy(r.entries[base:base+end], items[:end])
+		copy(r.prod.entries[base:base+end], items[:end])
 
 		// copy whatever is left after the wrap around
-		copy(r.entries[:numEntries-end], items[end:numEntries])
+		copy(r.prod.entries[:numEntries-end], items[end:numEntries])
 	}
 
-	if r.multiProd {
-		waitForTail(r.prodTail, head)
+	if r.prod.multi {
+		waitForTail(&r.prod.tail, head)
 	}
 
-	// atomic store acts as release barrier
-	atomic.StoreUint32(r.prodTail, next)
+	// the tail store publishes the slots written above to consumers
+	r.prod.tail.Store(next)
 
 	return numEntries, freeBefore - numEntries
 }
@@ -490,30 +491,31 @@ func (r *Ring[T]) doDequeue(dst []T, fixed bool) (dequeued, available uint32) {
 		// can overshoot the capacity. With a reservation the head was current when the producer
 		// tail was loaded, because the single consumer owns the head or the multi-consumer CAS
 		// succeeded on it, so tail - head is already between 0 and the capacity.
-		return 0, min(availableBefore, r.capacity())
+		return 0, min(availableBefore, r.cons.capacity())
 	}
 
-	base := head & r.mask
-	end := r.capacity() - base
+	base := head & r.cons.mask
+	end := r.cons.capacity() - base
 	if end > numEntries {
 		end = numEntries
 	}
 
 	if numEntries == 1 {
 		// avoid the memmove when we can, since it costs more than an assignment for one element
-		dst[0] = r.entries[base]
+		dst[0] = r.cons.entries[base]
 	} else {
-		copy(dst[:end], r.entries[base:base+end])
+		copy(dst[:end], r.cons.entries[base:base+end])
 
 		// copy whatever is left after the wrap around
-		copy(dst[end:numEntries], r.entries[:numEntries-end])
+		copy(dst[end:numEntries], r.cons.entries[:numEntries-end])
 	}
 
-	if r.multiCons {
-		waitForTail(r.consTail, head)
+	if r.cons.multi {
+		waitForTail(&r.cons.tail, head)
 	}
 
-	atomic.StoreUint32(r.consTail, next)
+	// the tail store hands the slots read above back to producers
+	r.cons.tail.Store(next)
 
 	return numEntries, availableBefore - numEntries
 }
@@ -534,13 +536,13 @@ const tailSpins = 256
 // load, so the compiler cannot hoist it out of the loop. The load that sees want synchronizes with
 // the earlier goroutine's tail store, so that goroutine's slot writes are published along with
 // ours.
-func waitForTail(tail *uint32, want uint32) {
+func waitForTail(tail *atomic.Uint32, want uint32) {
 	for range tailSpins {
-		if atomic.LoadUint32(tail) == want {
+		if tail.Load() == want {
 			return
 		}
 	}
-	for atomic.LoadUint32(tail) != want {
+	for tail.Load() != want {
 		runtime.Gosched()
 	}
 }
@@ -561,12 +563,12 @@ func (r *Ring[T]) moveProdHead(
 	newHead *uint32,
 	fixed bool,
 ) (uint32, uint32) {
-	capacity := r.capacity()
+	capacity := r.prod.capacity()
 	maxItems := numItems
 
 	for {
-		head := atomic.LoadUint32(r.prodHead)
-		tail := atomic.LoadUint32(r.consTail)
+		head := r.prod.head.Load()
+		tail := r.cons.tail.Load()
 
 		freeEntries := capacity + tail - head
 		numItems = maxItems
@@ -582,8 +584,8 @@ func (r *Ring[T]) moveProdHead(
 
 		next := head + numItems
 
-		if r.multiProd {
-			if atomic.CompareAndSwapUint32(r.prodHead, head, next) {
+		if r.prod.multi {
+			if r.prod.head.CompareAndSwap(head, next) {
 				*oldHead = head
 				*newHead = next
 				return numItems, freeEntries
@@ -591,7 +593,7 @@ func (r *Ring[T]) moveProdHead(
 			continue
 		}
 
-		atomic.StoreUint32(r.prodHead, next)
+		r.prod.head.Store(next)
 		*oldHead = head
 		*newHead = next
 		return numItems, freeEntries
@@ -621,11 +623,10 @@ func (r *Ring[T]) moveConsHead(
 	)
 
 	maxItems := numItems
-	multiCons := r.multiCons
 
 	for {
-		head = atomic.LoadUint32(r.consHead)
-		tail = atomic.LoadUint32(r.prodTail)
+		head = r.cons.head.Load()
+		tail = r.prod.tail.Load()
 
 		filled = tail - head
 		numItems = maxItems
@@ -641,8 +642,8 @@ func (r *Ring[T]) moveConsHead(
 
 		next := head + numItems
 
-		if multiCons {
-			if atomic.CompareAndSwapUint32(r.consHead, head, next) {
+		if r.cons.multi {
+			if r.cons.head.CompareAndSwap(head, next) {
 				*oldHead = head
 				*newHead = next
 				return numItems, filled
@@ -650,7 +651,7 @@ func (r *Ring[T]) moveConsHead(
 			continue
 		}
 
-		atomic.StoreUint32(r.consHead, next)
+		r.cons.head.Store(next)
 		*oldHead = head
 		*newHead = next
 		return numItems, filled
@@ -662,9 +663,9 @@ func (r *Ring[T]) moveConsHead(
 // capacity, because a consumer tail that advances after the head was loaded can make the value
 // overshoot.
 func (r *Ring[T]) freeEntries() uint32 {
-	head := atomic.LoadUint32(r.prodHead)
-	capacity := r.capacity()
-	free := capacity + atomic.LoadUint32(r.consTail) - head
+	head := r.prod.head.Load()
+	capacity := r.prod.capacity()
+	free := capacity + r.cons.tail.Load() - head
 	return min(free, capacity)
 }
 
@@ -673,7 +674,7 @@ func (r *Ring[T]) freeEntries() uint32 {
 // capacity, because a producer tail that advances after the head was loaded can make the value
 // overshoot.
 func (r *Ring[T]) occupiedEntries() uint32 {
-	head := atomic.LoadUint32(r.consHead)
-	occupied := atomic.LoadUint32(r.prodTail) - head
-	return min(occupied, r.capacity())
+	head := r.cons.head.Load()
+	occupied := r.prod.tail.Load() - head
+	return min(occupied, r.cons.capacity())
 }

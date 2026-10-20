@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -26,20 +27,20 @@ func TestRingCreation(t *testing.T) {
 	simple, err := New[uintptr](64)
 	assert.NoError(t, err)
 	assertNewRing[uintptr](t, simple, 64)
-	assert.False(t, simple.multiProd)
-	assert.False(t, simple.multiCons)
+	assert.False(t, simple.prod.multi)
+	assert.False(t, simple.cons.multi)
 
 	mpsc, err := New[uintptr](64, WithMultiProdEnqueue())
 	assert.NoError(t, err)
 	assertNewRing[uintptr](t, mpsc, 64)
-	assert.True(t, mpsc.multiProd)
-	assert.False(t, mpsc.multiCons)
+	assert.True(t, mpsc.prod.multi)
+	assert.False(t, mpsc.cons.multi)
 
 	spmc, err := New[uintptr](64, WithMultiConsDequeue())
 	assert.NoError(t, err)
 	assertNewRing[uintptr](t, spmc, 64)
-	assert.False(t, spmc.multiProd)
-	assert.True(t, spmc.multiCons)
+	assert.False(t, spmc.prod.multi)
+	assert.True(t, spmc.cons.multi)
 
 	mpmc, err := New[uintptr](
 		64,
@@ -48,12 +49,46 @@ func TestRingCreation(t *testing.T) {
 	)
 	assert.NoError(t, err)
 	assertNewRing[uintptr](t, mpmc, 64)
-	assert.True(t, mpmc.multiProd)
-	assert.True(t, mpmc.multiCons)
+	assert.True(t, mpmc.prod.multi)
+	assert.True(t, mpmc.cons.multi)
 
 	large, err := New[uintptr](1 << 16)
 	assert.NoError(t, err)
 	assertNewRing(t, large, 1<<16)
+}
+
+// fortyBytes is an element type larger than a slice header, for the layout tests.
+type fortyBytes struct {
+	_ [5]uint64
+}
+
+// TestLayout checks that a Ring is two cache lines, one per side, for element types of different
+// sizes and kinds.
+func TestLayout(t *testing.T) {
+	t.Run("int", assertLayout[int])
+	t.Run("pointer", assertLayout[*int])
+	t.Run("fortyBytes", assertLayout[fortyBytes])
+	t.Run("string", assertLayout[string])
+}
+
+// assertLayout checks the size of a Ring[T] and the offset of its consumer side. At 256 bytes, a
+// heap-allocated Ring comes from the 256-byte size class, whose objects start at 256-byte
+// boundaries, so both sides start on a cache line.
+func assertLayout[T any](t *testing.T) {
+	assert.Equal(t, uintptr(256), unsafe.Sizeof(Ring[T]{}))
+	assert.Equal(t, uintptr(cacheLine), unsafe.Offsetof(Ring[T]{}.cons))
+}
+
+// TestSidesShareFields checks that New gives both sides the same mask and the same backing array.
+// The element type has a non-zero size, because slices of a zero-size type may share a data
+// pointer without sharing an array.
+func TestSidesShareFields(t *testing.T) {
+	ring, err := New[int](8)
+	require.NoError(t, err)
+
+	assert.Equal(t, ring.prod.mask, ring.cons.mask)
+	assert.Same(t, unsafe.SliceData(ring.prod.entries), unsafe.SliceData(ring.cons.entries))
+	assert.Equal(t, len(ring.prod.entries), len(ring.cons.entries))
 }
 
 func TestRingCount(t *testing.T) {
@@ -724,7 +759,7 @@ func TestBatchCopyCrossesEndOfBackingArray(t *testing.T) {
 	// Starting two slots before the end, a batch of five fills the last two slots of the backing
 	// array and then the first three.
 	advanceRing(t, ring, 6)
-	require.Equal(t, uint32(6), atomic.LoadUint32(ring.prodHead)&ring.mask)
+	require.Equal(t, uint32(6), ring.prod.head.Load()&ring.prod.mask)
 	requireEnqueueBulk(t, ring, batch)
 	elems := make([]int, 5)
 	_, err = ring.DequeueBulk(elems)
@@ -732,7 +767,7 @@ func TestBatchCopyCrossesEndOfBackingArray(t *testing.T) {
 	assert.Equal(t, batch, elems)
 
 	advanceRing(t, ring, 3)
-	require.Equal(t, uint32(6), atomic.LoadUint32(ring.prodHead)&ring.mask)
+	require.Equal(t, uint32(6), ring.prod.head.Load()&ring.prod.mask)
 	enqueued, _ := ring.EnqueueBurst(batch)
 	assert.Equal(t, 5, enqueued)
 	elems = make([]int, 5)
@@ -1006,7 +1041,7 @@ func TestIndexWrap(t *testing.T) {
 			assertOccupancy(t, ring, 1)
 
 			requireEnqueueBulk(t, ring, []int{3, 4, 5})
-			require.Less(t, atomic.LoadUint32(ring.prodTail), uint32(startIndex))
+			require.Less(t, ring.prod.tail.Load(), uint32(startIndex))
 			assertOccupancy(t, ring, 4)
 
 			// Only the producer indices have wrapped here, so the occupancy reported by a
@@ -1031,7 +1066,7 @@ func TestIndexWrap(t *testing.T) {
 			dequeued, _ := ring.DequeueBurst(elems)
 			assert.Equal(t, 8, dequeued)
 			assert.Equal(t, []int{3, 4, 5, 6, 7, 8, 9, 10}, elems[:dequeued])
-			require.Less(t, atomic.LoadUint32(ring.consTail), uint32(startIndex))
+			require.Less(t, ring.cons.tail.Load(), uint32(startIndex))
 			assertOccupancy(t, ring, 0)
 		})
 	}
@@ -1047,21 +1082,22 @@ func assertOccupancy(t *testing.T, ring *Ring[int], count int) {
 
 func assertNewRing[T any](t *testing.T, ring *Ring[T], count int) {
 	t.Helper()
-	assert.NotNil(t, ring.entries)
-	assert.Equal(t, uint32(count-1), ring.mask)
+	assert.NotNil(t, ring.prod.entries)
+	assert.Equal(t, uint32(count-1), ring.prod.mask)
 	assert.Equal(t, count, ring.Capacity())
 
-	assert.Zero(t, *ring.prodHead)
-	assert.Zero(t, *ring.prodTail)
-	assert.Zero(t, *ring.consHead)
-	assert.Zero(t, *ring.consTail)
+	assert.Zero(t, ring.prod.head.Load())
+	assert.Zero(t, ring.prod.tail.Load())
+	assert.Zero(t, ring.cons.head.Load())
+	assert.Zero(t, ring.cons.tail.Load())
 }
 
 // setIndices places all four indices of an empty ring at start, so a test can run the ring across
 // the 2^32 wrap. It is the only test code that writes the indices.
 func setIndices[T any](ring *Ring[T], start uint32) {
-	for _, index := range []*uint32{ring.prodHead, ring.prodTail, ring.consHead, ring.consTail} {
-		atomic.StoreUint32(index, start)
+	indices := []*atomic.Uint32{&ring.prod.head, &ring.prod.tail, &ring.cons.head, &ring.cons.tail}
+	for _, index := range indices {
+		index.Store(start)
 	}
 }
 
@@ -1520,7 +1556,7 @@ func TestConcurrentWrap(t *testing.T) {
 				dequeue,
 			)
 			assertTaggedDelivery(t, results, mode.producers, perProducer)
-			assert.Less(t, atomic.LoadUint32(ring.consTail), uint32(startIndex))
+			assert.Less(t, ring.cons.tail.Load(), uint32(startIndex))
 		})
 	}
 }
@@ -1590,7 +1626,8 @@ func TestWaitForTail(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tail := tc.start
+			var tail atomic.Uint32
+			tail.Store(tc.start)
 			var returned atomic.Bool
 			var waiting sync.WaitGroup
 			waiting.Go(func() {
@@ -1604,14 +1641,14 @@ func TestWaitForTail(t *testing.T) {
 			require.False(t, returned.Load(), "waitForTail returned with the tail at %d", tc.start)
 
 			for _, value := range tc.storesBefore {
-				atomic.StoreUint32(&tail, value)
+				tail.Store(value)
 				for range yields {
 					runtime.Gosched()
 				}
 				require.False(t, returned.Load(), "waitForTail returned with the tail at %d", value)
 			}
 
-			atomic.StoreUint32(&tail, tc.want)
+			tail.Store(tc.want)
 			stressDeadline(t, waiting.Wait)
 		})
 	}

@@ -217,6 +217,13 @@ single_flags=(
 )
 own_pattern='^BenchmarkThroughput$/^mode=(SPSC|MPMC)$/^batch=(1|32)$/^elem=int64$/^impl=ring$'
 own_pattern="$own_pattern|^BenchmarkHandoff\$/^impl=ring\$"
+ring_api_pattern='^BenchmarkRingAPI$/^mode=(SPSC|MPMC)$/^api=(burst|bulk)$'
+ring_api_pattern="$ring_api_pattern/^batch=(1|8|32|64)$/^elem=int64$"
+own_pattern="$own_pattern|$ring_api_pattern"
+# Go reports no leaf benchmark when the pattern has more levels than its name.
+# So api=single gets its own alternative.
+single_api_pattern='^BenchmarkRingAPI$/^mode=(SPSC|MPMC)$/^api=single$/^elem=int64$'
+own_pattern="$own_pattern|$single_api_pattern"
 own_flags=(
 	-test.run '^$'
 	-test.benchmem
@@ -232,6 +239,16 @@ BenchmarkThroughput/mode=SPSC/batch=32/elem=int64/impl=ring-$own
 BenchmarkThroughput/mode=MPMC/batch=1/elem=int64/impl=ring-$own
 BenchmarkThroughput/mode=MPMC/batch=32/elem=int64/impl=ring-$own
 BenchmarkHandoff/impl=ring-$own"
+for mode in SPSC MPMC; do
+	own_rows="$own_rows
+BenchmarkRingAPI/mode=$mode/api=single/elem=int64-$own"
+	for api in burst bulk; do
+		for batch in 1 8 32 64; do
+			own_rows="$own_rows
+BenchmarkRingAPI/mode=$mode/api=$api/batch=$batch/elem=int64-$own"
+		done
+	done
+done
 
 command_line() {
 	if [ ${#pin[@]} -gt 0 ]; then

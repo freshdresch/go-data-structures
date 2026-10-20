@@ -1,7 +1,7 @@
 # Scripts
 
 `ring-quick-bench.sh` compares the ring benchmarks of two committed refs in a couple of minutes.
-It builds each ref's test binary, runs six fixed throughput and latency rows for both sides in
+It builds each ref's test binary, runs 24 fixed throughput and latency rows for both sides in
 alternating rounds, and prints a `benchstat` comparison. A quick run is directional. It shows
 whether a change helped and roughly how much, and it never by itself decides whether to keep a
 change.
@@ -17,6 +17,9 @@ and it pins every run to one CPU per core. On macOS it needs at least 10 CPUs.
 
 **Run it only while plugged into AC power.** On battery, macOS throttles the CPU and the
 results are meaningless.
+
+A default run takes about 2.5 minutes. Measurement checkpoints, such as the run after each ring
+round, use `-rounds 20`, which takes about 5 minutes.
 
 Results go to `~/ring-quick/<timestamp>-<pid>/`, with the two binaries, every round's raw output,
 the comparison, and a `state.txt` that records how the run was made. `-reuse` reruns the binaries

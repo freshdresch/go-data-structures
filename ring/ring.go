@@ -199,8 +199,10 @@ func checkMaxBatch(op string, maxBatch, count int) error {
 	if maxBatch >= 1 && maxBatch <= count {
 		return nil
 	}
-	return fmt.Errorf("new ring with count %d and max %s batch %d: %w", count, op, maxBatch,
-		ErrInvalidMaxBatch)
+	return fmt.Errorf(
+		"new ring with count %d and max %s batch %d: %w",
+		count, op, maxBatch, ErrInvalidMaxBatch,
+	)
 }
 
 // Capacity returns the number of elements the ring holds, which is the count given to New.
@@ -308,8 +310,7 @@ func (r *Ring[T]) EnqueueBulk(items []T) (free int, err error) {
 	// The limit is at most the capacity, so one comparison guards both checks on the success
 	// path. It is in int, so a length beyond the uint32 range cannot truncate.
 	if len(items) > int(r.maxEnqueueBatch) {
-		return int(r.freeEntries()), r.bulkLengthError("enqueue", uint64(len(items)),
-			r.maxEnqueueBatch)
+		return int(r.freeEntries()), r.bulkLengthError("enqueue", uint64(len(items)), r.maxEnqueueBatch)
 	}
 
 	enqueued, freeAfter := r.doEnqueue(items, true)
@@ -369,8 +370,7 @@ func (r *Ring[T]) DequeueBulk(dst []T) (available int, err error) {
 	// The limit is at most the capacity, so one comparison guards both checks on the success
 	// path. It is in int, so a length beyond the uint32 range cannot truncate.
 	if len(dst) > int(r.maxDequeueBatch) {
-		return int(r.occupiedEntries()), r.bulkLengthError("dequeue", uint64(len(dst)),
-			r.maxDequeueBatch)
+		return int(r.occupiedEntries()), r.bulkLengthError("dequeue", uint64(len(dst)), r.maxDequeueBatch)
 	}
 
 	dequeued, availableAfter := r.doDequeue(dst, true)
@@ -406,11 +406,12 @@ func (r *Ring[T]) DequeueBurst(dst []T) (dequeued, available int) {
 func (r *Ring[T]) bulkLengthError(op string, length uint64, maxBatch uint32) error {
 	capacity := uint64(r.capacity())
 	if length > capacity {
-		return fmt.Errorf("%s %d elements, capacity %d: %w", op, length, capacity,
-			ErrExceedsCapacity)
+		return fmt.Errorf("%s %d elements, capacity %d: %w", op, length, capacity, ErrExceedsCapacity)
 	}
-	return fmt.Errorf("%s %d elements, max %s batch %d: %w", op, length, op, maxBatch,
-		ErrExceedsMaxBatch)
+	return fmt.Errorf(
+		"%s %d elements, max %s batch %d: %w",
+		op, length, op, maxBatch, ErrExceedsMaxBatch,
+	)
 }
 
 // doEnqueue places elements from the front of items in the ring. fixed is true for a bulk

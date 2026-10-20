@@ -335,8 +335,7 @@ func runThroughput[T any, S sink[T]](
 		var producerGroup, consumerGroup sync.WaitGroup
 		for c := range consumers {
 			consumerGroup.Go(func() {
-				counts[c] = consume(source, &producersDone, dsts[c], recorders[c],
-					newWaiter(yieldOnly))
+				counts[c] = consume(source, &producersDone, dsts[c], recorders[c], newWaiter(yieldOnly))
 			})
 		}
 		for p := range producers {
@@ -474,8 +473,16 @@ func benchmarkThroughputImpls[T any](b *testing.B, mode benchMode, batch int, fi
 	for _, impl := range adapterImpls[T](mode) {
 		b.Run("impl="+impl.name, func(b *testing.B) {
 			setElemBytes[T](b)
-			result, err := runThroughput(b, impl.newQueue, mode.producers, mode.consumers,
-				batch, b.N, fill, noopSinks[T])
+			result, err := runThroughput(
+				b,
+				impl.newQueue,
+				mode.producers,
+				mode.consumers,
+				batch,
+				b.N,
+				fill,
+				noopSinks[T],
+			)
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -487,8 +494,7 @@ func benchmarkThroughputImpls[T any](b *testing.B, mode benchMode, batch int, fi
 	}
 	b.Run("impl=chan", func(b *testing.B) {
 		setElemBytes[T](b)
-		result := runChanThroughput(b, mode.producers, mode.consumers, b.N, fill,
-			noopSinks[T])
+		result := runChanThroughput(b, mode.producers, mode.consumers, b.N, fill, noopSinks[T])
 		reportThroughput(b, result, b.N)
 	})
 }
@@ -609,8 +615,16 @@ func benchmarkRingAPIRun[T any](
 	newQueue := func() (queue[T], error) {
 		return newRingAPIQueue[T](api, mode)
 	}
-	result, err := runThroughput(b, newQueue, mode.producers, mode.consumers, batch, total, fill,
-		noopSinks[T])
+	result, err := runThroughput(
+		b,
+		newQueue,
+		mode.producers,
+		mode.consumers,
+		batch,
+		total,
+		fill,
+		noopSinks[T],
+	)
 	if err != nil {
 		b.Fatal(err)
 	}

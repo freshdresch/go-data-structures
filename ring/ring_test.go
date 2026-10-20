@@ -161,9 +161,7 @@ func TestSPSCRingBuffer(t *testing.T) {
 func TestSPMCRingBuffer(t *testing.T) {
 	dequeuedStrings := map[string]struct{}{}
 
-	buffer, err := New[string](
-		32, WithMultiConsDequeue(),
-	)
+	buffer, err := New[string](32, WithMultiConsDequeue())
 	require.NotNil(t, buffer)
 	require.NoError(t, err)
 
@@ -201,9 +199,7 @@ func TestSPMCRingBuffer(t *testing.T) {
 }
 
 func TestMPSCRingBuffer(t *testing.T) {
-	buffer, err := New[string](
-		32, WithMultiProdEnqueue(),
-	)
+	buffer, err := New[string](32, WithMultiProdEnqueue())
 	require.NotNil(t, buffer)
 	require.NoError(t, err)
 
@@ -1209,8 +1205,13 @@ func TestMaxBatchUnderContention(t *testing.T) {
 		total       = workers * perProducer
 	)
 	requests := []int{1, 2, 8}
-	ring, err := New[int](64, WithMultiProdEnqueue(), WithMultiConsDequeue(),
-		WithMaxEnqueueBatch(maxEnqueue), WithMaxDequeueBatch(maxDequeue))
+	ring, err := New[int](
+		64,
+		WithMultiProdEnqueue(),
+		WithMultiConsDequeue(),
+		WithMaxEnqueueBatch(maxEnqueue),
+		WithMaxDequeueBatch(maxDequeue),
+	)
 	require.NoError(t, err)
 
 	var producers, consumers sync.WaitGroup
@@ -1422,8 +1423,13 @@ func assertTaggedDelivery(t *testing.T, results [][]uint64, producers, perProduc
 			validTag := value>>32 < uint64(producers) && seq >= 1 && seq <= uint64(perProducer)
 			require.Truef(t, validTag, "consumer %d received invalid value %#x", consumer, value)
 			producer := int(value >> 32)
-			require.Greaterf(t, seq, lastSeq[producer],
-				"consumer %d received producer %d out of order", consumer, producer)
+			require.Greaterf(
+				t,
+				seq,
+				lastSeq[producer],
+				"consumer %d received producer %d out of order",
+				consumer, producer,
+			)
 			lastSeq[producer] = seq
 			timesSeen[producer*perProducer+int(seq)-1]++
 		}

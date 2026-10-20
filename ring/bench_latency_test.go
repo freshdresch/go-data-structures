@@ -215,8 +215,7 @@ func runHandoff(
 	var pingerDone atomic.Bool
 	var ponger sync.WaitGroup
 	ponger.Go(func() {
-		consume(pings, &pingerDone, forwarded, forwardSink{target: pongs},
-			newWaiter(spinThenYield))
+		consume(pings, &pingerDone, forwarded, forwardSink{target: pongs}, newWaiter(spinThenYield))
 	})
 	wait := newWaiter(spinThenYield)
 	roundTrip := func(k int64) time.Duration {
@@ -490,16 +489,21 @@ type loadedRun struct {
 // batch is less than 1, or when total is negative or not a multiple of producers*batch.
 func newLoadedRun(producers, consumers, batch int, rate float64, total int) (*loadedRun, error) {
 	if math.IsNaN(rate) || math.IsInf(rate, 1) || rate <= 0 {
-		return nil, fmt.Errorf("loaded rate %v elements per second is not positive and finite",
-			rate)
+		return nil, fmt.Errorf("loaded rate %v elements per second is not positive and finite", rate)
 	}
 	if producers < 1 || consumers < 1 || batch < 1 {
-		return nil, fmt.Errorf("loaded run needs at least 1 producer, consumer, and element per "+
-			"batch, got %d producers, %d consumers, and batch %d", producers, consumers, batch)
+		return nil, fmt.Errorf(
+			"loaded run needs at least 1 producer, consumer, and element per "+
+				"batch, got %d producers, %d consumers, and batch %d",
+			producers, consumers, batch,
+		)
 	}
 	if total < 0 || total%(producers*batch) != 0 {
-		return nil, fmt.Errorf("loaded total %d is not a non-negative multiple of %d producers "+
-			"times batch %d", total, producers, batch)
+		return nil, fmt.Errorf(
+			"loaded total %d is not a non-negative multiple of %d producers "+
+				"times batch %d",
+			total, producers, batch,
+		)
 	}
 	run := &loadedRun{
 		producers: producers,
@@ -748,8 +752,7 @@ func loadedImpls(mode benchMode) []loadedImpl {
 		impls = append(impls, loadedImpl{
 			name: impl.name,
 			run: func(timer benchTimer, batch int, rate float64, total int) (loadedResult, error) {
-				return runLoaded(timer, impl.newQueue, mode.producers, mode.consumers, batch,
-					rate, total)
+				return runLoaded(timer, impl.newQueue, mode.producers, mode.consumers, batch, rate, total)
 			},
 		})
 	}
@@ -790,16 +793,17 @@ func BenchmarkLoaded(b *testing.B) {
 	for _, mode := range benchModes {
 		b.Run("mode="+mode.name, func(b *testing.B) {
 			if runtime.GOMAXPROCS(0) < mode.producers+mode.consumers {
-				b.Skipf("GOMAXPROCS %d is below the %d goroutines of mode %s, and the design "+
-					"excludes configurations with fewer CPUs than goroutines",
-					runtime.GOMAXPROCS(0), mode.producers+mode.consumers, mode.name)
+				b.Skipf(
+					"GOMAXPROCS %d is below the %d goroutines of mode %s, and the design "+
+						"excludes configurations with fewer CPUs than goroutines",
+					runtime.GOMAXPROCS(0), mode.producers+mode.consumers, mode.name,
+				)
 			}
 			for _, batch := range loadedBatches {
 				b.Run(fmt.Sprintf("batch=%d", batch), func(b *testing.B) {
 					for _, offered := range loadedRates {
 						b.Run("rate="+offered.name, func(b *testing.B) {
-							total := loadedTotal(offered.rate, runLength, mode.producers,
-								batch)
+							total := loadedTotal(offered.rate, runLength, mode.producers, batch)
 							benchmarkLoadedImpls(b, mode, batch, offered.rate, total)
 						})
 					}

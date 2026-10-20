@@ -96,8 +96,13 @@ func TestConsumeStopOrder(t *testing.T) {
 			var reversedDone atomic.Bool
 			reversedSource := &stopOrderQueue{producersDone: &reversedDone, trigger: tc.trigger}
 			reversedRecorded := &recordSink[int64]{}
-			reversedReceived := consumeReversed(reversedSource, &reversedDone,
-				make([]int64, 1), reversedRecorded, newWaiter(tc.poll))
+			reversedReceived := consumeReversed(
+				reversedSource,
+				&reversedDone,
+				make([]int64, 1),
+				reversedRecorded,
+				newWaiter(tc.poll),
+			)
 			assert.Equal(t, 0, reversedReceived)
 			assert.Empty(t, reversedRecorded.items)
 		})
@@ -178,8 +183,16 @@ func accountingCases(mode benchMode) []accountingCase {
 				name:  impl.name,
 				batch: batch,
 				run: func(total int, sinks func(consumer int) *recordSink[int64]) (throughputResult, error) {
-					return runThroughput(noopTimer{}, impl.newQueue, mode.producers,
-						mode.consumers, batch, total, fillInt64, sinks)
+					return runThroughput(
+						noopTimer{},
+						impl.newQueue,
+						mode.producers,
+						mode.consumers,
+						batch,
+						total,
+						fillInt64,
+						sinks,
+					)
 				},
 			})
 		}
@@ -188,8 +201,14 @@ func accountingCases(mode benchMode) []accountingCase {
 		name:  "chan",
 		batch: 1,
 		run: func(total int, sinks func(consumer int) *recordSink[int64]) (throughputResult, error) {
-			return runChanThroughput(noopTimer{}, mode.producers, mode.consumers, total,
-				fillInt64, sinks), nil
+			return runChanThroughput(
+				noopTimer{},
+				mode.producers,
+				mode.consumers,
+				total,
+				fillInt64,
+				sinks,
+			), nil
 		},
 	})
 	return cases
@@ -213,16 +232,16 @@ func accountingError(sinks []*recordSink[int64], producers, total int) error {
 		for _, v := range recorded.items {
 			producer, seq := unpackInt64(v)
 			if producer < 0 || producer >= producers || seq >= int64(len(seen[producer])) {
-				return fmt.Errorf("consumer %d received producer %d sequence %d, never sent",
-					c, producer, seq)
+				return fmt.Errorf("consumer %d received producer %d sequence %d, never sent", c, producer, seq)
 			}
 			if seen[producer][seq] {
-				return fmt.Errorf("consumer %d received producer %d sequence %d again",
-					c, producer, seq)
+				return fmt.Errorf("consumer %d received producer %d sequence %d again", c, producer, seq)
 			}
 			if seq <= lastSeq[producer] {
-				return fmt.Errorf("consumer %d received producer %d sequence %d after %d",
-					c, producer, seq, lastSeq[producer])
+				return fmt.Errorf(
+					"consumer %d received producer %d sequence %d after %d",
+					c, producer, seq, lastSeq[producer],
+				)
 			}
 			seen[producer][seq] = true
 			lastSeq[producer] = seq
@@ -262,8 +281,7 @@ func TestHarnessAccounting(t *testing.T) {
 			for _, mode := range benchModes {
 				for _, tc := range accountingCases(mode) {
 					for _, total := range []int{1, 10_007, 100_000} {
-						name := fmt.Sprintf("impl=%s/mode=%s/batch=%d/total=%d",
-							tc.name, mode.name, tc.batch, total)
+						name := fmt.Sprintf("impl=%s/mode=%s/batch=%d/total=%d", tc.name, mode.name, tc.batch, total)
 						t.Run(name, func(t *testing.T) {
 							for range repeats {
 								checkAccounting(t, tc, mode, total)
@@ -315,8 +333,10 @@ func checkAccounting(t *testing.T, tc accountingCase, mode benchMode, total int)
 		sinks[consumer] = &recordSink[int64]{}
 		return sinks[consumer]
 	}
-	stuck := fmt.Sprintf("%s batch=%d mode=%s total=%d, likely a consumer exited early",
-		tc.name, tc.batch, mode.name, total)
+	stuck := fmt.Sprintf(
+		"%s batch=%d mode=%s total=%d, likely a consumer exited early",
+		tc.name, tc.batch, mode.name, total,
+	)
 	result := runWithin(t, stuck, func() (throughputResult, error) {
 		return tc.run(total, newSink)
 	})
@@ -339,14 +359,21 @@ func TestRingAPIAccounting(t *testing.T) {
 						newQueue := func() (queue[int64], error) {
 							return newRingAPIQueue[int64](api, mode)
 						}
-						return runThroughput(noopTimer{}, newQueue, mode.producers,
-							mode.consumers, batch, total, fillInt64, sinks)
+						return runThroughput(
+							noopTimer{},
+							newQueue,
+							mode.producers,
+							mode.consumers,
+							batch,
+							total,
+							fillInt64,
+							sinks,
+						)
 					},
 				}
 				for _, requested := range []int{1, 10_007} {
 					total := api.total(requested, batch, mode.producers)
-					name := fmt.Sprintf("api=%s/mode=%s/batch=%d/total=%d",
-						tc.name, mode.name, batch, total)
+					name := fmt.Sprintf("api=%s/mode=%s/batch=%d/total=%d", tc.name, mode.name, batch, total)
 					t.Run(name, func(t *testing.T) {
 						checkAccounting(t, tc, mode, total)
 					})
@@ -454,16 +481,34 @@ func TestGCMetric(t *testing.T) {
 	)
 	spsc := benchModes[0]
 
-	allocating, err := runThroughput(noopTimer{}, func() (queue[int64], error) {
-		return newAllocQueue(batch), nil
-	}, spsc.producers, spsc.consumers, batch, total, fillInt64, noopSinks[int64])
+	allocating, err := runThroughput(
+		noopTimer{},
+		func() (queue[int64], error) {
+			return newAllocQueue(batch), nil
+		},
+		spsc.producers,
+		spsc.consumers,
+		batch,
+		total,
+		fillInt64,
+		noopSinks[int64],
+	)
 	require.NoError(t, err)
 	require.Equal(t, total, allocating.received)
 	assert.GreaterOrEqual(t, allocating.gcPerMelem, 1.0)
 
-	plain, err := runThroughput(noopTimer{}, func() (queue[int64], error) {
-		return newChanPollQueue[int64](), nil
-	}, spsc.producers, spsc.consumers, batch, total, fillInt64, noopSinks[int64])
+	plain, err := runThroughput(
+		noopTimer{},
+		func() (queue[int64], error) {
+			return newChanPollQueue[int64](), nil
+		},
+		spsc.producers,
+		spsc.consumers,
+		batch,
+		total,
+		fillInt64,
+		noopSinks[int64],
+	)
 	require.NoError(t, err)
 	require.Equal(t, total, plain.received)
 	assert.Less(t, plain.gcPerMelem, 1.0)

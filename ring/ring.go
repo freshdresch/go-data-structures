@@ -25,6 +25,17 @@ var ErrEmpty = errors.New("ring: not enough occupied entries")
 // it is pointless.
 var ErrExceedsCapacity = errors.New("ring: requested count exceeds the ring's capacity")
 
+// ErrInvalidMaxBatch is returned by New, wrapped, when a maximum enqueue or dequeue batch size,
+// set with WithMaxBatch, WithMaxEnqueueBatch, or WithMaxDequeueBatch, is below 1 or above the
+// count.
+var ErrInvalidMaxBatch = errors.New("ring: max batch must be between 1 and the ring's count")
+
+// ErrExceedsMaxBatch is returned wrapped by EnqueueBulk when len(items) exceeds the ring's maximum
+// enqueue batch size, and by DequeueBulk when numElems exceeds its maximum dequeue batch size,
+// while still fitting the capacity. Such a request can never succeed, so retrying it is
+// pointless.
+var ErrExceedsMaxBatch = errors.New("ring: requested count exceeds the ring's maximum batch size")
+
 // Ring is a Go ring implementation heavily inspired by rte_ring from DPDK. It provides a
 // fixed-size ring buffer that can function as anything between an SPSC and MPMC queue.
 //
@@ -54,6 +65,9 @@ type Ring[T any] struct {
 
 	mask uint32 // Mask for bounding the index of the ring.
 
+	maxEnqueueBatch uint32 // The most elements one enqueue batch call moves, at most the capacity.
+	maxDequeueBatch uint32 // The most elements one dequeue batch call moves, at most the capacity.
+
 	multiProd bool // Multi-Producer enqueue instead of single.
 	multiCons bool // Multi-Consumer dequeue instead of single.
 
@@ -61,8 +75,10 @@ type Ring[T any] struct {
 }
 
 type config struct {
-	multiProd bool
-	multiCons bool
+	multiProd       bool
+	multiCons       bool
+	maxEnqueueBatch int
+	maxDequeueBatch int
 }
 
 // Option configures a Ring at construction.
@@ -84,12 +100,66 @@ func WithMultiConsDequeue() Option {
 	}
 }
 
+// WithMaxEnqueueBatch returns an Option that limits every enqueue batch call to at most n
+// elements. EnqueueBurst moves at most n, and EnqueueBulk rejects a request for more than n with
+// ErrExceedsMaxBatch. Enqueue moves one element, so the limit never affects it. Without a limit
+// the enqueue batch may be as large as the capacity. New returns an error wrapping
+// ErrInvalidMaxBatch when the limit is below 1 or above the count.
+//
+// The limit bounds how long one enqueue can make others wait. With multiple producers, a producer
+// publishes only after every producer that reserved before it has published, so a long batch
+// delays every producer that reserved after it until its copy finishes. With one producer or
+// many, a batch is published all at once, so consumers see none of it until its whole copy is
+// done. Choose n from the element size and the delay the ring's users can tolerate.
+//
+// When options set the same limit more than once, the last one given applies. New checks only the
+// limit that applies.
+func WithMaxEnqueueBatch(n int) Option {
+	return func(cfg *config) {
+		cfg.maxEnqueueBatch = n
+	}
+}
+
+// WithMaxDequeueBatch returns an Option that limits every dequeue batch call to at most n
+// elements. DequeueBurst moves at most n, and DequeueBulk rejects a request for more than n with
+// ErrExceedsMaxBatch. Dequeue moves one element, so the limit never affects it. Without a limit
+// the dequeue batch may be as large as the capacity. New returns an error wrapping
+// ErrInvalidMaxBatch when the limit is below 1 or above the count.
+//
+// The limit bounds how long one dequeue can make others wait. With multiple consumers, a consumer
+// releases its slots only after every consumer that reserved before it has released theirs, so a
+// long batch delays every consumer that reserved after it until its copy finishes. With one
+// consumer or many, a batch's slots are released all at once, so producers cannot reuse any of
+// them until its whole copy is done. Choose n from the element size and the delay the ring's users
+// can tolerate.
+//
+// When options set the same limit more than once, the last one given applies. New checks only the
+// limit that applies.
+func WithMaxDequeueBatch(n int) Option {
+	return func(cfg *config) {
+		cfg.maxDequeueBatch = n
+	}
+}
+
+// WithMaxBatch returns an Option that sets both the maximum enqueue batch and the maximum dequeue
+// batch to n. It is shorthand for WithMaxEnqueueBatch(n) and WithMaxDequeueBatch(n) together. When
+// options set the same limit more than once, the last one given applies, so a later
+// WithMaxEnqueueBatch or WithMaxDequeueBatch overrides this for its side.
+func WithMaxBatch(n int) Option {
+	return func(cfg *config) {
+		cfg.maxEnqueueBatch = n
+		cfg.maxDequeueBatch = n
+	}
+}
+
 // maxCount is the largest count New accepts, the largest power of two DPDK accepts.
 const maxCount = 1 << 30
 
 // New returns an empty Ring with count slots. A ring of count n holds n elements. Without options,
-// the ring allows one producer and one consumer at a time. It returns an error wrapping
-// ErrInvalidCount when count is not a power of two between 1 and 2^30.
+// the ring allows one producer and one consumer at a time, and a batch call may move up to the
+// whole capacity. It returns an error wrapping ErrInvalidCount when count is not a power of two
+// between 1 and 2^30, and one wrapping ErrInvalidMaxBatch when a maximum enqueue or dequeue batch
+// is below 1 or above count.
 func New[T any](count int, options ...Option) (*Ring[T], error) {
 	inRange := count >= 1 && count <= maxCount
 	isPowerOfTwo := count&(count-1) == 0
@@ -97,27 +167,57 @@ func New[T any](count int, options ...Option) (*Ring[T], error) {
 		return nil, fmt.Errorf("new ring with count %d: %w", count, ErrInvalidCount)
 	}
 
-	var cfg config
+	cfg := config{maxEnqueueBatch: count, maxDequeueBatch: count}
 	for _, option := range options {
 		option(&cfg)
 	}
+	if err := checkMaxBatch("enqueue", cfg.maxEnqueueBatch, count); err != nil {
+		return nil, err
+	}
+	if err := checkMaxBatch("dequeue", cfg.maxDequeueBatch, count); err != nil {
+		return nil, err
+	}
 
 	ring := &Ring[T]{
-		entries:   make([]T, count),
-		mask:      uint32(count - 1),
-		prodHead:  new(uint32),
-		prodTail:  new(uint32),
-		consHead:  new(uint32),
-		consTail:  new(uint32),
-		multiProd: cfg.multiProd,
-		multiCons: cfg.multiCons,
+		entries:         make([]T, count),
+		mask:            uint32(count - 1),
+		maxEnqueueBatch: uint32(cfg.maxEnqueueBatch),
+		maxDequeueBatch: uint32(cfg.maxDequeueBatch),
+		prodHead:        new(uint32),
+		prodTail:        new(uint32),
+		consHead:        new(uint32),
+		consTail:        new(uint32),
+		multiProd:       cfg.multiProd,
+		multiCons:       cfg.multiCons,
 	}
 	return ring, nil
+}
+
+// checkMaxBatch returns an error wrapping ErrInvalidMaxBatch when maxBatch, the limit for the
+// direction op names, is below 1 or above count.
+func checkMaxBatch(op string, maxBatch, count int) error {
+	if maxBatch >= 1 && maxBatch <= count {
+		return nil
+	}
+	return fmt.Errorf("new ring with count %d and max %s batch %d: %w", count, op, maxBatch,
+		ErrInvalidMaxBatch)
 }
 
 // Capacity returns the number of elements the ring holds, which is the count given to New.
 func (r *Ring[T]) Capacity() int {
 	return int(r.capacity())
+}
+
+// MaxEnqueueBatch returns the most elements one enqueue batch call moves: the limit set by
+// WithMaxEnqueueBatch or WithMaxBatch, or the capacity without one.
+func (r *Ring[T]) MaxEnqueueBatch() int {
+	return int(r.maxEnqueueBatch)
+}
+
+// MaxDequeueBatch returns the most elements one dequeue batch call moves: the limit set by
+// WithMaxDequeueBatch or WithMaxBatch, or the capacity without one.
+func (r *Ring[T]) MaxDequeueBatch() int {
+	return int(r.maxDequeueBatch)
 }
 
 // capacity returns the number of elements the ring holds as a uint32, for the index arithmetic.
@@ -194,9 +294,10 @@ func (r *Ring[T]) Enqueue(item T) error {
 // EnqueueBulk places all of items in the ring, or none of them. It returns nil when all are
 // enqueued. A zero-length items succeeds and enqueues nothing.
 //
-// It checks, in order, that len(items) is at most Capacity and that the ring has len(items) free
-// slots. The first failing check decides the error. These return an error wrapping
-// ErrExceedsCapacity and ErrFull unwrapped. A failed call leaves the ring unchanged.
+// It checks, in order, that len(items) is at most Capacity, that it is at most MaxEnqueueBatch,
+// and that the ring has len(items) free slots. The first failing check decides the error. These
+// return an error wrapping ErrExceedsCapacity, an error wrapping ErrExceedsMaxBatch, and ErrFull
+// unwrapped. A failed call leaves the ring unchanged.
 //
 // free is returned on every path, errors included. It is the number of free slots after the call,
 // between 0 and Capacity inclusive.
@@ -204,14 +305,11 @@ func (r *Ring[T]) Enqueue(item T) error {
 // EnqueueBulk is safe for concurrent use with other enqueues only when the ring was created with
 // WithMultiProdEnqueue. It is always safe to run alongside dequeues.
 func (r *Ring[T]) EnqueueBulk(items []T) (free int, err error) {
-	capacity := int(r.capacity())
-	if len(items) > capacity {
-		return int(r.freeEntries()), fmt.Errorf(
-			"enqueue %d elements, capacity %d: %w",
-			len(items),
-			capacity,
-			ErrExceedsCapacity,
-		)
+	// The limit is at most the capacity, so one comparison guards both checks on the success
+	// path. It is in int, so a length beyond the uint32 range cannot truncate.
+	if len(items) > int(r.maxEnqueueBatch) {
+		return int(r.freeEntries()), r.bulkLengthError("enqueue", uint64(len(items)),
+			r.maxEnqueueBatch)
 	}
 
 	enqueued, freeAfter := r.doEnqueue(items, true)
@@ -222,8 +320,8 @@ func (r *Ring[T]) EnqueueBulk(items []T) (free int, err error) {
 }
 
 // EnqueueBurst places as many elements from the front of items in the ring as it has free slots
-// for, and never more than Capacity. It returns the number enqueued, between 0 and len(items)
-// inclusive. A zero-length items enqueues nothing.
+// for, and never more than MaxEnqueueBatch. It returns the number enqueued, between 0 and
+// len(items) inclusive. A zero-length items enqueues nothing.
 //
 // free is returned on every path. It is the number of free slots after the call, between 0 and
 // Capacity inclusive.
@@ -232,8 +330,8 @@ func (r *Ring[T]) EnqueueBulk(items []T) (free int, err error) {
 // WithMultiProdEnqueue. It is always safe to run alongside dequeues.
 func (r *Ring[T]) EnqueueBurst(items []T) (enqueued, free int) {
 	// Clamping in int keeps a slice longer than 2^32 from truncating when its length becomes a
-	// uint32 in doEnqueue.
-	clamped := min(len(items), int(r.capacity()))
+	// uint32 in doEnqueue. The limit is at most the capacity, so it bounds both.
+	clamped := min(len(items), int(r.maxEnqueueBatch))
 	moved, freeAfter := r.doEnqueue(items[:clamped], false)
 	return int(moved), int(freeAfter)
 }
@@ -256,10 +354,11 @@ func (r *Ring[T]) Dequeue() (T, error) {
 // dequeued and it returns them with a nil error, or none are and it returns a nil slice and an
 // error.
 //
-// It checks, in order, that numElems is at most Capacity and that the ring has numElems occupied
-// entries. The first failing check decides the error. These return an error wrapping
-// ErrExceedsCapacity and ErrEmpty unwrapped. A failed call leaves the ring unchanged. A numElems
-// of zero succeeds with a nil slice.
+// It checks, in order, that numElems is at most Capacity, that it is at most MaxDequeueBatch, and
+// that the ring has numElems occupied entries. The first failing check decides the error. These
+// return an error wrapping ErrExceedsCapacity, an error wrapping ErrExceedsMaxBatch, and ErrEmpty
+// unwrapped. A failed call leaves the ring unchanged. A numElems of zero succeeds with a nil
+// slice.
 //
 // If avail is non-nil, it is written on every return with the number of occupied entries after
 // the call.
@@ -270,14 +369,11 @@ func (r *Ring[T]) DequeueBulk(
 	numElems uint32,
 	avail *uint32,
 ) ([]T, error) {
-	if numElems > r.capacity() {
+	// The limit is at most the capacity, so one comparison guards both checks on the success
+	// path.
+	if numElems > r.maxDequeueBatch {
 		updateValidPtr(avail, r.occupiedEntries())
-		return nil, fmt.Errorf(
-			"dequeue %d elements, capacity %d: %w",
-			numElems,
-			r.capacity(),
-			ErrExceedsCapacity,
-		)
+		return nil, r.bulkLengthError("dequeue", uint64(numElems), r.maxDequeueBatch)
 	}
 
 	elems, numDequeued := r.doDequeue(numElems, avail, true)
@@ -288,9 +384,9 @@ func (r *Ring[T]) DequeueBulk(
 }
 
 // DequeueBurst removes and returns up to numElems of the oldest elements in the ring, taking all
-// of them when the ring does not have enough. It returns the elements and their count, which is
-// between 0 and numElems inclusive. When nothing is dequeued, including for a numElems of zero,
-// the slice is nil.
+// of them when the ring does not have enough, and never more than MaxDequeueBatch. It returns the
+// elements and their count, which is between 0 and numElems inclusive. When nothing is dequeued,
+// including for a numElems of zero, the slice is nil.
 //
 // If avail is non-nil, it is written on every return with the number of occupied entries after
 // the call.
@@ -302,10 +398,25 @@ func (r *Ring[T]) DequeueBurst(
 	avail *uint32,
 ) ([]T, uint32) {
 	return r.doDequeue(
-		numElems,
+		min(numElems, r.maxDequeueBatch),
 		avail,
 		false,
 	)
+}
+
+// bulkLengthError returns the error for a bulk call that asked to move length elements, more than
+// maxBatch, its direction's limit. It wraps ErrExceedsCapacity when length also exceeds the
+// capacity, and ErrExceedsMaxBatch otherwise. op names the call, enqueue or dequeue, in the
+// message. Callers check the limit first, so this runs only on the error path. length is a uint64
+// so that neither a slice length nor a uint32 count can wrap negative on a 32-bit target.
+func (r *Ring[T]) bulkLengthError(op string, length uint64, maxBatch uint32) error {
+	capacity := uint64(r.capacity())
+	if length > capacity {
+		return fmt.Errorf("%s %d elements, capacity %d: %w", op, length, capacity,
+			ErrExceedsCapacity)
+	}
+	return fmt.Errorf("%s %d elements, max %s batch %d: %w", op, length, op, maxBatch,
+		ErrExceedsMaxBatch)
 }
 
 // doEnqueue places elements from the front of items in the ring. fixed is true for a bulk

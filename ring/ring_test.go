@@ -980,3 +980,195 @@ func setIndices[T any](ring *Ring[T], start uint32) {
 		atomic.StoreUint32(index, start)
 	}
 }
+
+// TestMaxBatchOptions checks that both batch limits default to the capacity, that each option
+// sets its own side, that WithMaxBatch sets both, that the last option given for a side applies,
+// and that New rejects a limit below 1 or above the count.
+func TestMaxBatchOptions(t *testing.T) {
+	cases := []struct {
+		name        string
+		options     []Option
+		wantEnqueue int
+		wantDequeue int
+	}{
+		{name: "default", wantEnqueue: 16, wantDequeue: 16},
+		{name: "both", options: []Option{WithMaxBatch(4)}, wantEnqueue: 4, wantDequeue: 4},
+		{name: "enqueueOnly", options: []Option{WithMaxEnqueueBatch(8)}, wantEnqueue: 8,
+			wantDequeue: 16},
+		{name: "dequeueOnly", options: []Option{WithMaxDequeueBatch(2)}, wantEnqueue: 16,
+			wantDequeue: 2},
+		{name: "different", options: []Option{WithMaxEnqueueBatch(8), WithMaxDequeueBatch(2)},
+			wantEnqueue: 8, wantDequeue: 2},
+		{name: "sideAfterBoth", options: []Option{WithMaxBatch(4), WithMaxDequeueBatch(1)},
+			wantEnqueue: 4, wantDequeue: 1},
+		{name: "bothAfterSide", options: []Option{WithMaxEnqueueBatch(8), WithMaxBatch(4)},
+			wantEnqueue: 4, wantDequeue: 4},
+		{name: "full", options: []Option{WithMaxBatch(16)}, wantEnqueue: 16, wantDequeue: 16},
+		{name: "invalidOverridden", options: []Option{WithMaxBatch(0), WithMaxBatch(4)},
+			wantEnqueue: 4, wantDequeue: 4},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ring, err := New[int](16, tc.options...)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantEnqueue, ring.MaxEnqueueBatch())
+			assert.Equal(t, tc.wantDequeue, ring.MaxDequeueBatch())
+			assert.Equal(t, 16, ring.Capacity())
+		})
+	}
+
+	for _, bad := range []int{0, -1, 17} {
+		for name, option := range map[string]Option{
+			"both":    WithMaxBatch(bad),
+			"enqueue": WithMaxEnqueueBatch(bad),
+			"dequeue": WithMaxDequeueBatch(bad),
+		} {
+			ring, err := New[int](16, option)
+			assert.ErrorIs(t, err, ErrInvalidMaxBatch, "%s %d", name, bad)
+			assert.True(t, ring == nil, "%s %d", name, bad)
+		}
+	}
+
+	// New checks only the limit that applies, so a valid limit followed by an invalid one fails.
+	ring, err := New[int](16, WithMaxEnqueueBatch(4), WithMaxBatch(17))
+	assert.ErrorIs(t, err, ErrInvalidMaxBatch)
+	assert.True(t, ring == nil)
+}
+
+// TestMaxEnqueueBatch checks that EnqueueBurst moves at most MaxEnqueueBatch, and that EnqueueBulk
+// rejects more than MaxEnqueueBatch with ErrExceedsMaxBatch, leaving the ring unchanged, while a
+// request over the capacity still reports ErrExceedsCapacity. The dequeue side has no limit here,
+// so a burst drains everything.
+func TestMaxEnqueueBatch(t *testing.T) {
+	ring, err := New[int](16, WithMaxEnqueueBatch(4))
+	require.NoError(t, err)
+
+	enqueued, free := ring.EnqueueBurst([]int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10})
+	assert.Equal(t, 4, enqueued)
+	assert.Equal(t, 12, free)
+
+	free, err = ring.EnqueueBulk([]int{5, 6, 7, 8, 9})
+	assert.ErrorIs(t, err, ErrExceedsMaxBatch)
+	assert.NotErrorIs(t, err, ErrExceedsCapacity)
+	assert.Equal(t, 12, free)
+	assert.Equal(t, 4, ring.Count())
+
+	free, err = ring.EnqueueBulk([]int{5, 6, 7, 8})
+	assert.NoError(t, err)
+	assert.Equal(t, 8, free)
+
+	free, err = ring.EnqueueBulk(make([]int, ring.Capacity()+1))
+	assert.ErrorIs(t, err, ErrExceedsCapacity)
+	assert.NotErrorIs(t, err, ErrExceedsMaxBatch)
+	assert.Equal(t, 8, free)
+
+	got, dequeued := ring.DequeueBurst(16, nil)
+	assert.Equal(t, uint32(8), dequeued)
+	assert.Equal(t, []int{1, 2, 3, 4, 5, 6, 7, 8}, got)
+}
+
+// TestMaxDequeueBatch checks that DequeueBurst moves at most MaxDequeueBatch, and that DequeueBulk
+// rejects more than MaxDequeueBatch with ErrExceedsMaxBatch, leaving the ring unchanged. The
+// enqueue side has no limit here, so one burst fills the ring.
+func TestMaxDequeueBatch(t *testing.T) {
+	ring, err := New[int](16, WithMaxDequeueBatch(4))
+	require.NoError(t, err)
+	items := make([]int, 12)
+	for value := range items {
+		items[value] = value
+	}
+	enqueued, _ := ring.EnqueueBurst(items)
+	require.Equal(t, 12, enqueued)
+
+	got, dequeued := ring.DequeueBurst(10, nil)
+	assert.Equal(t, uint32(4), dequeued)
+	assert.Equal(t, []int{0, 1, 2, 3}, got)
+
+	avail := outSentinel
+	got, err = ring.DequeueBulk(5, &avail)
+	assert.ErrorIs(t, err, ErrExceedsMaxBatch)
+	assert.NotErrorIs(t, err, ErrExceedsCapacity)
+	assert.Nil(t, got)
+	assert.Equal(t, uint32(8), avail)
+	assert.Equal(t, 8, ring.Count())
+
+	got, err = ring.DequeueBulk(17, &avail)
+	assert.ErrorIs(t, err, ErrExceedsCapacity)
+	assert.NotErrorIs(t, err, ErrExceedsMaxBatch)
+	assert.Nil(t, got)
+	assert.Equal(t, uint32(8), avail)
+
+	got, err = ring.DequeueBulk(4, &avail)
+	assert.NoError(t, err)
+	assert.Equal(t, []int{4, 5, 6, 7}, got)
+	assert.Equal(t, uint32(4), avail)
+}
+
+// TestMaxBatchUnderContention runs MPMC bursts on a ring with different enqueue and dequeue
+// limits. The callers mix requests below and above each side's limit. No burst moves more than its
+// side's limit, and every element arrives exactly once.
+func TestMaxBatchUnderContention(t *testing.T) {
+	const (
+		maxEnqueue  = 3
+		maxDequeue  = 5
+		workers     = 4
+		perProducer = 5000
+		total       = workers * perProducer
+	)
+	requests := []int{1, 2, 8}
+	ring, err := New[int](64, WithMultiProdEnqueue(), WithMultiConsDequeue(),
+		WithMaxEnqueueBatch(maxEnqueue), WithMaxDequeueBatch(maxDequeue))
+	require.NoError(t, err)
+
+	var producers, consumers sync.WaitGroup
+	var received atomic.Int64
+	var oversized atomic.Int64
+	seen := make([]atomic.Int32, total)
+	for producer := range workers {
+		producers.Go(func() {
+			items := make([]int, 0, slices.Max(requests))
+			for call, next := 0, 0; next < perProducer; call++ {
+				request := requests[call%len(requests)]
+				items = items[:0]
+				for k := next; k < min(next+request, perProducer); k++ {
+					items = append(items, producer*perProducer+k)
+				}
+				enqueued, _ := ring.EnqueueBurst(items)
+				if enqueued > maxEnqueue {
+					oversized.Add(1)
+				}
+				if enqueued == 0 {
+					runtime.Gosched()
+				}
+				next += enqueued
+			}
+		})
+	}
+	for range workers {
+		consumers.Go(func() {
+			for call := 0; received.Load() < total; call++ {
+				request := uint32(requests[call%len(requests)])
+				got, dequeued := ring.DequeueBurst(request, nil)
+				if dequeued > maxDequeue {
+					oversized.Add(1)
+				}
+				if dequeued == 0 {
+					runtime.Gosched()
+					continue
+				}
+				for _, value := range got {
+					seen[value].Add(1)
+				}
+				received.Add(int64(dequeued))
+			}
+		})
+	}
+	producers.Wait()
+	consumers.Wait()
+
+	assert.Zero(t, oversized.Load())
+	assert.Equal(t, int64(total), received.Load())
+	for value := range seen {
+		require.Equal(t, int32(1), seen[value].Load(), "value %d", value)
+	}
+}

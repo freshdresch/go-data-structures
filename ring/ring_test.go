@@ -1266,3 +1266,514 @@ func TestMaxBatchUnderContention(t *testing.T) {
 		require.Equal(t, int32(1), seen[value].Load(), "value %d", value)
 	}
 }
+
+// A stressMode is a ring configuration and the number of goroutines on each side of it.
+type stressMode struct {
+	name      string
+	producers int
+	consumers int
+	options   []Option
+}
+
+// stressModes returns the configurations the tagged stress tests run under: one producer and one
+// consumer on an SPSC ring, and four of each on an MPMC ring.
+func stressModes() []stressMode {
+	return []stressMode{
+		{name: "SPSC", producers: 1, consumers: 1},
+		{
+			name:      "MPMC",
+			producers: 4,
+			consumers: 4,
+			options:   []Option{WithMultiProdEnqueue(), WithMultiConsDequeue()},
+		},
+	}
+}
+
+// tagged returns the value a producer sends as its seq-th element. Sequence numbers start at 1,
+// so a zero value is never a valid element.
+func tagged(producer int, seq uint64) uint64 {
+	return uint64(producer)<<32 | seq
+}
+
+// A batchCall moves up to len(values) values through a ring and returns how many it moved. A
+// producer's call reads values, and a consumer's call writes the moved values into the front of
+// values.
+type batchCall func(values []uint64) int
+
+// A drainState is what the consumers of one stress run share to decide when to stop. expected is
+// the total number of elements the producers send, and the producers' owner sets producersDone
+// once they have all finished.
+type drainState struct {
+	expected      int64
+	producersDone atomic.Bool
+	received      atomic.Int64
+	overReceived  atomic.Bool
+}
+
+// consume calls dequeue until a call moves nothing after the producers have finished, and adds
+// what each call moves to received. dequeue returns how many elements it moved and how many it
+// asked for. A call that asks for none never ends the loop, because it moves nothing even when
+// the ring holds elements. consume yields when a call moves nothing.
+//
+// consume also stops once received exceeds expected, which only a ring that fabricates or
+// duplicates elements can cause, and then sets overReceived. Either way a ring that loses,
+// fabricates, or duplicates elements ends the run instead of hanging it.
+func (drain *drainState) consume(dequeue func() (moved, requested int)) {
+	for {
+		finished := drain.producersDone.Load()
+		moved, requested := dequeue()
+		if moved == 0 {
+			if finished && requested > 0 {
+				return
+			}
+			runtime.Gosched()
+			continue
+		}
+		if drain.received.Add(int64(moved)) > drain.expected {
+			drain.overReceived.Store(true)
+			return
+		}
+	}
+}
+
+// stressDeadline calls run on a new goroutine and waits up to 30 seconds for it to return. run
+// starts the goroutines of one stress run and waits for them. stressDeadline bounds that run, so
+// a hang, including one inside the ring, fails with the test's name instead of waiting for the
+// package timeout. On timeout it calls t.Fatalf, so it must be called on the test goroutine. The
+// stuck goroutines are then abandoned, because the test is failing anyway.
+func stressDeadline(t *testing.T, run func()) {
+	t.Helper()
+	const deadline = 30 * time.Second
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		run()
+	}()
+	select {
+	case <-finished:
+	case <-time.After(deadline):
+		t.Fatalf("stress run did not finish within %v", deadline)
+	}
+}
+
+// sendTagged starts one goroutine per producer that each send perProducer tagged values with
+// enqueue, at most enqueueBatch at a time, and one goroutine per consumer that receive with
+// dequeue into a buffer of dequeueBatch until drainState.consume stops them. Each producer yields
+// when a call moves nothing. sendTagged waits for all of them within stressDeadline, asserts that
+// the ring returned no more elements than were sent, and returns the values each consumer
+// received, in the order it received them. It must be called on the test goroutine.
+func sendTagged(
+	t *testing.T,
+	producers, consumers, perProducer, enqueueBatch, dequeueBatch int,
+	enqueue, dequeue batchCall,
+) [][]uint64 {
+	t.Helper()
+	drain := drainState{expected: int64(producers * perProducer)}
+	results := make([][]uint64, consumers)
+	stressDeadline(t, func() {
+		var producing sync.WaitGroup
+		for producer := range producers {
+			producing.Go(func() {
+				items := make([]uint64, 0, enqueueBatch)
+				for next := 1; next <= perProducer; {
+					items = items[:0]
+					last := min(next+enqueueBatch-1, perProducer)
+					for seq := next; seq <= last; seq++ {
+						items = append(items, tagged(producer, uint64(seq)))
+					}
+					moved := enqueue(items)
+					if moved == 0 {
+						runtime.Gosched()
+					}
+					next += moved
+				}
+			})
+		}
+
+		var consuming sync.WaitGroup
+		for consumer := range consumers {
+			consuming.Go(func() {
+				dst := make([]uint64, dequeueBatch)
+				drain.consume(func() (moved, requested int) {
+					moved = dequeue(dst)
+					results[consumer] = append(results[consumer], dst[:moved]...)
+					return moved, len(dst)
+				})
+			})
+		}
+		producing.Wait()
+		drain.producersDone.Store(true)
+		consuming.Wait()
+	})
+	assert.False(t, drain.overReceived.Load(), "the ring returned more elements than were sent")
+	return results
+}
+
+// assertTaggedDelivery checks what sendTagged returned. Every value is a valid tag, within each
+// consumer each producer's sequence numbers strictly increase, and across all consumers every
+// value arrives exactly once.
+func assertTaggedDelivery(t *testing.T, results [][]uint64, producers, perProducer int) {
+	t.Helper()
+	timesSeen := make([]int, producers*perProducer)
+	for consumer, values := range results {
+		lastSeq := make([]uint64, producers)
+		for _, value := range values {
+			seq := value & math.MaxUint32
+			validTag := value>>32 < uint64(producers) && seq >= 1 && seq <= uint64(perProducer)
+			require.Truef(t, validTag, "consumer %d received invalid value %#x", consumer, value)
+			producer := int(value >> 32)
+			require.Greaterf(t, seq, lastSeq[producer],
+				"consumer %d received producer %d out of order", consumer, producer)
+			lastSeq[producer] = seq
+			timesSeen[producer*perProducer+int(seq)-1]++
+		}
+	}
+	for index, times := range timesSeen {
+		producer := index / perProducer
+		seq := index%perProducer + 1
+		require.Equalf(t, 1, times, "producer %d sequence %d", producer, seq)
+	}
+}
+
+// TestCapacityOne moves tagged values through a one-slot ring with single-element calls, so every
+// element is handed over on its own.
+func TestCapacityOne(t *testing.T) {
+	const total = 100_000
+	for _, mode := range stressModes() {
+		t.Run(mode.name, func(t *testing.T) {
+			ring, err := New[uint64](1, mode.options...)
+			require.NoError(t, err)
+			var unexpectedErrors atomic.Int64
+			enqueue := func(items []uint64) int {
+				err := ring.Enqueue(items[0])
+				if err != nil {
+					if err != ErrFull {
+						unexpectedErrors.Add(1)
+					}
+					return 0
+				}
+				return 1
+			}
+			dequeue := func(dst []uint64) int {
+				value, err := ring.Dequeue()
+				if err != nil {
+					if err != ErrEmpty {
+						unexpectedErrors.Add(1)
+					}
+					return 0
+				}
+				dst[0] = value
+				return 1
+			}
+
+			perProducer := total / mode.producers
+			results := sendTagged(t, mode.producers, mode.consumers, perProducer, 1, 1, enqueue, dequeue)
+			assert.Zero(t, unexpectedErrors.Load(), "unexpected errors")
+			assertTaggedDelivery(t, results, mode.producers, perProducer)
+		})
+	}
+}
+
+// TestConcurrentWrap moves tagged values in bursts through a ring whose indices start just below
+// 2^32, so they wrap while the producers and consumers contend.
+func TestConcurrentWrap(t *testing.T) {
+	const (
+		total = 100_000
+		batch = 8
+	)
+	for _, mode := range stressModes() {
+		t.Run(mode.name, func(t *testing.T) {
+			ring, err := New[uint64](64, mode.options...)
+			require.NoError(t, err)
+			const startIndex = math.MaxUint32 - 999
+			setIndices(ring, startIndex)
+			enqueue := func(items []uint64) int {
+				enqueued, _ := ring.EnqueueBurst(items)
+				return enqueued
+			}
+			dequeue := func(dst []uint64) int {
+				dequeued, _ := ring.DequeueBurst(dst)
+				return dequeued
+			}
+
+			perProducer := total / mode.producers
+			results := sendTagged(
+				t,
+				mode.producers,
+				mode.consumers,
+				perProducer,
+				batch,
+				batch,
+				enqueue,
+				dequeue,
+			)
+			assertTaggedDelivery(t, results, mode.producers, perProducer)
+			assert.Less(t, atomic.LoadUint32(ring.consTail), uint32(startIndex))
+		})
+	}
+}
+
+// TestCountSnapshot checks that Count never reports more entries than have been enqueued and not
+// yet dequeued. enqueuedCount counts elements enqueued or in an enqueue call, and drain.received
+// counts elements whose dequeue call has returned. A checker reads drain.received, then Count,
+// then enqueuedCount. With the consumer tail loaded first, Count is at most their difference.
+//
+// This test checks correctness. It is not a guaranteed guard for Count's load order, because the
+// reversed order breaks the bound only in a narrow window, which the test may miss on some
+// machines or schedules.
+func TestCountSnapshot(t *testing.T) {
+	const (
+		workers     = 4
+		perProducer = 50_000
+		total       = workers * perProducer
+		batch       = 8
+		checkers    = 2
+		yieldEvery  = 64
+	)
+	ring, err := New[int](64, WithMultiProdEnqueue(), WithMultiConsDequeue())
+	require.NoError(t, err)
+
+	var enqueuedCount, overcounts atomic.Int64
+	drain := drainState{expected: total}
+	stressDeadline(t, func() {
+		var producing, consuming, checking sync.WaitGroup
+		for range workers {
+			producing.Go(func() {
+				items := make([]int, batch)
+				for sent := 0; sent < perProducer; {
+					request := min(batch, perProducer-sent)
+					enqueuedCount.Add(int64(request))
+					enqueued, _ := ring.EnqueueBurst(items[:request])
+					enqueuedCount.Add(int64(enqueued - request))
+					if enqueued == 0 {
+						runtime.Gosched()
+					}
+					sent += enqueued
+				}
+			})
+		}
+		for range workers {
+			consuming.Go(func() {
+				dst := make([]int, batch)
+				drain.consume(func() (moved, requested int) {
+					dequeued, _ := ring.DequeueBurst(dst)
+					return dequeued, len(dst)
+				})
+			})
+		}
+
+		// Each checker yields every yieldEvery checks, so the checkers sample densely without
+		// starving the producers and consumers when they share one processor.
+		var done atomic.Bool
+		for range checkers {
+			checking.Go(func() {
+				for check := 1; !done.Load(); check++ {
+					dequeued := drain.received.Load()
+					count := ring.Count()
+					enqueued := enqueuedCount.Load()
+					if int64(count) > enqueued-dequeued {
+						overcounts.Add(1)
+					}
+					if check%yieldEvery == 0 {
+						runtime.Gosched()
+					}
+				}
+			})
+		}
+		producing.Wait()
+		drain.producersDone.Store(true)
+		consuming.Wait()
+		done.Store(true)
+		checking.Wait()
+	})
+
+	assert.False(t, drain.overReceived.Load(), "the ring returned more elements than were sent")
+	assert.Equal(t, int64(total), drain.received.Load())
+	assert.Zero(t, overcounts.Load(), "Count exceeded enqueued minus dequeued")
+}
+
+// TestBulkUnderContention moves tagged values with bulk calls on an MPMC ring. Every successful
+// DequeueBulk fills all of dst with valid values, and a failed one writes nothing.
+func TestBulkUnderContention(t *testing.T) {
+	const (
+		workers      = 4
+		perProducer  = 4000
+		total        = workers * perProducer
+		enqueueBatch = 3
+		dequeueBatch = 8
+	)
+	// A bulk dequeue moves all of dst or nothing, so the last one completes only if total is a
+	// multiple of dequeueBatch. This guard fails to build when it is not.
+	const _ = uint(-(total % dequeueBatch))
+	ring, err := New[uint64](64, WithMultiProdEnqueue(), WithMultiConsDequeue())
+	require.NoError(t, err)
+	var unexpectedErrors atomic.Int64
+	enqueue := func(items []uint64) int {
+		_, err := ring.EnqueueBulk(items)
+		if err != nil {
+			if err != ErrFull {
+				unexpectedErrors.Add(1)
+			}
+			return 0
+		}
+		return len(items)
+	}
+	// dst is cleared before each call, so a stale value cannot pass for a new one, and a failed
+	// call that wrote anyway leaves non-zero values. Those are returned as received, so the
+	// delivery check reports them.
+	var failedWrites atomic.Int64
+	dequeue := func(dst []uint64) int {
+		clear(dst)
+		_, err := ring.DequeueBulk(dst)
+		if err == nil {
+			return len(dst)
+		}
+		if err != ErrEmpty {
+			unexpectedErrors.Add(1)
+		}
+		written := slices.Index(dst, 0)
+		if written == -1 {
+			written = len(dst)
+		}
+		if written > 0 {
+			failedWrites.Add(1)
+		}
+		return written
+	}
+
+	results := sendTagged(
+		t,
+		workers,
+		workers,
+		perProducer,
+		enqueueBatch,
+		dequeueBatch,
+		enqueue,
+		dequeue,
+	)
+	assert.Zero(t, unexpectedErrors.Load(), "unexpected errors")
+	assertTaggedDelivery(t, results, workers, perProducer)
+	assert.Zero(t, failedWrites.Load(), "a failed DequeueBulk wrote into dst")
+}
+
+// TestCountBounds checks that every free and available count an MPMC burst returns is between 0
+// and the capacity. Every fourth call on each side is zero-length, because a call that reserves
+// nothing reports a count from a head that may be stale.
+//
+// A zero-length enqueue overshoots only when consumers pass the producer head it loaded before it
+// loads the consumer tail, so it needs other producers and consumers running while the ring is
+// nearly empty. A zero-length dequeue overshoots only when producers advance their tail more than
+// a capacity past the consumer head it loaded, so it needs other consumers and producers running
+// while the ring is nearly full. Single-threaded tests can reach neither.
+func TestCountBounds(t *testing.T) {
+	const (
+		workers      = 4
+		perProducer  = 25_000
+		total        = workers * perProducer
+		enqueueBatch = 8
+		dequeueBatch = 4
+		zeroEvery    = 4
+		probers      = 3
+		yieldEvery   = 64
+	)
+	ring, err := New[int](64, WithMultiProdEnqueue(), WithMultiConsDequeue())
+	require.NoError(t, err)
+	capacity := ring.Capacity()
+	inBounds := func(count int) bool {
+		return count >= 0 && count <= capacity
+	}
+
+	var freeOutOfBounds, availableOutOfBounds atomic.Int64
+	drain := drainState{expected: total}
+	stressDeadline(t, func() {
+		var producing, consuming, probing sync.WaitGroup
+		for range workers {
+			producing.Go(func() {
+				items := make([]int, enqueueBatch)
+				for call, sent := 0, 0; sent < perProducer; call++ {
+					request := min(enqueueBatch, perProducer-sent)
+					if call%zeroEvery == zeroEvery-1 {
+						request = 0
+					}
+					enqueued, free := ring.EnqueueBurst(items[:request])
+					if !inBounds(free) {
+						freeOutOfBounds.Add(1)
+					}
+					if enqueued == 0 {
+						runtime.Gosched()
+					}
+					sent += enqueued
+				}
+			})
+		}
+		for range workers {
+			consuming.Go(func() {
+				dst := make([]int, dequeueBatch)
+				call := 0
+				drain.consume(func() (moved, requested int) {
+					request := dequeueBatch
+					if call%zeroEvery == zeroEvery-1 {
+						request = 0
+					}
+					call++
+					dequeued, available := ring.DequeueBurst(dst[:request])
+					if !inBounds(available) {
+						availableOutOfBounds.Add(1)
+					}
+					return dequeued, request
+				})
+			})
+		}
+		var done atomic.Bool
+		for range probers {
+			probing.Go(func() {
+				for call := 1; !done.Load(); call++ {
+					_, free := ring.EnqueueBurst(nil)
+					if !inBounds(free) {
+						freeOutOfBounds.Add(1)
+					}
+					_, available := ring.DequeueBurst(nil)
+					if !inBounds(available) {
+						availableOutOfBounds.Add(1)
+					}
+					if call%yieldEvery == 0 {
+						runtime.Gosched()
+					}
+				}
+			})
+		}
+		producing.Wait()
+		drain.producersDone.Store(true)
+		consuming.Wait()
+		done.Store(true)
+		probing.Wait()
+	})
+
+	assert.False(t, drain.overReceived.Load(), "the ring returned more elements than were sent")
+	assert.Equal(t, int64(total), drain.received.Load())
+	assert.Zero(t, freeOutOfBounds.Load(), "free out of bounds")
+	assert.Zero(t, availableOutOfBounds.Load(), "available out of bounds")
+}
+
+// TestErrorIdentity checks that every call returns ErrFull and ErrEmpty unwrapped, so they compare
+// equal with ==, and that each bulk call's ErrExceedsCapacity error matches with errors.Is.
+func TestErrorIdentity(t *testing.T) {
+	ring, err := New[int](4)
+	require.NoError(t, err)
+
+	_, err = ring.Dequeue()
+	assert.True(t, err == ErrEmpty, "Dequeue got %v", err)
+	_, err = ring.DequeueBulk(make([]int, 1))
+	assert.True(t, err == ErrEmpty, "DequeueBulk got %v", err)
+
+	requireEnqueueBulk(t, ring, []int{1, 2, 3, 4})
+	err = ring.Enqueue(5)
+	assert.True(t, err == ErrFull, "Enqueue got %v", err)
+	_, err = ring.EnqueueBulk([]int{5})
+	assert.True(t, err == ErrFull, "EnqueueBulk got %v", err)
+
+	_, err = ring.EnqueueBulk(make([]int, 5))
+	assert.ErrorIs(t, err, ErrExceedsCapacity)
+	_, err = ring.DequeueBulk(make([]int, 5))
+	assert.ErrorIs(t, err, ErrExceedsCapacity)
+}

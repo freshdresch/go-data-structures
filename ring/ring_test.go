@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"runtime"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -57,29 +58,29 @@ func TestRingCreation(t *testing.T) {
 
 func TestRingCount(t *testing.T) {
 	buflen := 32
-	buffer, err := New[string](uint32(buflen))
+	buffer, err := New[string](buflen)
 	require.NotNil(t, buffer)
 	require.NoError(t, err)
 
-	assert.Equal(t, uint32(0), buffer.Count())
+	assert.Equal(t, 0, buffer.Count())
 
 	item := "test"
-	for i := 0; i < buflen-1; i++ {
+	for i := 0; i < buflen; i++ {
 		err = buffer.Enqueue(item)
 		require.NoError(t, err)
-		assert.Equal(t, uint32(i+1), buffer.Count())
+		assert.Equal(t, i+1, buffer.Count())
 	}
 
 	// Single-element calls return their sentinels unwrapped, so they are compared with ==.
 	err = buffer.Enqueue(item)
 	assert.True(t, err == ErrFull, "got %v", err)
 
-	assert.Equal(t, uint32(buflen-1), buffer.Count())
+	assert.Equal(t, buflen, buffer.Count())
 
-	for i := 0; i < buflen-1; i++ {
+	for i := 0; i < buflen; i++ {
 		_, err = buffer.Dequeue()
 		require.NoError(t, err)
-		assert.Equal(t, uint32(buflen-2-i), buffer.Count())
+		assert.Equal(t, buflen-1-i, buffer.Count())
 	}
 
 	_, err = buffer.Dequeue()
@@ -88,41 +89,41 @@ func TestRingCount(t *testing.T) {
 
 func TestRingReset(t *testing.T) {
 	buflen := 32
-	buffer, err := New[string](uint32(buflen))
+	buffer, err := New[string](buflen)
 	require.NotNil(t, buffer)
 	require.NoError(t, err)
 
 	// The other occupancy functions are checked along the way, so they need no tests of their own.
 	assert.True(t, buffer.Empty())
 	assert.False(t, buffer.Full())
-	assert.Equal(t, uint32(buflen-1), buffer.Free())
-	assert.Equal(t, uint32(0), buffer.Count())
+	assert.Equal(t, buflen, buffer.Free())
+	assert.Equal(t, 0, buffer.Count())
 
 	item := "test"
-	for i := 0; i < buflen-1; i++ {
+	for i := 0; i < buflen; i++ {
 		err = buffer.Enqueue(item)
 		require.NoError(t, err)
 
 		assert.False(t, buffer.Empty())
-		if i == buflen-2 {
+		if i == buflen-1 {
 			assert.True(t, buffer.Full())
 		} else {
 			assert.False(t, buffer.Full())
 		}
 
-		assert.Equal(t, uint32(buflen-2-i), buffer.Free())
-		assert.Equal(t, uint32(i+1), buffer.Count())
+		assert.Equal(t, buflen-1-i, buffer.Free())
+		assert.Equal(t, i+1, buffer.Count())
 	}
 
-	assert.Equal(t, uint32(buflen-1), buffer.Count())
-	assert.Equal(t, uint32(0), buffer.Free())
+	assert.Equal(t, buflen, buffer.Count())
+	assert.Equal(t, 0, buffer.Free())
 
 	buffer.Reset()
 
 	assert.True(t, buffer.Empty())
 	assert.False(t, buffer.Full())
-	assert.Equal(t, uint32(buflen-1), buffer.Free())
-	assert.Equal(t, uint32(0), buffer.Count())
+	assert.Equal(t, buflen, buffer.Free())
+	assert.Equal(t, 0, buffer.Count())
 
 	_, err = buffer.Dequeue()
 	assert.ErrorIs(t, err, ErrEmpty)
@@ -141,14 +142,14 @@ func TestSPSCRingBuffer(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, item, dequeuedItem)
 
-	for i := 0; i < 31; i++ {
+	for i := 0; i < 32; i++ {
 		err = buffer.Enqueue(item)
 		assert.NoError(t, err)
 	}
 	err = buffer.Enqueue(item)
 	assert.ErrorIs(t, err, ErrFull)
 
-	for i := 0; i < 31; i++ {
+	for i := 0; i < 32; i++ {
 		_, err = buffer.Dequeue()
 		require.NoError(t, err)
 	}
@@ -166,13 +167,13 @@ func TestSPMCRingBuffer(t *testing.T) {
 	require.NotNil(t, buffer)
 	require.NoError(t, err)
 
-	for i := 0; i < 31; i++ {
+	for i := 0; i < 32; i++ {
 		item := fmt.Sprintf("test-%d", i)
 		err = buffer.Enqueue(item)
 		require.NoError(t, err)
 	}
 
-	numDequeues := []int{8, 8, 8, 7}
+	numDequeues := []int{8, 8, 8, 8}
 	// mu guards dequeuedStrings, which every consumer writes.
 	var mu sync.Mutex
 
@@ -207,9 +208,9 @@ func TestMPSCRingBuffer(t *testing.T) {
 	require.NoError(t, err)
 
 	numWorkers := 4
-	numEnqueues := []int{8, 8, 8, 7}
+	numEnqueues := []int{8, 8, 8, 8}
 	testStrings := []string{}
-	for i := 0; i < 31; i++ {
+	for i := 0; i < 32; i++ {
 		testStrings = append(testStrings, fmt.Sprintf("test-%d", i))
 	}
 
@@ -231,7 +232,7 @@ func TestMPSCRingBuffer(t *testing.T) {
 	wg.Wait()
 
 	dequeuedStrings := map[string]struct{}{}
-	for i := 0; i < 31; i++ {
+	for i := 0; i < 32; i++ {
 		dequeuedItem, err := buffer.Dequeue()
 		require.NoError(t, err)
 
@@ -361,48 +362,48 @@ func isClosed(stop <-chan struct{}) bool {
 
 func TestRingBufferWraparound(t *testing.T) {
 	buflen := 32
-	buffer, err := New[uint32](uint32(buflen))
+	buffer, err := New[uint32](buflen)
 	require.NoError(t, err)
 	require.NotNil(t, buffer)
 
-	for i := 0; i < buflen-1; i++ {
+	for i := 0; i < buflen; i++ {
 		err = buffer.Enqueue(uint32(i))
 		require.NoError(t, err)
 	}
 
 	assert.True(t, buffer.Full())
 
-	err = buffer.Enqueue(uint32(buflen - 1))
+	err = buffer.Enqueue(uint32(buflen))
 	assert.ErrorIs(t, err, ErrFull)
 
 	_, err = buffer.Dequeue()
 	require.NoError(t, err)
 	assert.False(t, buffer.Full())
 
-	err = buffer.Enqueue(uint32(buflen - 1))
+	err = buffer.Enqueue(uint32(buflen))
 	assert.NoError(t, err)
 	assert.True(t, buffer.Full())
 }
 
 func TestRingBufferMultipleWraparounds(t *testing.T) {
 	buflen := 8
-	buffer, err := New[uint32](uint32(buflen))
+	buffer, err := New[uint32](buflen)
 	require.NoError(t, err)
 	require.NotNil(t, buffer)
 
 	numIterations := 5
 	for i := 0; i < numIterations; i++ {
-		for j := 0; j < buflen-1; j++ {
+		for j := 0; j < buflen; j++ {
 			err = buffer.Enqueue(uint32(i*buflen + j))
 			require.NoError(t, err)
 		}
 
 		assert.False(t, buffer.Empty())
 		assert.True(t, buffer.Full())
-		assert.Equal(t, uint32(0), buffer.Free())
-		assert.Equal(t, uint32(buflen-1), buffer.Count())
+		assert.Equal(t, 0, buffer.Free())
+		assert.Equal(t, buflen, buffer.Count())
 
-		for j := 0; j < buflen-1; j++ {
+		for j := 0; j < buflen; j++ {
 			item, err := buffer.Dequeue()
 			require.NoError(t, err)
 			assert.Equal(t, i*buflen+j, int(item))
@@ -410,8 +411,8 @@ func TestRingBufferMultipleWraparounds(t *testing.T) {
 
 		assert.True(t, buffer.Empty())
 		assert.False(t, buffer.Full())
-		assert.Equal(t, uint32(buflen-1), buffer.Free())
-		assert.Equal(t, uint32(0), buffer.Count())
+		assert.Equal(t, buflen, buffer.Free())
+		assert.Equal(t, 0, buffer.Count())
 	}
 }
 
@@ -507,19 +508,115 @@ func TestMPMC_ConsumerSeesOnlyPublishedValues(t *testing.T) {
 const outSentinel uint32 = 0xDEADBEEF
 
 func TestCapacity(t *testing.T) {
-	for _, count := range []uint32{2, 4, 8, 1024, 1 << 16} {
+	for _, count := range []int{2, 4, 8, 1024, 1 << 16} {
 		ring, err := New[int](count)
 		require.NoError(t, err)
-		assert.Equal(t, count-1, ring.Capacity(), "count %d", count)
+		assert.Equal(t, count, ring.Capacity(), "count %d", count)
 	}
 }
 
-func TestNewRejectsInvalidCount(t *testing.T) {
-	for _, count := range []uint32{0, 1, 3, 6, 13} {
-		ring, err := New[int](count)
-		assert.ErrorIs(t, err, ErrInvalidCount, "count %d", count)
-		assert.Nil(t, ring, "count %d", count)
+// TestNewBounds checks that New accepts the smallest and largest counts and rejects counts below
+// 1, above 2^30, or not a power of two. Elements are struct{}, so the largest ring costs no memory.
+func TestNewBounds(t *testing.T) {
+	for _, count := range []int{1, maxCount} {
+		ring, err := New[struct{}](count)
+		require.NoError(t, err, "count %d", count)
+		assert.Equal(t, count, ring.Capacity(), "count %d", count)
 	}
+
+	for _, count := range []int{0, -1, 3, 1000} {
+		assertInvalidCount(t, count)
+	}
+
+	t.Run("2^31", func(t *testing.T) {
+		if math.MaxInt < 1<<31 {
+			t.Skip("int cannot hold 2^31")
+		}
+		// The count is computed at run time, because the constant 2^31 does not compile where
+		// int is 32 bits.
+		count := maxCount
+		count *= 2
+		assertInvalidCount(t, count)
+	})
+}
+
+// assertInvalidCount checks that New rejects count with an error wrapping ErrInvalidCount.
+func assertInvalidCount(t *testing.T, count int) {
+	t.Helper()
+	ring, err := New[struct{}](count)
+	assert.ErrorIs(t, err, ErrInvalidCount, "count %d", count)
+	assert.True(t, ring == nil, "count %d", count)
+}
+
+// TestFullCapacity checks that a ring holds exactly its count, from starting indices on both
+// sides of 2^32, so the fill and the drain cross the wrap at different points.
+func TestFullCapacity(t *testing.T) {
+	for _, capacity := range []int{1, 2, 4, 1024} {
+		starts := []uint32{0, math.MaxUint32, math.MaxUint32 - uint32(capacity) + 1}
+		if capacity > 2 {
+			starts = append(starts, math.MaxUint32-uint32(capacity/2)+1)
+		}
+		for i, start := range starts {
+			// For capacity 1, the third start equals the second, so skip the repeat.
+			if slices.Index(starts, start) < i {
+				continue
+			}
+			t.Run(fmt.Sprintf("capacity=%d,start=%d", capacity, start), func(t *testing.T) {
+				ring, err := New[int](capacity)
+				require.NoError(t, err)
+				setIndices(ring, start)
+
+				for i := range capacity {
+					require.NoError(t, ring.Enqueue(i))
+				}
+				assert.True(t, ring.Full())
+				assert.Equal(t, 0, ring.Free())
+				assert.Equal(t, ring.Capacity(), ring.Count())
+				err = ring.Enqueue(capacity)
+				assert.True(t, err == ErrFull, "got %v", err)
+
+				for i := range capacity {
+					item, err := ring.Dequeue()
+					require.NoError(t, err)
+					assert.Equal(t, i, item)
+				}
+			})
+		}
+	}
+}
+
+// TestEmptyAgreesWithCount checks that Empty reports exactly when Count is 0, in every state a
+// ring with no concurrent activity passes through while it fills and drains. The start near 2^32
+// makes the indices wrap partway through.
+func TestEmptyAgreesWithCount(t *testing.T) {
+	const capacity = 8
+	for _, start := range []uint32{0, math.MaxUint32 - 2} {
+		t.Run(fmt.Sprintf("start=%d", start), func(t *testing.T) {
+			ring, err := New[int](capacity)
+			require.NoError(t, err)
+			setIndices(ring, start)
+
+			assertEmptyAgreesWithCount(t, ring)
+			for i := range capacity {
+				require.NoError(t, ring.Enqueue(i))
+				assertEmptyAgreesWithCount(t, ring)
+			}
+			require.True(t, ring.Full())
+			for range capacity {
+				_, err := ring.Dequeue()
+				require.NoError(t, err)
+				assertEmptyAgreesWithCount(t, ring)
+			}
+			assert.True(t, ring.Empty())
+		})
+	}
+}
+
+// assertEmptyAgreesWithCount checks that Empty reports whether Count is 0.
+func assertEmptyAgreesWithCount(t *testing.T, ring *Ring[int]) {
+	t.Helper()
+	count := ring.Count()
+	assert.Equal(t, count == 0, ring.Empty(), "count %d", count)
 }
 
 func TestEnqueueBulk(t *testing.T) {
@@ -527,25 +624,25 @@ func TestEnqueueBulk(t *testing.T) {
 	require.NoError(t, err)
 
 	freeSpace := outSentinel
-	err = ring.EnqueueBulk([]int{1, 2, 3, 4, 5}, 5, &freeSpace)
+	err = ring.EnqueueBulk([]int{1, 2, 3, 4, 5, 6}, 6, &freeSpace)
 	require.NoError(t, err)
 	assert.Equal(t, uint32(2), freeSpace)
-	assert.Equal(t, uint32(5), ring.Count())
+	assert.Equal(t, 6, ring.Count())
 
 	freeSpace = outSentinel
-	err = ring.EnqueueBulk([]int{6, 7, 8}, 3, &freeSpace)
+	err = ring.EnqueueBulk([]int{7, 8, 9}, 3, &freeSpace)
 	assert.True(t, err == ErrFull, "got %v", err)
 	assert.Equal(t, uint32(2), freeSpace)
-	assert.Equal(t, uint32(5), ring.Count())
+	assert.Equal(t, 6, ring.Count())
 
 	freeSpace = outSentinel
-	err = ring.EnqueueBulk([]int{6, 7}, 2, &freeSpace)
+	err = ring.EnqueueBulk([]int{7, 8}, 2, &freeSpace)
 	require.NoError(t, err)
 	assert.Equal(t, uint32(0), freeSpace)
 
-	elems, err := ring.DequeueBulk(7, nil)
+	elems, err := ring.DequeueBulk(8, nil)
 	require.NoError(t, err)
-	assert.Equal(t, []int{1, 2, 3, 4, 5, 6, 7}, elems)
+	assert.Equal(t, []int{1, 2, 3, 4, 5, 6, 7, 8}, elems)
 }
 
 func TestDequeueBulk(t *testing.T) {
@@ -558,7 +655,7 @@ func TestDequeueBulk(t *testing.T) {
 	assert.True(t, err == ErrEmpty, "got %v", err)
 	assert.Nil(t, elems)
 	assert.Equal(t, uint32(5), avail)
-	assert.Equal(t, uint32(5), ring.Count())
+	assert.Equal(t, 5, ring.Count())
 
 	avail = outSentinel
 	elems, err = ring.DequeueBulk(3, &avail)
@@ -586,18 +683,18 @@ func TestEnqueueBurst(t *testing.T) {
 
 	freeSpace := outSentinel
 	numEnqueued := ring.EnqueueBurst([]int{6, 7, 8, 9}, 4, &freeSpace)
-	assert.Equal(t, uint32(2), numEnqueued)
+	assert.Equal(t, uint32(3), numEnqueued)
 	assert.Equal(t, uint32(0), freeSpace)
-	assert.Equal(t, uint32(7), ring.Count())
+	assert.Equal(t, 8, ring.Count())
 
 	freeSpace = outSentinel
 	numEnqueued = ring.EnqueueBurst([]int{10}, 1, &freeSpace)
 	assert.Equal(t, uint32(0), numEnqueued)
 	assert.Equal(t, uint32(0), freeSpace)
 
-	elems, err := ring.DequeueBulk(7, nil)
+	elems, err := ring.DequeueBulk(8, nil)
 	require.NoError(t, err)
-	assert.Equal(t, []int{1, 2, 3, 4, 5, 6, 7}, elems)
+	assert.Equal(t, []int{1, 2, 3, 4, 5, 6, 7, 8}, elems)
 }
 
 func TestDequeueBurst(t *testing.T) {
@@ -661,8 +758,8 @@ func TestEnqueueBulkShortBatch(t *testing.T) {
 		freeSpace := outSentinel
 		err = ring.EnqueueBulk(batch, numElems, &freeSpace)
 		assert.ErrorIs(t, err, ErrShortBatch, "numElems %d", numElems)
-		assert.Equal(t, uint32(5), freeSpace, "numElems %d", numElems)
-		assert.Equal(t, uint32(2), ring.Count(), "numElems %d", numElems)
+		assert.Equal(t, uint32(6), freeSpace, "numElems %d", numElems)
+		assert.Equal(t, 2, ring.Count(), "numElems %d", numElems)
 		assertNoStrandedReservation(t, ring, numElems)
 	}
 }
@@ -679,7 +776,7 @@ func TestEnqueueBurstShortBatchPanics(t *testing.T) {
 			ring.EnqueueBurst(batch, numElems, &freeSpace)
 		}, "numElems %d", numElems)
 		assert.Equal(t, outSentinel, freeSpace, "numElems %d", numElems)
-		assert.Equal(t, uint32(2), ring.Count(), "numElems %d", numElems)
+		assert.Equal(t, 2, ring.Count(), "numElems %d", numElems)
 		assertNoStrandedReservation(t, ring, numElems)
 	}
 }
@@ -693,7 +790,7 @@ func assertNoStrandedReservation(t *testing.T, ring *Ring[int], numElems uint32)
 		"numElems %d", numElems)
 
 	require.NoError(t, ring.Enqueue(12), "numElems %d", numElems)
-	elems, err := ring.DequeueBulk(ring.Count(), nil)
+	elems, err := ring.DequeueBulk(uint32(ring.Count()), nil)
 	require.NoError(t, err, "numElems %d", numElems)
 	assert.Equal(t, []int{10, 11, 12}, elems, "numElems %d", numElems)
 }
@@ -702,38 +799,38 @@ func TestBatchExceedsCapacity(t *testing.T) {
 	ring, err := New[int](8)
 	require.NoError(t, err)
 	require.NoError(t, ring.EnqueueBulk([]int{1, 2}, 2, nil))
-	batch := []int{3, 4, 5, 6, 7, 8, 9, 10}
-	numElems := ring.Capacity() + 1
+	batch := []int{3, 4, 5, 6, 7, 8, 9, 10, 11}
+	numElems := uint32(ring.Capacity()) + 1
 
 	freeSpace := outSentinel
 	err = ring.EnqueueBulk(batch, numElems, &freeSpace)
 	assert.ErrorIs(t, err, ErrExceedsCapacity)
-	assert.Equal(t, uint32(5), freeSpace)
-	assert.Equal(t, uint32(2), ring.Count())
+	assert.Equal(t, uint32(6), freeSpace)
+	assert.Equal(t, 2, ring.Count())
 
 	avail := outSentinel
 	elems, err := ring.DequeueBulk(numElems, &avail)
 	assert.ErrorIs(t, err, ErrExceedsCapacity)
 	assert.Nil(t, elems)
 	assert.Equal(t, uint32(2), avail)
-	assert.Equal(t, uint32(2), ring.Count())
+	assert.Equal(t, 2, ring.Count())
 
 	freeSpace = outSentinel
 	numEnqueued := ring.EnqueueBurst(batch, numElems, &freeSpace)
-	assert.Equal(t, uint32(5), numEnqueued)
+	assert.Equal(t, uint32(6), numEnqueued)
 	assert.Equal(t, uint32(0), freeSpace)
 
 	avail = outSentinel
 	elems, numDequeued := ring.DequeueBurst(numElems, &avail)
-	assert.Equal(t, uint32(7), numDequeued)
-	assert.Equal(t, []int{1, 2, 3, 4, 5, 6, 7}, elems)
+	assert.Equal(t, uint32(8), numDequeued)
+	assert.Equal(t, []int{1, 2, 3, 4, 5, 6, 7, 8}, elems)
 	assert.Equal(t, uint32(0), avail)
 }
 
 func TestBulkCheckOrder(t *testing.T) {
 	ring, err := New[int](8)
 	require.NoError(t, err)
-	numElems := ring.Capacity() + 1
+	numElems := uint32(ring.Capacity()) + 1
 
 	// A short batch is reported before an oversized count.
 	err = ring.EnqueueBulk([]int{1, 2, 3}, numElems, nil)
@@ -746,7 +843,7 @@ func TestBulkCheckOrder(t *testing.T) {
 	assert.NotErrorIs(t, err, ErrEmpty)
 
 	// An oversized count is reported before a full ring.
-	require.NoError(t, ring.EnqueueBulk([]int{1, 2, 3, 4, 5, 6, 7}, 7, nil))
+	require.NoError(t, ring.EnqueueBulk([]int{1, 2, 3, 4, 5, 6, 7, 8}, 8, nil))
 	require.True(t, ring.Full())
 	err = ring.EnqueueBulk(make([]int, numElems), numElems, nil)
 	assert.ErrorIs(t, err, ErrExceedsCapacity)
@@ -769,7 +866,7 @@ func TestDequeueZeroCount(t *testing.T) {
 	assert.Equal(t, uint32(0), numDequeued)
 	assert.Nil(t, elems)
 	assert.Equal(t, uint32(2), avail)
-	assert.Equal(t, uint32(2), ring.Count())
+	assert.Equal(t, 2, ring.Count())
 }
 
 // TestIndexWrap places every index just below 2^32, so the uint32 indices overflow partway
@@ -785,11 +882,7 @@ func TestIndexWrap(t *testing.T) {
 			ring, err := New[int](8, options...)
 			require.NoError(t, err)
 			const startIndex = math.MaxUint32 - 2
-			for _, index := range []*uint32{
-				ring.prodHead, ring.prodTail, ring.consHead, ring.consTail,
-			} {
-				atomic.StoreUint32(index, startIndex)
-			}
+			setIndices(ring, startIndex)
 			assertOccupancy(t, ring, 0)
 
 			require.NoError(t, ring.Enqueue(1))
@@ -807,11 +900,11 @@ func TestIndexWrap(t *testing.T) {
 			// Only the producer indices have wrapped here, so the occupancy reported by a
 			// rejected call comes from indices on opposite sides of 2^32.
 			freeSpace := outSentinel
-			err = ring.EnqueueBulk(make([]int, 8), 8, &freeSpace)
+			err = ring.EnqueueBulk(make([]int, 9), 9, &freeSpace)
 			assert.ErrorIs(t, err, ErrExceedsCapacity)
-			assert.Equal(t, uint32(3), freeSpace)
+			assert.Equal(t, uint32(4), freeSpace)
 			avail := outSentinel
-			_, err = ring.DequeueBulk(8, &avail)
+			_, err = ring.DequeueBulk(9, &avail)
 			assert.ErrorIs(t, err, ErrExceedsCapacity)
 			assert.Equal(t, uint32(4), avail)
 			assertOccupancy(t, ring, 4)
@@ -820,12 +913,12 @@ func TestIndexWrap(t *testing.T) {
 			assert.Equal(t, []int{2}, elems)
 			assertOccupancy(t, ring, 3)
 
-			numEnqueued := ring.EnqueueBurst([]int{6, 7, 8, 9, 10}, 5, nil)
-			assert.Equal(t, uint32(4), numEnqueued)
-			assertOccupancy(t, ring, 7)
-			elems, numDequeued := ring.DequeueBurst(8, nil)
-			assert.Equal(t, uint32(7), numDequeued)
-			assert.Equal(t, []int{3, 4, 5, 6, 7, 8, 9}, elems)
+			numEnqueued := ring.EnqueueBurst([]int{6, 7, 8, 9, 10, 11}, 6, nil)
+			assert.Equal(t, uint32(5), numEnqueued)
+			assertOccupancy(t, ring, 8)
+			elems, numDequeued := ring.DequeueBurst(9, nil)
+			assert.Equal(t, uint32(8), numDequeued)
+			assert.Equal(t, []int{3, 4, 5, 6, 7, 8, 9, 10}, elems)
 			require.Less(t, atomic.LoadUint32(ring.consTail), uint32(startIndex))
 			assertOccupancy(t, ring, 0)
 		})
@@ -833,22 +926,29 @@ func TestIndexWrap(t *testing.T) {
 }
 
 // assertOccupancy checks that Count, Free, and Empty agree with the expected count.
-func assertOccupancy(t *testing.T, ring *Ring[int], count uint32) {
+func assertOccupancy(t *testing.T, ring *Ring[int], count int) {
 	t.Helper()
 	assert.Equal(t, count, ring.Count())
 	assert.Equal(t, ring.Capacity()-count, ring.Free())
 	assert.Equal(t, count == 0, ring.Empty())
 }
 
-func assertNewRing[T any](t *testing.T, ring *Ring[T], count uint32) {
+func assertNewRing[T any](t *testing.T, ring *Ring[T], count int) {
 	t.Helper()
 	assert.NotNil(t, ring.entries)
-	assert.Equal(t, count, ring.size)
-	assert.Equal(t, count-1, ring.mask)
-	assert.Equal(t, count-1, ring.capacity)
+	assert.Equal(t, uint32(count-1), ring.mask)
+	assert.Equal(t, count, ring.Capacity())
 
 	assert.Zero(t, *ring.prodHead)
 	assert.Zero(t, *ring.prodTail)
 	assert.Zero(t, *ring.consHead)
 	assert.Zero(t, *ring.consTail)
+}
+
+// setIndices places all four indices of an empty ring at start, so a test can run the ring across
+// the 2^32 wrap. It is the only test code that writes the indices.
+func setIndices[T any](ring *Ring[T], start uint32) {
+	for _, index := range []*uint32{ring.prodHead, ring.prodTail, ring.consHead, ring.consTail} {
+		atomic.StoreUint32(index, start)
+	}
 }

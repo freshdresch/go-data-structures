@@ -17,8 +17,8 @@ import (
 // before it yields the processor.
 const spinPolls = 64
 
-// ringCapacity is the number of slots every implementation is built with. Today's ring holds one
-// fewer, 1023, until the full-capacity change.
+// ringCapacity is the number of slots every implementation is built with, and the number of
+// elements each holds.
 const ringCapacity = 1024
 
 // multiWorkers is the number of goroutines on each multi side of a mode.

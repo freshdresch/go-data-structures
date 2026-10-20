@@ -367,7 +367,7 @@ func TestRingAPIAdapters(t *testing.T) {
 		q := &ringBulkQueue[int64]{ring: created}
 		assert.Equal(t, 3, q.enqueue([]int64{1, 2, 3}))
 		assert.Equal(t, 0, q.dequeue(make([]int64, 8)))
-		assert.Equal(t, uint32(3), created.Count())
+		assert.Equal(t, 3, created.Count())
 		assert.Equal(t, 3, q.dequeue(make([]int64, 3)))
 	})
 
@@ -376,7 +376,7 @@ func TestRingAPIAdapters(t *testing.T) {
 		require.NoError(t, err)
 		q := &ringSingleQueue[int64]{ring: created}
 		assert.Equal(t, 1, q.enqueue([]int64{1, 2}))
-		assert.Equal(t, uint32(1), created.Count())
+		assert.Equal(t, 1, created.Count())
 		assert.Equal(t, 1, q.dequeue(make([]int64, 4)))
 	})
 

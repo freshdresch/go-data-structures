@@ -4,14 +4,13 @@ package ring
 import (
 	"errors"
 	"fmt"
-	"math"
 	"runtime"
 	"sync/atomic"
 )
 
 // ErrInvalidCount is returned by New, wrapped, when the count is not a power of two, is less
-// than 2, or exceeds math.MaxInt.
-var ErrInvalidCount = errors.New("ring: count must be a power of two and at least 2")
+// than 1, or exceeds 2^30.
+var ErrInvalidCount = errors.New("ring: count must be a power of two between 1 and 2^30")
 
 // ErrFull is returned unwrapped by Enqueue and EnqueueBulk when the ring does not have enough
 // free slots for the request. The caller may retry.
@@ -46,8 +45,7 @@ var ErrExceedsCapacity = errors.New("ring: requested count exceeds the ring's ca
 // implementation: a pointer, or 4-byte boundary aligned element. Otherwise, an element could be
 // split between adjacent cache lines.
 //
-// The actual number of entries in the ring is *count - 1*, because the *count* entry is used to
-// determine whether the ring is empty or not.
+// The ring holds exactly count elements, where count is the count given to New.
 type Ring[T any] struct {
 	entries []T
 
@@ -57,9 +55,7 @@ type Ring[T any] struct {
 	consHead *uint32 // The head index for the consumer: used for reservation.
 	consTail *uint32 // The tail index for the consumer: used for publication.
 
-	size     uint32 // Backing array length.
-	mask     uint32 // Mask for bounding the index of the ring.
-	capacity uint32 // Usable slots in the ring.
+	mask uint32 // Mask for bounding the index of the ring.
 
 	multiProd bool // Multi-Producer enqueue instead of single.
 	multiCons bool // Multi-Consumer dequeue instead of single.
@@ -91,12 +87,16 @@ func WithMultiConsDequeue() Option {
 	}
 }
 
-// New returns an empty Ring with count slots, of which count - 1 are usable. Without options, the
-// ring allows one producer and one consumer at a time. It returns an error wrapping
-// ErrInvalidCount when count is not a power of two, is less than 2, or exceeds math.MaxInt.
-func New[T any](count uint32, options ...Option) (*Ring[T], error) {
+// maxCount is the largest count New accepts, the largest power of two DPDK accepts.
+const maxCount = 1 << 30
+
+// New returns an empty Ring with count slots. A ring of count n holds n elements. Without options,
+// the ring allows one producer and one consumer at a time. It returns an error wrapping
+// ErrInvalidCount when count is not a power of two between 1 and 2^30.
+func New[T any](count int, options ...Option) (*Ring[T], error) {
+	inRange := count >= 1 && count <= maxCount
 	isPowerOfTwo := count&(count-1) == 0
-	if count < 2 || !isPowerOfTwo || uint64(count) > uint64(math.MaxInt) {
+	if !inRange || !isPowerOfTwo {
 		return nil, fmt.Errorf("new ring with count %d: %w", count, ErrInvalidCount)
 	}
 
@@ -105,12 +105,9 @@ func New[T any](count uint32, options ...Option) (*Ring[T], error) {
 		option(&cfg)
 	}
 
-	mask := count - 1
 	ring := &Ring[T]{
-		entries:   make([]T, int(count)),
-		size:      count,
-		mask:      mask,
-		capacity:  mask,
+		entries:   make([]T, count),
+		mask:      uint32(count - 1),
 		prodHead:  new(uint32),
 		prodTail:  new(uint32),
 		consHead:  new(uint32),
@@ -121,10 +118,15 @@ func New[T any](count uint32, options ...Option) (*Ring[T], error) {
 	return ring, nil
 }
 
-// Capacity returns the number of usable slots in the ring, which is one less than the count
-// given to New.
-func (r *Ring[T]) Capacity() uint32 {
-	return r.capacity
+// Capacity returns the number of elements the ring holds, which is the count given to New.
+func (r *Ring[T]) Capacity() int {
+	return int(r.capacity())
+}
+
+// capacity returns the number of elements the ring holds as a uint32, for the index arithmetic.
+// The count is a power of two, so it is one more than the mask.
+func (r *Ring[T]) capacity() uint32 {
+	return r.mask + 1
 }
 
 // Reset empties the ring by resetting its indices.
@@ -142,31 +144,41 @@ func (r *Ring[T]) Reset() {
 }
 
 // Count returns the number of occupied entries in the ring.
-func (r *Ring[T]) Count() uint32 {
-	prodTail := atomic.LoadUint32(r.prodTail)
+//
+// Unlike DPDK's rte_ring_count, it does not mask the difference of the tails. The ring holds
+// exactly Capacity elements, so a full ring's difference equals the capacity, and masking it would
+// report a full ring as empty.
+//
+// It loads the consumer tail before the producer tail. The producer tail only grows and is never
+// behind the consumer tail, so the producer tail loaded second is never behind the consumer tail
+// loaded first, and the difference cannot underflow. Loading them in the other order lets
+// consumers pass the producer tail that was read, and the underflow would report a nearly empty
+// ring as full.
+//
+// Under concurrency the result is a snapshot. Dequeues that complete between the two loads, with
+// the enqueues that refill the ring, can make it report more entries than the ring holds. It never
+// exceeds Capacity.
+func (r *Ring[T]) Count() int {
 	consTail := atomic.LoadUint32(r.consTail)
-	count := prodTail - consTail
-	if count > r.capacity {
-		return r.capacity
-	}
-	return count
+	prodTail := atomic.LoadUint32(r.prodTail)
+	return int(min(prodTail-consTail, r.capacity()))
 }
 
-// Free returns the number of empty entries in the ring.
-func (r *Ring[T]) Free() uint32 {
-	return r.capacity - r.Count()
+// Free returns the number of empty slots in the ring. It derives from Count, so under concurrency
+// it can report the ring as fuller than it is.
+func (r *Ring[T]) Free() int {
+	return r.Capacity() - r.Count()
 }
 
-// Full reports whether the ring is full.
+// Full reports whether the ring is full. It derives from Count, so under concurrency it can report
+// the ring as fuller than it is.
 func (r *Ring[T]) Full() bool {
 	return r.Free() == 0
 }
 
-// Empty reports whether the ring is empty.
+// Empty reports whether the ring is empty, which is whether Count reports 0.
 func (r *Ring[T]) Empty() bool {
-	prodTail := atomic.LoadUint32(r.prodTail)
-	consTail := atomic.LoadUint32(r.consTail)
-	return consTail == prodTail
+	return r.Count() == 0
 }
 
 // Enqueue places one element in the ring. It returns ErrFull, unwrapped, when the ring has no
@@ -212,12 +224,12 @@ func (r *Ring[T]) EnqueueBulk(
 			ErrShortBatch,
 		)
 	}
-	if numElems > r.capacity {
+	if numElems > r.capacity() {
 		updateValidPtr(freeSpace, r.freeEntries())
 		return fmt.Errorf(
 			"enqueue %d elements, capacity %d: %w",
 			numElems,
-			r.capacity,
+			r.capacity(),
 			ErrExceedsCapacity,
 		)
 	}
@@ -286,12 +298,12 @@ func (r *Ring[T]) DequeueBulk(
 	numElems uint32,
 	avail *uint32,
 ) ([]T, error) {
-	if numElems > r.capacity {
+	if numElems > r.capacity() {
 		updateValidPtr(avail, r.occupiedEntries())
 		return nil, fmt.Errorf(
 			"dequeue %d elements, capacity %d: %w",
 			numElems,
-			r.capacity,
+			r.capacity(),
 			ErrExceedsCapacity,
 		)
 	}
@@ -343,7 +355,7 @@ func (r *Ring[T]) doEnqueue(
 	}
 
 	base := head & r.mask
-	end := r.size - base
+	end := r.capacity() - base
 	if end > numEntries {
 		end = numEntries
 	}
@@ -392,7 +404,7 @@ func (r *Ring[T]) doDequeue(
 	elems := make([]T, int(numElems))
 
 	base := head & r.mask
-	end := r.size - base
+	end := r.capacity() - base
 	if end > numElems {
 		end = numElems
 	}
@@ -437,7 +449,7 @@ func (r *Ring[T]) moveProdHead(
 	newHead *uint32,
 	fixed bool,
 ) (uint32, uint32) {
-	capacity := r.capacity
+	capacity := r.capacity()
 	maxItems := numItems
 
 	for {
@@ -546,8 +558,9 @@ func updateValidPtr(ptr *uint32, val uint32) {
 // overshoot.
 func (r *Ring[T]) freeEntries() uint32 {
 	head := atomic.LoadUint32(r.prodHead)
-	free := r.capacity + atomic.LoadUint32(r.consTail) - head
-	return min(free, r.capacity)
+	capacity := r.capacity()
+	free := capacity + atomic.LoadUint32(r.consTail) - head
+	return min(free, capacity)
 }
 
 // occupiedEntries returns the number of entries a consumer could reserve right now. It loads the
@@ -557,5 +570,5 @@ func (r *Ring[T]) freeEntries() uint32 {
 func (r *Ring[T]) occupiedEntries() uint32 {
 	head := atomic.LoadUint32(r.consHead)
 	occupied := atomic.LoadUint32(r.prodTail) - head
-	return min(occupied, r.capacity)
+	return min(occupied, r.capacity())
 }

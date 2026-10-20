@@ -66,7 +66,7 @@ func testAllocs[T any](t *testing.T, fill fillFunc[T]) {
 
 			t.Run("errFull", func(t *testing.T) {
 				created, enqueue, _ := newAllocRing(t, api, elems)
-				fillRing(t, created, fill, int(created.Capacity()))
+				fillRing(t, created, fill, created.Capacity())
 				allocs, moved := measureAllocs(enqueue)
 				assert.Zero(t, moved)
 				assert.Zero(t, allocs)

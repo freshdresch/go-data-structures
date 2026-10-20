@@ -21,7 +21,7 @@ var ErrFull = errors.New("ring: not enough free slots")
 var ErrEmpty = errors.New("ring: not enough occupied entries")
 
 // ErrExceedsCapacity is returned wrapped by EnqueueBulk when len(items) exceeds the ring's
-// capacity, and by DequeueBulk when numElems does. Such a request can never succeed, so retrying
+// capacity, and by DequeueBulk when len(dst) does. Such a request can never succeed, so retrying
 // it is pointless.
 var ErrExceedsCapacity = errors.New("ring: requested count exceeds the ring's capacity")
 
@@ -31,7 +31,7 @@ var ErrExceedsCapacity = errors.New("ring: requested count exceeds the ring's ca
 var ErrInvalidMaxBatch = errors.New("ring: max batch must be between 1 and the ring's count")
 
 // ErrExceedsMaxBatch is returned wrapped by EnqueueBulk when len(items) exceeds the ring's maximum
-// enqueue batch size, and by DequeueBulk when numElems exceeds its maximum dequeue batch size,
+// enqueue batch size, and by DequeueBulk when len(dst) exceeds its maximum dequeue batch size,
 // while still fitting the capacity. Such a request can never succeed, so retrying it is
 // pointless.
 var ErrExceedsMaxBatch = errors.New("ring: requested count exceeds the ring's maximum batch size")
@@ -342,66 +342,60 @@ func (r *Ring[T]) EnqueueBurst(items []T) (enqueued, free int) {
 // Dequeue is safe for concurrent use with other dequeues only when the ring was created with
 // WithMultiConsDequeue. It is always safe to run alongside enqueues.
 func (r *Ring[T]) Dequeue() (T, error) {
-	elems, numDequeued := r.doDequeue(1, nil, true)
-	if numDequeued != 1 {
+	var dst [1]T
+	dequeued, _ := r.doDequeue(dst[:], true)
+	if dequeued == 0 {
 		var zero T
 		return zero, ErrEmpty
 	}
-	return elems[0], nil
+	return dst[0], nil
 }
 
-// DequeueBulk removes and returns the numElems oldest elements in the ring. Either all of them are
-// dequeued and it returns them with a nil error, or none are and it returns a nil slice and an
-// error.
+// DequeueBulk removes the len(dst) oldest elements in the ring and copies them into dst, oldest
+// first, or removes none of them. It returns nil when all are dequeued. A zero-length dst succeeds
+// and dequeues nothing.
 //
-// It checks, in order, that numElems is at most Capacity, that it is at most MaxDequeueBatch, and
-// that the ring has numElems occupied entries. The first failing check decides the error. These
+// It checks, in order, that len(dst) is at most Capacity, that it is at most MaxDequeueBatch, and
+// that the ring has len(dst) occupied entries. The first failing check decides the error. These
 // return an error wrapping ErrExceedsCapacity, an error wrapping ErrExceedsMaxBatch, and ErrEmpty
-// unwrapped. A failed call leaves the ring unchanged. A numElems of zero succeeds with a nil
-// slice.
+// unwrapped. A failed call leaves the ring and all of dst unchanged.
 //
-// If avail is non-nil, it is written on every return with the number of occupied entries after
-// the call.
+// available is returned on every path, errors included. It is the number of occupied entries after
+// the call, between 0 and Capacity inclusive.
 //
 // DequeueBulk is safe for concurrent use with other dequeues only when the ring was created with
 // WithMultiConsDequeue. It is always safe to run alongside enqueues.
-func (r *Ring[T]) DequeueBulk(
-	numElems uint32,
-	avail *uint32,
-) ([]T, error) {
+func (r *Ring[T]) DequeueBulk(dst []T) (available int, err error) {
 	// The limit is at most the capacity, so one comparison guards both checks on the success
-	// path.
-	if numElems > r.maxDequeueBatch {
-		updateValidPtr(avail, r.occupiedEntries())
-		return nil, r.bulkLengthError("dequeue", uint64(numElems), r.maxDequeueBatch)
+	// path. It is in int, so a length beyond the uint32 range cannot truncate.
+	if len(dst) > int(r.maxDequeueBatch) {
+		return int(r.occupiedEntries()), r.bulkLengthError("dequeue", uint64(len(dst)),
+			r.maxDequeueBatch)
 	}
 
-	elems, numDequeued := r.doDequeue(numElems, avail, true)
-	if numDequeued != numElems {
-		return nil, ErrEmpty
+	dequeued, availableAfter := r.doDequeue(dst, true)
+	if int(dequeued) != len(dst) {
+		return int(availableAfter), ErrEmpty
 	}
-	return elems, nil
+	return int(availableAfter), nil
 }
 
-// DequeueBurst removes and returns up to numElems of the oldest elements in the ring, taking all
-// of them when the ring does not have enough, and never more than MaxDequeueBatch. It returns the
-// elements and their count, which is between 0 and numElems inclusive. When nothing is dequeued,
-// including for a numElems of zero, the slice is nil.
+// DequeueBurst removes up to len(dst) of the oldest elements, as many as the ring holds, and never
+// more than MaxDequeueBatch, and copies them into the front of dst, oldest first. It returns the
+// number dequeued, between 0 and len(dst) inclusive. It writes only dst[:dequeued] and leaves the
+// rest of dst unchanged. A zero-length dst dequeues nothing.
 //
-// If avail is non-nil, it is written on every return with the number of occupied entries after
-// the call.
+// available is returned on every path. It is the number of occupied entries after the call,
+// between 0 and Capacity inclusive.
 //
 // DequeueBurst is safe for concurrent use with other dequeues only when the ring was created with
 // WithMultiConsDequeue. It is always safe to run alongside enqueues.
-func (r *Ring[T]) DequeueBurst(
-	numElems uint32,
-	avail *uint32,
-) ([]T, uint32) {
-	return r.doDequeue(
-		min(numElems, r.maxDequeueBatch),
-		avail,
-		false,
-	)
+func (r *Ring[T]) DequeueBurst(dst []T) (dequeued, available int) {
+	// Clamping in int keeps a slice longer than 2^32 from truncating when its length becomes a
+	// uint32 in doDequeue. The limit is at most the capacity, so it bounds both.
+	clamped := min(len(dst), int(r.maxDequeueBatch))
+	moved, availableAfter := r.doDequeue(dst[:clamped], false)
+	return int(moved), int(availableAfter)
 }
 
 // bulkLengthError returns the error for a bulk call that asked to move length elements, more than
@@ -470,39 +464,43 @@ func (r *Ring[T]) doEnqueue(items []T, fixed bool) (enqueued, free uint32) {
 	return numEntries, freeBefore - numEntries
 }
 
-func (r *Ring[T]) doDequeue(
-	numElems uint32,
-	avail *uint32,
-	fixed bool,
-) ([]T, uint32) {
+// doDequeue removes elements from the ring and copies them into the front of dst, oldest first.
+// fixed is true for a bulk dequeue, which fills all of dst or nothing. It returns the number
+// dequeued and the number of occupied entries after the call, which is at most the capacity. It
+// writes only dst[:dequeued] and never allocates.
+//
+// Callers pass a slice whose length is already at most the capacity, so converting len(dst) to
+// uint32 cannot truncate.
+func (r *Ring[T]) doDequeue(dst []T, fixed bool) (dequeued, available uint32) {
 	var (
 		head uint32
 		next uint32
 	)
 
 	// get the number of entries that we can actually dequeue
-	numElems, filled := r.moveConsHead(numElems, &head, &next, fixed)
-	if numElems == 0 {
-		updateValidPtr(avail, filled)
-		return nil, uint32(0)
+	numEntries, availableBefore := r.moveConsHead(uint32(len(dst)), &head, &next, fixed)
+	if numEntries == 0 {
+		// Without a reservation the consumer head moveConsHead read may be stale, so the count
+		// can overshoot the capacity. With a reservation the head was current when the producer
+		// tail was loaded, because the single consumer owns the head or the multi-consumer CAS
+		// succeeded on it, so tail - head is already between 0 and the capacity.
+		return 0, min(availableBefore, r.capacity())
 	}
-
-	elems := make([]T, int(numElems))
 
 	base := head & r.mask
 	end := r.capacity() - base
-	if end > numElems {
-		end = numElems
+	if end > numEntries {
+		end = numEntries
 	}
 
-	// dequeue the elements -- first chunk
+	// dequeue the elements -- first contiguous chunk
 	for i := uint32(0); i < end; i++ {
-		elems[int(i)] = r.entries[int(base+i)]
+		dst[int(i)] = r.entries[int(base+i)]
 	}
 
 	// second chunk if wrapped
-	for i := end; i < numElems; i++ {
-		elems[int(i)] = r.entries[int(i-end)]
+	for i := end; i < numEntries; i++ {
+		dst[int(i)] = r.entries[int(i-end)]
 	}
 
 	// ensure in-order consumption
@@ -515,8 +513,7 @@ func (r *Ring[T]) doDequeue(
 	// update the tail after a successful dequeue
 	atomic.StoreUint32(r.consTail, next)
 
-	updateValidPtr(avail, filled-numElems)
-	return elems, numElems
+	return numEntries, availableBefore - numEntries
 }
 
 // moveProdHead moves the ring's producer head for an enqueue operation.
@@ -629,13 +626,6 @@ func (r *Ring[T]) moveConsHead(
 		*newHead = next
 		return numItems, filled
 	}
-}
-
-func updateValidPtr(ptr *uint32, val uint32) {
-	if ptr == nil {
-		return
-	}
-	*ptr = val
 }
 
 // freeEntries returns the number of slots a producer could reserve right now. It loads the

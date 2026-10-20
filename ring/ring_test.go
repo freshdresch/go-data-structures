@@ -504,9 +504,6 @@ func TestMPMC_ConsumerSeesOnlyPublishedValues(t *testing.T) {
 	assert.Contains(t, set, 2)
 }
 
-// outSentinel pre-fills an out-parameter so a test can tell that the call overwrote it.
-const outSentinel uint32 = 0xDEADBEEF
-
 func TestCapacity(t *testing.T) {
 	for _, count := range []int{2, 4, 8, 1024, 1 << 16} {
 		ring, err := New[int](count)
@@ -644,7 +641,8 @@ func TestEnqueueBulk(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, free)
 
-	elems, err := ring.DequeueBulk(8, nil)
+	elems := make([]int, 8)
+	_, err = ring.DequeueBulk(elems)
 	require.NoError(t, err)
 	assert.Equal(t, []int{1, 2, 3, 4, 5, 6, 7, 8}, elems)
 }
@@ -654,30 +652,26 @@ func TestDequeueBulk(t *testing.T) {
 	require.NoError(t, err)
 	requireEnqueueBulk(t, ring, []int{1, 2, 3, 4, 5})
 
-	avail := outSentinel
-	elems, err := ring.DequeueBulk(6, &avail)
+	available, err := ring.DequeueBulk(make([]int, 6))
 	assert.True(t, err == ErrEmpty, "got %v", err)
-	assert.Nil(t, elems)
-	assert.Equal(t, uint32(5), avail)
+	assert.Equal(t, 5, available)
 	assert.Equal(t, 5, ring.Count())
 
-	avail = outSentinel
-	elems, err = ring.DequeueBulk(3, &avail)
+	elems := make([]int, 3)
+	available, err = ring.DequeueBulk(elems)
 	require.NoError(t, err)
 	assert.Equal(t, []int{1, 2, 3}, elems)
-	assert.Equal(t, uint32(2), avail)
+	assert.Equal(t, 2, available)
 
-	avail = outSentinel
-	elems, err = ring.DequeueBulk(2, &avail)
+	elems = make([]int, 2)
+	available, err = ring.DequeueBulk(elems)
 	require.NoError(t, err)
 	assert.Equal(t, []int{4, 5}, elems)
-	assert.Equal(t, uint32(0), avail)
+	assert.Equal(t, 0, available)
 
-	avail = outSentinel
-	elems, err = ring.DequeueBulk(1, &avail)
+	available, err = ring.DequeueBulk(make([]int, 1))
 	assert.True(t, err == ErrEmpty, "got %v", err)
-	assert.Nil(t, elems)
-	assert.Equal(t, uint32(0), avail)
+	assert.Equal(t, 0, available)
 }
 
 func TestEnqueueBurst(t *testing.T) {
@@ -694,7 +688,8 @@ func TestEnqueueBurst(t *testing.T) {
 	assert.Equal(t, 0, enqueued)
 	assert.Equal(t, 0, free)
 
-	elems, err := ring.DequeueBulk(8, nil)
+	elems := make([]int, 8)
+	_, err = ring.DequeueBulk(elems)
 	require.NoError(t, err)
 	assert.Equal(t, []int{1, 2, 3, 4, 5, 6, 7, 8}, elems)
 }
@@ -704,17 +699,15 @@ func TestDequeueBurst(t *testing.T) {
 	require.NoError(t, err)
 	requireEnqueueBulk(t, ring, []int{1, 2, 3})
 
-	avail := outSentinel
-	elems, numDequeued := ring.DequeueBurst(5, &avail)
-	assert.Equal(t, uint32(3), numDequeued)
-	assert.Equal(t, []int{1, 2, 3}, elems)
-	assert.Equal(t, uint32(0), avail)
+	elems := make([]int, 5)
+	dequeued, available := ring.DequeueBurst(elems)
+	assert.Equal(t, 3, dequeued)
+	assert.Equal(t, []int{1, 2, 3}, elems[:dequeued])
+	assert.Equal(t, 0, available)
 
-	avail = outSentinel
-	elems, numDequeued = ring.DequeueBurst(2, &avail)
-	assert.Equal(t, uint32(0), numDequeued)
-	assert.Nil(t, elems)
-	assert.Equal(t, uint32(0), avail)
+	dequeued, available = ring.DequeueBurst(make([]int, 2))
+	assert.Equal(t, 0, dequeued)
+	assert.Equal(t, 0, available)
 }
 
 // advanceRing moves the indices of an empty ring forward by steps slots, leaving it empty.
@@ -737,7 +730,8 @@ func TestBatchCopyCrossesEndOfBackingArray(t *testing.T) {
 	advanceRing(t, ring, 6)
 	require.Equal(t, uint32(6), atomic.LoadUint32(ring.prodHead)&ring.mask)
 	requireEnqueueBulk(t, ring, batch)
-	elems, err := ring.DequeueBulk(5, nil)
+	elems := make([]int, 5)
+	_, err = ring.DequeueBulk(elems)
 	require.NoError(t, err)
 	assert.Equal(t, batch, elems)
 
@@ -745,8 +739,9 @@ func TestBatchCopyCrossesEndOfBackingArray(t *testing.T) {
 	require.Equal(t, uint32(6), atomic.LoadUint32(ring.prodHead)&ring.mask)
 	enqueued, _ := ring.EnqueueBurst(batch)
 	assert.Equal(t, 5, enqueued)
-	elems, numDequeued := ring.DequeueBurst(5, nil)
-	assert.Equal(t, uint32(5), numDequeued)
+	elems = make([]int, 5)
+	dequeued, _ := ring.DequeueBurst(elems)
+	assert.Equal(t, 5, dequeued)
 	assert.Equal(t, batch, elems)
 	assert.True(t, ring.Empty())
 }
@@ -756,45 +751,42 @@ func TestBatchExceedsCapacity(t *testing.T) {
 	require.NoError(t, err)
 	requireEnqueueBulk(t, ring, []int{1, 2})
 	batch := []int{3, 4, 5, 6, 7, 8, 9, 10, 11}
-	numElems := uint32(ring.Capacity()) + 1
+	elems := make([]int, ring.Capacity()+1)
 
 	free, err := ring.EnqueueBulk(batch)
 	assert.ErrorIs(t, err, ErrExceedsCapacity)
 	assert.Equal(t, 6, free)
 	assert.Equal(t, 2, ring.Count())
 
-	avail := outSentinel
-	elems, err := ring.DequeueBulk(numElems, &avail)
+	available, err := ring.DequeueBulk(elems)
 	assert.ErrorIs(t, err, ErrExceedsCapacity)
-	assert.Nil(t, elems)
-	assert.Equal(t, uint32(2), avail)
+	assert.Equal(t, 2, available)
 	assert.Equal(t, 2, ring.Count())
 
 	enqueued, free := ring.EnqueueBurst(batch)
 	assert.Equal(t, 6, enqueued)
 	assert.Equal(t, 0, free)
 
-	avail = outSentinel
-	elems, numDequeued := ring.DequeueBurst(numElems, &avail)
-	assert.Equal(t, uint32(8), numDequeued)
-	assert.Equal(t, []int{1, 2, 3, 4, 5, 6, 7, 8}, elems)
-	assert.Equal(t, uint32(0), avail)
+	dequeued, available := ring.DequeueBurst(elems)
+	assert.Equal(t, 8, dequeued)
+	assert.Equal(t, []int{1, 2, 3, 4, 5, 6, 7, 8}, elems[:dequeued])
+	assert.Equal(t, 0, available)
 }
 
 func TestBulkCheckOrder(t *testing.T) {
 	ring, err := New[int](8)
 	require.NoError(t, err)
-	numElems := uint32(ring.Capacity()) + 1
+	length := ring.Capacity() + 1
 
 	// An oversized count is reported before an empty ring.
-	_, err = ring.DequeueBulk(numElems, nil)
+	_, err = ring.DequeueBulk(make([]int, length))
 	assert.ErrorIs(t, err, ErrExceedsCapacity)
 	assert.NotErrorIs(t, err, ErrEmpty)
 
 	// An oversized count is reported before a full ring.
 	requireEnqueueBulk(t, ring, []int{1, 2, 3, 4, 5, 6, 7, 8})
 	require.True(t, ring.Full())
-	_, err = ring.EnqueueBulk(make([]int, numElems))
+	_, err = ring.EnqueueBulk(make([]int, length))
 	assert.ErrorIs(t, err, ErrExceedsCapacity)
 	assert.NotErrorIs(t, err, ErrFull)
 }
@@ -879,23 +871,118 @@ func TestEnqueueLongSlice(t *testing.T) {
 	assert.Equal(t, 1024, ring.Count())
 }
 
-func TestDequeueZeroCount(t *testing.T) {
+// TestDequeueZeroLength checks that both batch dequeues accept an empty slice, move nothing, and
+// return the current available count.
+func TestDequeueZeroLength(t *testing.T) {
 	ring, err := New[int](8)
 	require.NoError(t, err)
 	requireEnqueueBulk(t, ring, []int{1, 2})
 
-	avail := outSentinel
-	elems, err := ring.DequeueBulk(0, &avail)
+	available, err := ring.DequeueBulk([]int{})
 	assert.NoError(t, err)
-	assert.Nil(t, elems)
-	assert.Equal(t, uint32(2), avail)
-
-	avail = outSentinel
-	elems, numDequeued := ring.DequeueBurst(0, &avail)
-	assert.Equal(t, uint32(0), numDequeued)
-	assert.Nil(t, elems)
-	assert.Equal(t, uint32(2), avail)
+	assert.Equal(t, 2, available)
 	assert.Equal(t, 2, ring.Count())
+
+	dequeued, available := ring.DequeueBurst([]int{})
+	assert.Equal(t, 0, dequeued)
+	assert.Equal(t, 2, available)
+	assert.Equal(t, 2, ring.Count())
+}
+
+// TestDequeueLeavesDst checks that DequeueBurst writes only the part of dst it dequeues into, and
+// that a failed DequeueBulk writes none of dst.
+func TestDequeueLeavesDst(t *testing.T) {
+	// dstSentinel pre-fills dst so the test can tell which slots a call wrote.
+	const dstSentinel = -1
+	ring, err := New[int](8)
+	require.NoError(t, err)
+	requireEnqueueBulk(t, ring, []int{1, 2, 3})
+
+	dst := slices.Repeat([]int{dstSentinel}, 5)
+	dequeued, _ := ring.DequeueBurst(dst)
+	assert.Equal(t, 3, dequeued)
+	assert.Equal(t, []int{1, 2, 3, dstSentinel, dstSentinel}, dst)
+
+	requireEnqueueBulk(t, ring, []int{4, 5})
+	dst = slices.Repeat([]int{dstSentinel}, 3)
+	_, err = ring.DequeueBulk(dst)
+	assert.True(t, err == ErrEmpty, "got %v", err)
+	assert.Equal(t, slices.Repeat([]int{dstSentinel}, 3), dst)
+
+	dst = slices.Repeat([]int{dstSentinel}, ring.Capacity()+1)
+	_, err = ring.DequeueBulk(dst)
+	assert.ErrorIs(t, err, ErrExceedsCapacity)
+	assert.Equal(t, slices.Repeat([]int{dstSentinel}, ring.Capacity()+1), dst)
+	assert.Equal(t, 2, ring.Count())
+}
+
+// TestDequeueErrorCounts checks the available count DequeueBulk returns with each error on a ring
+// that is partly full.
+func TestDequeueErrorCounts(t *testing.T) {
+	ring, err := New[int](8)
+	require.NoError(t, err)
+	requireEnqueueBulk(t, ring, []int{1, 2, 3, 4, 5})
+
+	available, err := ring.DequeueBulk(make([]int, 6))
+	assert.True(t, err == ErrEmpty, "got %v", err)
+	assert.Equal(t, 5, available)
+
+	available, err = ring.DequeueBulk(make([]int, ring.Capacity()+1))
+	assert.ErrorIs(t, err, ErrExceedsCapacity)
+	assert.Equal(t, 5, available)
+	assert.Equal(t, 5, ring.Count())
+}
+
+// TestDequeueCapacityBoundary checks that DequeueBulk accepts exactly Capacity elements from a
+// full ring and rejects one more as exceeding the capacity.
+func TestDequeueCapacityBoundary(t *testing.T) {
+	items := []int{1, 2, 3, 4, 5, 6, 7, 8}
+	ring, err := New[int](8)
+	require.NoError(t, err)
+	requireEnqueueBulk(t, ring, items)
+	dst := make([]int, ring.Capacity())
+	available, err := ring.DequeueBulk(dst)
+	assert.NoError(t, err)
+	assert.Equal(t, 0, available)
+	assert.Equal(t, items, dst)
+	assert.True(t, ring.Empty())
+
+	ring, err = New[int](8)
+	require.NoError(t, err)
+	requireEnqueueBulk(t, ring, items)
+	available, err = ring.DequeueBulk(make([]int, ring.Capacity()+1))
+	assert.ErrorIs(t, err, ErrExceedsCapacity)
+	assert.Equal(t, ring.Capacity(), available)
+	assert.True(t, ring.Full())
+}
+
+// TestDequeueLongSlice checks that a slice longer than 2^32 does not truncate to a short count.
+// Its length, 2^32 + 1, would truncate to 1 as a uint32. Elements are struct{}, so the slice
+// costs no memory.
+func TestDequeueLongSlice(t *testing.T) {
+	if math.MaxInt < 1<<32 {
+		t.Skip("int cannot hold 2^32 + 1")
+	}
+	// The length is computed at run time, because the constant 2^32 + 1 does not compile where
+	// int is 32 bits.
+	length := maxCount
+	length *= 4
+	length++
+	dst := make([]struct{}, length)
+
+	ring, err := New[struct{}](1024)
+	require.NoError(t, err)
+	_, err = ring.EnqueueBulk(make([]struct{}, 1024))
+	require.NoError(t, err)
+
+	available, err := ring.DequeueBulk(dst)
+	assert.ErrorIs(t, err, ErrExceedsCapacity)
+	assert.Equal(t, 1024, available)
+
+	dequeued, available := ring.DequeueBurst(dst)
+	assert.Equal(t, 1024, dequeued)
+	assert.Equal(t, 0, available)
+	assert.True(t, ring.Empty())
 }
 
 // TestIndexWrap places every index just below 2^32, so the uint32 indices overflow partway
@@ -931,12 +1018,12 @@ func TestIndexWrap(t *testing.T) {
 			free, err := ring.EnqueueBulk(make([]int, 9))
 			assert.ErrorIs(t, err, ErrExceedsCapacity)
 			assert.Equal(t, 4, free)
-			avail := outSentinel
-			_, err = ring.DequeueBulk(9, &avail)
+			available, err := ring.DequeueBulk(make([]int, 9))
 			assert.ErrorIs(t, err, ErrExceedsCapacity)
-			assert.Equal(t, uint32(4), avail)
+			assert.Equal(t, 4, available)
 			assertOccupancy(t, ring, 4)
-			elems, err := ring.DequeueBulk(1, nil)
+			elems := make([]int, 1)
+			_, err = ring.DequeueBulk(elems)
 			require.NoError(t, err)
 			assert.Equal(t, []int{2}, elems)
 			assertOccupancy(t, ring, 3)
@@ -944,9 +1031,10 @@ func TestIndexWrap(t *testing.T) {
 			enqueued, _ := ring.EnqueueBurst([]int{6, 7, 8, 9, 10, 11})
 			assert.Equal(t, 5, enqueued)
 			assertOccupancy(t, ring, 8)
-			elems, numDequeued := ring.DequeueBurst(9, nil)
-			assert.Equal(t, uint32(8), numDequeued)
-			assert.Equal(t, []int{3, 4, 5, 6, 7, 8, 9, 10}, elems)
+			elems = make([]int, 9)
+			dequeued, _ := ring.DequeueBurst(elems)
+			assert.Equal(t, 8, dequeued)
+			assert.Equal(t, []int{3, 4, 5, 6, 7, 8, 9, 10}, elems[:dequeued])
 			require.Less(t, atomic.LoadUint32(ring.consTail), uint32(startIndex))
 			assertOccupancy(t, ring, 0)
 		})
@@ -1062,9 +1150,10 @@ func TestMaxEnqueueBatch(t *testing.T) {
 	assert.NotErrorIs(t, err, ErrExceedsMaxBatch)
 	assert.Equal(t, 8, free)
 
-	got, dequeued := ring.DequeueBurst(16, nil)
-	assert.Equal(t, uint32(8), dequeued)
-	assert.Equal(t, []int{1, 2, 3, 4, 5, 6, 7, 8}, got)
+	got := make([]int, 16)
+	dequeued, _ := ring.DequeueBurst(got)
+	assert.Equal(t, 8, dequeued)
+	assert.Equal(t, []int{1, 2, 3, 4, 5, 6, 7, 8}, got[:dequeued])
 }
 
 // TestMaxDequeueBatch checks that DequeueBurst moves at most MaxDequeueBatch, and that DequeueBulk
@@ -1080,28 +1169,32 @@ func TestMaxDequeueBatch(t *testing.T) {
 	enqueued, _ := ring.EnqueueBurst(items)
 	require.Equal(t, 12, enqueued)
 
-	got, dequeued := ring.DequeueBurst(10, nil)
-	assert.Equal(t, uint32(4), dequeued)
-	assert.Equal(t, []int{0, 1, 2, 3}, got)
+	got := make([]int, 10)
+	dequeued, available := ring.DequeueBurst(got)
+	assert.Equal(t, 4, dequeued)
+	assert.Equal(t, []int{0, 1, 2, 3}, got[:dequeued])
+	assert.Equal(t, 8, available)
 
-	avail := outSentinel
-	got, err = ring.DequeueBulk(5, &avail)
+	// dstSentinel pre-fills dst so the test can show that a rejected call writes none of it.
+	const dstSentinel = -1
+	rejected := slices.Repeat([]int{dstSentinel}, 5)
+	available, err = ring.DequeueBulk(rejected)
 	assert.ErrorIs(t, err, ErrExceedsMaxBatch)
 	assert.NotErrorIs(t, err, ErrExceedsCapacity)
-	assert.Nil(t, got)
-	assert.Equal(t, uint32(8), avail)
+	assert.Equal(t, slices.Repeat([]int{dstSentinel}, 5), rejected)
+	assert.Equal(t, 8, available)
 	assert.Equal(t, 8, ring.Count())
 
-	got, err = ring.DequeueBulk(17, &avail)
+	available, err = ring.DequeueBulk(make([]int, 17))
 	assert.ErrorIs(t, err, ErrExceedsCapacity)
 	assert.NotErrorIs(t, err, ErrExceedsMaxBatch)
-	assert.Nil(t, got)
-	assert.Equal(t, uint32(8), avail)
+	assert.Equal(t, 8, available)
 
-	got, err = ring.DequeueBulk(4, &avail)
+	got = make([]int, 4)
+	available, err = ring.DequeueBulk(got)
 	assert.NoError(t, err)
 	assert.Equal(t, []int{4, 5, 6, 7}, got)
-	assert.Equal(t, uint32(4), avail)
+	assert.Equal(t, 4, available)
 }
 
 // TestMaxBatchUnderContention runs MPMC bursts on a ring with different enqueue and dequeue
@@ -1146,9 +1239,10 @@ func TestMaxBatchUnderContention(t *testing.T) {
 	}
 	for range workers {
 		consumers.Go(func() {
+			got := make([]int, slices.Max(requests))
 			for call := 0; received.Load() < total; call++ {
-				request := uint32(requests[call%len(requests)])
-				got, dequeued := ring.DequeueBurst(request, nil)
+				request := requests[call%len(requests)]
+				dequeued, _ := ring.DequeueBurst(got[:request])
 				if dequeued > maxDequeue {
 					oversized.Add(1)
 				}
@@ -1156,7 +1250,7 @@ func TestMaxBatchUnderContention(t *testing.T) {
 					runtime.Gosched()
 					continue
 				}
-				for _, value := range got {
+				for _, value := range got[:dequeued] {
 					seen[value].Add(1)
 				}
 				received.Add(int64(dequeued))

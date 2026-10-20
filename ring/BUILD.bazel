@@ -17,3 +17,24 @@ go_test(
     ],
     visibility = ["//:__subpackages__"],
 )
+
+go_test(
+    name = "ring_bench",
+    size = "large",
+    srcs = [
+        "alloc_test.go",
+        "bench_adapters_test.go",
+        "bench_harness_test.go",
+        "bench_latency_test.go",
+        "bench_test.go",
+        "race_off_test.go",
+        "race_on_test.go",
+    ],
+    tags = ["exclusive"],
+    deps = [
+        ":ring",
+        "@com_github_stretchr_testify//assert:assert",
+        "@com_github_stretchr_testify//require:require",
+    ],
+    visibility = ["//:__subpackages__"],
+)

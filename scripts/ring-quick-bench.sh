@@ -143,7 +143,7 @@ if [ -z "$reuse_dir" ]; then
 	before_hash=$(resolve_ref "${refs[0]}")
 	after_hash=$(resolve_ref "${refs[1]}")
 	harness_diff=$(git -C "$repo" diff --stat "$before_hash" "$after_hash" -- \
-		'ring/alloc_test.go' 'ring/bench_*_test.go' 'ring/race_*_test.go')
+		'ring/alloc_test.go' 'ring/bench_test.go' 'ring/bench_*_test.go' 'ring/race_*_test.go')
 	[ -n "$harness_diff" ] || harness_diff=none
 else
 	for name in before.test after.test state.txt; do

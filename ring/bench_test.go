@@ -425,6 +425,8 @@ type benchMode struct {
 	name      string
 	producers int
 	consumers int
+	// relaxed is whether the mode's multi sides use relaxed tail sync.
+	relaxed bool
 }
 
 // The named modes below use multiWorkers goroutines on each multi side.
@@ -437,6 +439,14 @@ var (
 	spmcMode = benchMode{name: "SPMC", producers: 1, consumers: multiWorkers}
 	// mpmcMode has many producers and many consumers.
 	mpmcMode = benchMode{name: "MPMC", producers: multiWorkers, consumers: multiWorkers}
+	// mpmcRelaxedMode has many producers and many consumers, and both sides use relaxed tail
+	// sync.
+	mpmcRelaxedMode = benchMode{
+		name:      "MPMC-RTS",
+		producers: multiWorkers,
+		consumers: multiWorkers,
+		relaxed:   true,
+	}
 )
 
 // benchModes lists every mode, in the order the throughput benchmarks run them.
@@ -470,7 +480,7 @@ func BenchmarkThroughput(b *testing.B) {
 // benchmarkThroughputImpls runs one impl sub-benchmark for each adapter, and one for chan at
 // batch size 1, because chan has no batch operation.
 func benchmarkThroughputImpls[T any](b *testing.B, mode benchMode, batch int, fill fillFunc[T]) {
-	for _, impl := range adapterImpls[T](mode) {
+	for _, impl := range throughputImpls[T](mode) {
 		b.Run("impl="+impl.name, func(b *testing.B) {
 			setElemBytes[T](b)
 			result, err := runThroughput(
@@ -514,8 +524,9 @@ const (
 // ringAPIs lists every style BenchmarkRingAPI runs through the queue harness.
 var ringAPIs = []ringAPI{apiSingle, apiBurst, apiBulk}
 
-// ringAPIModes are the modes BenchmarkRingAPI runs in, SPSC and MPMC.
-var ringAPIModes = []benchMode{spscMode, mpmcMode}
+// ringAPIModes are the modes BenchmarkRingAPI runs in, SPSC, MPMC, and MPMC with relaxed tail
+// sync.
+var ringAPIModes = []benchMode{spscMode, mpmcMode, mpmcRelaxedMode}
 
 // String returns the name api has in BenchmarkRingAPI's sub-benchmark names.
 func (api ringAPI) String() string {

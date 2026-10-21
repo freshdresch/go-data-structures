@@ -34,20 +34,45 @@ func adapterImpls[T any](mode benchMode) []adapterImpl[T] {
 	}
 }
 
+// throughputImpls returns adapterImpls for mode, plus ring-rts, a ring whose multi sides use
+// relaxed tail sync, when mode has a multi side. Only the throughput runs and their accounting
+// test include ring-rts.
+func throughputImpls[T any](mode benchMode) []adapterImpl[T] {
+	impls := adapterImpls[T](mode)
+	if mode.producers == 1 && mode.consumers == 1 {
+		return impls
+	}
+	relaxed := mode
+	relaxed.relaxed = true
+	return append(impls, adapterImpl[T]{name: "ring-rts", newQueue: func() (queue[T], error) {
+		created, err := newRingQueue[T](relaxed)
+		if err != nil {
+			return nil, err
+		}
+		return created, nil
+	}})
+}
+
 // ringQueue drives the ring through EnqueueBurst and DequeueBurst.
 type ringQueue[T any] struct {
 	ring *ring.Ring[T]
 }
 
 // newModeRing returns a ring with ringCapacity slots that allows as many producers and consumers
-// as mode has.
+// as mode has. Its multi sides use relaxed tail sync when mode is relaxed.
 func newModeRing[T any](mode benchMode) (*ring.Ring[T], error) {
+	multiProd := ring.WithMultiProdEnqueue()
+	multiCons := ring.WithMultiConsDequeue()
+	if mode.relaxed {
+		multiProd = ring.WithRelaxedMultiProdEnqueue()
+		multiCons = ring.WithRelaxedMultiConsDequeue()
+	}
 	var options []ring.Option
 	if mode.producers > 1 {
-		options = append(options, ring.WithMultiProdEnqueue())
+		options = append(options, multiProd)
 	}
 	if mode.consumers > 1 {
-		options = append(options, ring.WithMultiConsDequeue())
+		options = append(options, multiCons)
 	}
 	return ring.New[T](ringCapacity, options...)
 }

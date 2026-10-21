@@ -178,7 +178,7 @@ type accountingCase struct {
 func accountingCases(mode benchMode) []accountingCase {
 	var cases []accountingCase
 	for _, batch := range []int{1, 32} {
-		for _, impl := range adapterImpls[int64](mode) {
+		for _, impl := range throughputImpls[int64](mode) {
 			cases = append(cases, accountingCase{
 				name:  impl.name,
 				batch: batch,
@@ -910,12 +910,19 @@ func TestPacer(t *testing.T) {
 // per batch, and dequeues all of them, for every implementation in SPSC and MPMC at batch sizes 1
 // and 32. It also checks that the largest wait is at most the largest sched and that the median
 // wait is far below the run length, which a missing attempt stamp would break. TestLoadedSink pins
-// wait to the attempt stamp. Each run sends 200 ms of elements at 100k/s, rounded up to whole
-// batches, and has accountingDeadline to finish, which shows every goroutine stopped. The capped
-// subtest offers far more load than any run can move and checks that the 2× cap stops it.
+// wait to the attempt stamp. Each run sends 200 ms of elements at 100k/s, or 10k/s under the
+// race detector, rounded up to whole batches, and has accountingDeadline to finish, which shows
+// every goroutine stopped. The capped subtest offers far more load than any run can move and
+// checks that the 2× cap stops it.
 func TestLoadedAccounting(t *testing.T) {
 	const runLength = 200 * time.Millisecond
-	const rate = 100_000
+	rate := 100_000.0
+	if raceEnabled {
+		// Race instrumentation slows the publish wait's spin loads enough that MPMC at batch 1
+		// fell to about 10k/s at an offered 100k/s, and the cap stopped those runs before they
+		// sent their share. 10k/s stays at or below that slowest measured rate.
+		rate = 10_000.0
+	}
 	for _, mode := range []benchMode{spscMode, mpmcMode} {
 		for _, batch := range []int{1, 32} {
 			total := loadedTotal(rate, runLength, mode.producers, batch)

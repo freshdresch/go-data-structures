@@ -217,6 +217,13 @@ single_flags=(
 )
 own_pattern='^BenchmarkThroughput$/^mode=(SPSC|MPMC)$/^batch=(1|32)$/^elem=int64$/^impl=ring$'
 own_pattern="$own_pattern|^BenchmarkHandoff\$/^impl=ring\$"
+ring_api_pattern='^BenchmarkRingAPI$/^mode=(SPSC|MPMC)$/^api=(burst|bulk)$'
+ring_api_pattern="$ring_api_pattern/^batch=(1|8|32|64)$/^elem=int64$"
+own_pattern="$own_pattern|$ring_api_pattern"
+# Go reports no leaf benchmark when the pattern has more levels than its name.
+# So api=single gets its own alternative.
+single_api_pattern='^BenchmarkRingAPI$/^mode=(SPSC|MPMC)$/^api=single$/^elem=int64$'
+own_pattern="$own_pattern|$single_api_pattern"
 own_flags=(
 	-test.run '^$'
 	-test.benchmem
@@ -232,6 +239,16 @@ BenchmarkThroughput/mode=SPSC/batch=32/elem=int64/impl=ring-$own
 BenchmarkThroughput/mode=MPMC/batch=1/elem=int64/impl=ring-$own
 BenchmarkThroughput/mode=MPMC/batch=32/elem=int64/impl=ring-$own
 BenchmarkHandoff/impl=ring-$own"
+for mode in SPSC MPMC; do
+	own_rows="$own_rows
+BenchmarkRingAPI/mode=$mode/api=single/elem=int64-$own"
+	for api in burst bulk; do
+		for batch in 1 8 32 64; do
+			own_rows="$own_rows
+BenchmarkRingAPI/mode=$mode/api=$api/batch=$batch/elem=int64-$own"
+		done
+	done
+done
 
 command_line() {
 	if [ ${#pin[@]} -gt 0 ]; then
@@ -247,6 +264,16 @@ binary_info() {
 		NR == 1 { sub(/^[^:]*: /, ""); print "toolchain=" $0 }
 		$2 == "build" && $3 ~ /^(GOOS|GOARCH|GOARM64|GOAMD64|CGO_ENABLED)=/ { print $3 }
 	'
+}
+
+# Prints the offset of runtime.sched within a 128-byte line. The scheduler's lock and run
+# queue live there, the benchmarks yield constantly, and on Apple silicon the MPMC rows have
+# moved by 30% or more with this offset alone.
+sched_offset() {
+	local addr
+	addr=$(go tool nm "$1" | awk '$3 == "runtime.sched" { print $1 }')
+	[ -n "$addr" ] || return 1
+	echo $((16#$addr % 128))
 }
 
 cpu_model() {
@@ -293,6 +320,7 @@ write_state() {
 	echo "## binaries"
 	for side in before after; do
 		record "$side" binary_info "$results/$side.test"
+		record "$side runtime.sched offset" sched_offset "$results/$side.test"
 	done
 
 	echo "## environment"
@@ -320,6 +348,8 @@ write_state() {
 }
 
 write_state >>"$state"
+before_sched=$(sched_offset "$results/before.test" 2>/dev/null) || before_sched=unknown
+after_sched=$(sched_offset "$results/after.test" 2>/dev/null) || after_sched=unknown
 mkdir "$results/rounds"
 
 check_rows() {
@@ -399,6 +429,12 @@ if [ "$harness_diff" != none ]; then
 	echo "The benchmark files differ between the refs, so harness changes are part of the" \
 		"comparison. The diff stat follows."
 	echo "$harness_diff"
+fi
+if [ "$before_sched" != "$after_sched" ] || [ "$before_sched" = unknown ]; then
+	echo "The binaries place runtime.sched at different offsets within a 128-byte line," \
+		"before $before_sched and after $after_sched. On Apple silicon that alone has moved" \
+		"the MPMC rows by 30% or more, with offset 96 the slow one seen, so an MPMC change" \
+		"here may not come from the code."
 fi
 echo "The MPMC batch-1 row is high-variance on both platforms, so its interval is usually wide."
 echo "The handoff-p50, handoff-p90, and handoff-p99 values are in nanoseconds."

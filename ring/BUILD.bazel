@@ -9,7 +9,10 @@ go_library(
 
 go_test(
     name = "ring_test",
-    srcs = ["ring_test.go"],
+    srcs = [
+        "alignment_test.go",
+        "ring_test.go",
+    ],
     embed = [":ring"],
     deps = [
         "@com_github_stretchr_testify//assert:assert",

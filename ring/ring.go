@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"runtime"
 	"sync/atomic"
+	"unsafe"
 )
 
 // ErrInvalidCount is returned by New, wrapped, when the count is not a power of two, is less
@@ -36,6 +37,32 @@ var ErrInvalidMaxBatch = errors.New("ring: max batch must be between 1 and the r
 // pointless.
 var ErrExceedsMaxBatch = errors.New("ring: requested count exceeds the ring's maximum batch size")
 
+// cacheLine is the size each part of a Ring is padded to. It is 128 bytes because that is a full
+// cache line on Apple silicon, and on x86 it covers a 64-byte line plus the neighbor that an
+// adjacent-line prefetcher may pull in.
+const cacheLine = 128
+
+// readOnly holds the fields New sets and nothing writes afterward, so every core can keep the
+// line holding them in its cache.
+type readOnly[T any] struct {
+	entries         []T
+	mask            uint32
+	maxEnqueueBatch uint32
+	maxDequeueBatch uint32
+	multiProd       bool
+	multiCons       bool
+}
+
+// indices holds all four indices on one line, the layout that held up on both benchmarked
+// platforms. A line per side was far slower on Apple silicon. The likely reason is that each
+// side reads the other side's tail on every call, so one line moves between cores instead of two.
+type indices struct {
+	prodHead atomic.Uint32
+	prodTail atomic.Uint32
+	consHead atomic.Uint32
+	consTail atomic.Uint32
+}
+
 // Ring is a fixed-size, lock-free ring buffer modeled on DPDK's rte_ring. It works as a FIFO queue
 // anywhere between single-producer single-consumer and multi-producer multi-consumer.
 //
@@ -48,18 +75,26 @@ var ErrExceedsMaxBatch = errors.New("ring: requested count exceeds the ring's ma
 //
 // A Ring must not be copied once in use.
 type Ring[T any] struct {
-	entries         []T
-	mask            uint32
-	maxEnqueueBatch uint32
-	maxDequeueBatch uint32
-	multiProd       bool
-	multiCons       bool
-
-	prodHead atomic.Uint32
-	prodTail atomic.Uint32
-	consHead atomic.Uint32
-	consTail atomic.Uint32
+	readOnly[T]
+	// An array length must be a constant, so the padding is sized from readOnly[byte]. That holds
+	// for every T because entries is always a slice header, so readOnly's size never depends on T.
+	_ [cacheLine - unsafe.Sizeof(readOnly[byte]{})]byte
+	indices
+	_ [cacheLine - unsafe.Sizeof(indices{})]byte
 }
+
+// A layout change that breaks the Ring's size or the indices' offset fails the build here. The
+// [64]byte instance catches a field whose size depends on T, which the byte instance would miss.
+var (
+	_ [unsafe.Sizeof(Ring[byte]{}) - 2*cacheLine]struct{}
+	_ [2*cacheLine - unsafe.Sizeof(Ring[byte]{})]struct{}
+	_ [unsafe.Offsetof(Ring[byte]{}.indices) - cacheLine]struct{}
+	_ [cacheLine - unsafe.Offsetof(Ring[byte]{}.indices)]struct{}
+	_ [unsafe.Sizeof(Ring[[64]byte]{}) - 2*cacheLine]struct{}
+	_ [2*cacheLine - unsafe.Sizeof(Ring[[64]byte]{})]struct{}
+	_ [unsafe.Offsetof(Ring[[64]byte]{}.indices) - cacheLine]struct{}
+	_ [cacheLine - unsafe.Offsetof(Ring[[64]byte]{}.indices)]struct{}
+)
 
 type config struct {
 	multiProd       bool
@@ -176,12 +211,14 @@ func New[T any](count int, options ...Option) (*Ring[T], error) {
 	}
 
 	ring := &Ring[T]{
-		entries:         make([]T, count),
-		mask:            uint32(count - 1),
-		maxEnqueueBatch: uint32(cfg.maxEnqueueBatch),
-		maxDequeueBatch: uint32(cfg.maxDequeueBatch),
-		multiProd:       cfg.multiProd,
-		multiCons:       cfg.multiCons,
+		readOnly: readOnly[T]{
+			entries:         make([]T, count),
+			mask:            uint32(count - 1),
+			maxEnqueueBatch: uint32(cfg.maxEnqueueBatch),
+			maxDequeueBatch: uint32(cfg.maxDequeueBatch),
+			multiProd:       cfg.multiProd,
+			multiCons:       cfg.multiCons,
+		},
 	}
 	return ring, nil
 }

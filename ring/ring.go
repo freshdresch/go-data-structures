@@ -196,6 +196,13 @@ func WithMultiConsDequeue() Option {
 // turns. The wait comes before the check for free slots, so a call that finds the ring full, or a
 // zero-length call, can wait before it returns.
 //
+// Whether this mode is faster depends on the machine and the batch size. Each call does two more
+// atomic read-modify-writes than WithMultiProdEnqueue, one to publish and one to update the tail
+// that consumers read, in exchange for not waiting for the producers that reserved before it. In
+// the ring's MPSC, SPMC, and MPMC throughput benchmarks, it made batches of 32 or 64 elements 14 to
+// 36% faster per element on an Apple M3 Pro, and batches of 1 or 8 elements 3 to 12% slower. On an
+// AMD Ryzen 7 5800X it was 6 to 29% slower in most cases. Measure before choosing it.
+//
 // A producer stalled between loading the producer head and its compare-and-swap, while a multiple
 // of 2^32 reservations pass through, would succeed with a stale view. The head holds both a
 // position and a count of reservations, and both must match. The publish and the update of the
@@ -225,6 +232,13 @@ func WithRelaxedMultiProdEnqueue() Option {
 // so its own batch can take the head further. On a ring of fewer than 8 slots that bound is 0, so
 // consumers take turns. The wait comes before the check for occupied entries, so a call that finds
 // the ring empty, or a zero-length call, can wait before it returns.
+//
+// Whether this mode is faster depends on the machine and the batch size. Each call does two more
+// atomic read-modify-writes than WithMultiConsDequeue, one to release its slots and one to update
+// the tail that producers read, in exchange for not waiting for the consumers that reserved before
+// it. In the ring's MPSC, SPMC, and MPMC throughput benchmarks, it made batches of 32 or 64
+// elements 14 to 36% faster per element on an Apple M3 Pro, and batches of 1 or 8 elements 3 to 12%
+// slower. On an AMD Ryzen 7 5800X it was 6 to 29% slower in most cases. Measure before choosing it.
 //
 // A consumer stalled between loading the consumer head and its compare-and-swap, while a multiple
 // of 2^32 reservations pass through, would succeed with a stale view. The head holds both a

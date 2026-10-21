@@ -1619,6 +1619,17 @@ func TestWaitForTail(t *testing.T) {
 	}
 }
 
+// TestSpinForTail checks that spinForTail reports a tail it sees within its bound, and reports
+// false when the bound runs out or is zero.
+func TestSpinForTail(t *testing.T) {
+	var tail atomic.Uint32
+	tail.Store(7)
+
+	require.True(t, spinForTail(&tail, 7, 1))
+	require.False(t, spinForTail(&tail, 8, 16))
+	require.False(t, spinForTail(&tail, 7, 0))
+}
+
 // TestCountSnapshot checks that Count never reports more entries than have been enqueued and not
 // yet dequeued. enqueuedCount counts elements enqueued or in an enqueue call, and drain.received
 // counts elements whose dequeue call has returned. A checker reads drain.received, then Count,

@@ -544,22 +544,31 @@ func (r *Ring[T]) doDequeue(dst []T, fixed bool) (dequeued, available uint32) {
 // fit the CPUs, and cost nothing with one CPU.
 const tailSpins = 1024
 
+// spinForTail checks the tail up to spins times, each with an atomic load, and reports whether
+// one of them saw want. A true result synchronizes with the store that wrote want. It returns
+// false when spins is zero or less. Each check is an atomic load, so the compiler cannot hoist
+// it out of the loop.
+func spinForTail(tail *atomic.Uint32, want uint32, spins int) bool {
+	for range spins {
+		if tail.Load() == want {
+			return true
+		}
+	}
+	return false
+}
+
 // waitForTail returns once the tail equals want. A producer or consumer that has finished copying
 // calls it to wait for every earlier one on its side to publish, so publication stays in order.
 //
-// The earlier goroutine is usually a few nanoseconds from publishing, so waitForTail first checks
-// the tail up to tailSpins times in a plain loop, which is far cheaper than entering the
-// scheduler. The bound keeps it from burning a whole time slice when the earlier goroutine has
+// It first calls spinForTail with tailSpins, since the earlier goroutine is usually nanoseconds
+// from publishing. The bound keeps it from burning a whole time slice when that goroutine has
 // been descheduled, and after it waitForTail yields with runtime.Gosched between checks, so the
-// goroutine it waits for gets to run and publish, even with GOMAXPROCS=1. Each check is an atomic
-// load, so the compiler cannot hoist it out of the loop. The load that sees want synchronizes with
-// the earlier goroutine's tail store, so that goroutine's slot writes are published along with
-// ours.
+// goroutine it waits for gets to run and publish, even with GOMAXPROCS=1. Whichever load sees
+// want synchronizes with the earlier goroutine's tail store, so that goroutine's slot writes are
+// published along with the caller's own tail store that follows.
 func waitForTail(tail *atomic.Uint32, want uint32) {
-	for range tailSpins {
-		if tail.Load() == want {
-			return
-		}
+	if spinForTail(tail, want, tailSpins) {
+		return
 	}
 	for tail.Load() != want {
 		runtime.Gosched()

@@ -12,6 +12,7 @@ go_test(
     srcs = [
         "alignment_test.go",
         "ring_test.go",
+        "spin_bench_test.go",
     ],
     embed = [":ring"],
     deps = [

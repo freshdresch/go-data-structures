@@ -42,6 +42,16 @@ var ErrExceedsMaxBatch = errors.New("ring: requested count exceeds the ring's ma
 // adjacent-line prefetcher may pull in.
 const cacheLine = 128
 
+// syncMode is how the goroutines on one side of a ring synchronize: one goroutine at a time,
+// many that publish in reservation order, or many that publish with relaxed tail sync.
+// modeSingle must stay the first constant, because the zero config means one goroutine per side.
+type syncMode uint8
+
+const (
+	modeSingle syncMode = iota
+	modeMulti
+)
+
 // readOnly holds the fields New sets and nothing writes afterward, so every core can keep the
 // line holding them in its cache.
 type readOnly[T any] struct {
@@ -49,8 +59,8 @@ type readOnly[T any] struct {
 	mask            uint32
 	maxEnqueueBatch uint32
 	maxDequeueBatch uint32
-	multiProd       bool
-	multiCons       bool
+	prodMode        syncMode
+	consMode        syncMode
 	clearOnDequeue  bool
 }
 
@@ -99,8 +109,8 @@ var (
 )
 
 type config struct {
-	multiProd       bool
-	multiCons       bool
+	prodMode        syncMode
+	consMode        syncMode
 	maxEnqueueBatch int
 	maxDequeueBatch int
 	keepDequeued    bool
@@ -118,7 +128,7 @@ type Option func(*config)
 // practical use.
 func WithMultiProdEnqueue() Option {
 	return func(cfg *config) {
-		cfg.multiProd = true
+		cfg.prodMode = modeMulti
 	}
 }
 
@@ -131,7 +141,7 @@ func WithMultiProdEnqueue() Option {
 // practical use.
 func WithMultiConsDequeue() Option {
 	return func(cfg *config) {
-		cfg.multiCons = true
+		cfg.consMode = modeMulti
 	}
 }
 
@@ -235,8 +245,8 @@ func New[T any](count int, options ...Option) (*Ring[T], error) {
 			mask:            uint32(count - 1),
 			maxEnqueueBatch: uint32(cfg.maxEnqueueBatch),
 			maxDequeueBatch: uint32(cfg.maxDequeueBatch),
-			multiProd:       cfg.multiProd,
-			multiCons:       cfg.multiCons,
+			prodMode:        cfg.prodMode,
+			consMode:        cfg.consMode,
 			clearOnDequeue:  !cfg.keepDequeued,
 		},
 	}
@@ -485,23 +495,10 @@ func (r *Ring[T]) doEnqueue(items []T, fixed bool) (enqueued, free uint32) {
 		return 0, min(freeBefore, r.capacity())
 	}
 
-	base := head & r.mask
-	end := r.capacity() - base
-	if end > numEntries {
-		end = numEntries
-	}
+	base, end := r.slotRange(head, numEntries)
+	r.writeSlots(base, end, items[:numEntries])
 
-	if numEntries == 1 {
-		// avoid the memmove when we can, since it costs more than an assignment for one element
-		r.entries[base] = items[0]
-	} else {
-		copy(r.entries[base:base+end], items[:end])
-
-		// copy whatever is left after the wrap around
-		copy(r.entries[:numEntries-end], items[end:numEntries])
-	}
-
-	if r.multiProd {
+	if r.prodMode == modeMulti {
 		waitForTail(&r.prodTail, head)
 	}
 
@@ -533,27 +530,14 @@ func (r *Ring[T]) doDequeue(dst []T, fixed bool) (dequeued, available uint32) {
 		return 0, min(availableBefore, r.capacity())
 	}
 
-	base := head & r.mask
-	end := r.capacity() - base
-	if end > numEntries {
-		end = numEntries
-	}
-
-	if numEntries == 1 {
-		// avoid the memmove when we can, since it costs more than an assignment for one element
-		dst[0] = r.entries[base]
-	} else {
-		copy(dst[:end], r.entries[base:base+end])
-
-		// copy whatever is left after the wrap around
-		copy(dst[end:numEntries], r.entries[:numEntries-end])
-	}
+	base, end := r.slotRange(head, numEntries)
+	r.readSlots(base, end, dst[:numEntries])
 
 	if r.clearOnDequeue {
 		r.clearSlots(base, end, numEntries)
 	}
 
-	if r.multiCons {
+	if r.consMode == modeMulti {
 		waitForTail(&r.consTail, head)
 	}
 
@@ -563,11 +547,39 @@ func (r *Ring[T]) doDequeue(dst []T, fixed bool) (dequeued, available uint32) {
 	return numEntries, availableBefore - numEntries
 }
 
-// clearSlots zeroes the count slots a dequeue read, starting at base, where end is how many of
-// them come before the end of the backing array. A slot that still holds a pointer keeps its
-// target alive until a later enqueue overwrites it, so clearing it lets the garbage collector
-// release the target. The caller must call it before its consumer tail store, so a producer never
-// sees a slot as free while it is being cleared.
+// slotRange returns where in the backing array the count slots starting at index head begin, and
+// how many of them come before the end of the array.
+func (r *Ring[T]) slotRange(head, count uint32) (base, end uint32) {
+	base = head & r.mask
+	return base, min(r.capacity()-base, count)
+}
+
+// writeSlots copies items into the slots slotRange described with base and end.
+func (r *Ring[T]) writeSlots(base, end uint32, items []T) {
+	if len(items) == 1 {
+		// avoid the memmove when we can, since it costs more than an assignment for one element
+		r.entries[base] = items[0]
+		return
+	}
+	copy(r.entries[base:base+end], items[:end])
+	copy(r.entries[:uint32(len(items))-end], items[end:])
+}
+
+// readSlots copies the slots slotRange described with base and end into dst.
+func (r *Ring[T]) readSlots(base, end uint32, dst []T) {
+	if len(dst) == 1 {
+		// avoid the memmove when we can, since it costs more than an assignment for one element
+		dst[0] = r.entries[base]
+		return
+	}
+	copy(dst[:end], r.entries[base:base+end])
+	copy(dst[end:], r.entries[:uint32(len(dst))-end])
+}
+
+// clearSlots zeroes the count slots a dequeue read, which slotRange described with base and end.
+// A slot that still holds a pointer keeps its target alive until a later enqueue overwrites it,
+// so clearing it lets the garbage collector release the target. The caller must call it before
+// its consumer tail store, so a producer never sees a slot as free while it is being cleared.
 func (r *Ring[T]) clearSlots(base, end, count uint32) {
 	if count == 1 {
 		var zero T
@@ -652,7 +664,7 @@ func (r *Ring[T]) moveProdHead(
 
 		next := head + numItems
 
-		if r.multiProd {
+		if r.prodMode == modeMulti {
 			if r.prodHead.CompareAndSwap(head, next) {
 				*oldHead = head
 				*newHead = next
@@ -710,7 +722,7 @@ func (r *Ring[T]) moveConsHead(
 
 		next := head + numItems
 
-		if r.multiCons {
+		if r.consMode == modeMulti {
 			if r.consHead.CompareAndSwap(head, next) {
 				*oldHead = head
 				*newHead = next

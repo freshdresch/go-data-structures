@@ -27,8 +27,8 @@ func TestRingCreation(t *testing.T) {
 	simple, err := New[uintptr](64)
 	assert.NoError(t, err)
 	assertNewRing[uintptr](t, simple, 64)
-	assert.False(t, simple.multiProd)
-	assert.False(t, simple.multiCons)
+	assert.Equal(t, modeSingle, simple.prodMode)
+	assert.Equal(t, modeSingle, simple.consMode)
 	assert.True(t, simple.clearOnDequeue)
 
 	keeping, err := New[uintptr](64, WithoutDequeueClearing())
@@ -39,14 +39,14 @@ func TestRingCreation(t *testing.T) {
 	mpsc, err := New[uintptr](64, WithMultiProdEnqueue())
 	assert.NoError(t, err)
 	assertNewRing[uintptr](t, mpsc, 64)
-	assert.True(t, mpsc.multiProd)
-	assert.False(t, mpsc.multiCons)
+	assert.Equal(t, modeMulti, mpsc.prodMode)
+	assert.Equal(t, modeSingle, mpsc.consMode)
 
 	spmc, err := New[uintptr](64, WithMultiConsDequeue())
 	assert.NoError(t, err)
 	assertNewRing[uintptr](t, spmc, 64)
-	assert.False(t, spmc.multiProd)
-	assert.True(t, spmc.multiCons)
+	assert.Equal(t, modeSingle, spmc.prodMode)
+	assert.Equal(t, modeMulti, spmc.consMode)
 
 	mpmc, err := New[uintptr](
 		64,
@@ -55,8 +55,8 @@ func TestRingCreation(t *testing.T) {
 	)
 	assert.NoError(t, err)
 	assertNewRing[uintptr](t, mpmc, 64)
-	assert.True(t, mpmc.multiProd)
-	assert.True(t, mpmc.multiCons)
+	assert.Equal(t, modeMulti, mpmc.prodMode)
+	assert.Equal(t, modeMulti, mpmc.consMode)
 
 	large, err := New[uintptr](1 << 16)
 	assert.NoError(t, err)

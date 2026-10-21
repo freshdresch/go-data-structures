@@ -539,9 +539,10 @@ func (r *Ring[T]) doDequeue(dst []T, fixed bool) (dequeued, available uint32) {
 }
 
 // tailSpins is how many times waitForTail checks the tail in a plain loop before it starts
-// yielding. Benchmarks chose 256, which cut MPSC and SPMC time per element by 9 to 90% with
-// goroutines that fit the CPUs, and cost nothing with one CPU.
-const tailSpins = 256
+// yielding. On the padded layout, benchmarks on an Apple M3 Pro and an AMD Ryzen chose 1024 over
+// 64, 256, and 512. It cut MPSC, SPMC, and MPMC time per element by 53 to 96% with goroutines that
+// fit the CPUs, and cost nothing with one CPU.
+const tailSpins = 1024
 
 // waitForTail returns once the tail equals want. A producer or consumer that has finished copying
 // calls it to wait for every earlier one on its side to publish, so publication stays in order.

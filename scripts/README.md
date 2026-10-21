@@ -26,3 +26,17 @@ the comparison, and a `state.txt` that records how the run was made. `-reuse` re
 saved in an earlier results directory. The script only reads git state and never changes the
 working tree, the index, refs, or remotes. The printed comparison leaves out the Handoff p99.9 and
 max percentiles, because short runs make them very noisy, but the raw files keep them.
+
+`ring-spin-bound.sh` compares one committed ref built with several publish wait spin bounds, the
+`tailSpins` constant in `ring/ring.go`. It builds one binary per bound, with the first bound as the
+base, runs the MPSC, SPMC, and MPMC throughput rows for every side in rotating order, and prints a
+`benchstat` comparison. Run it to choose the spin bound after a change to the publish wait or to
+the ring's layout.
+
+```bash
+scripts/ring-spin-bound.sh [-rounds N] [-benchtime D] <ref> <bound> <bound>...
+scripts/ring-spin-bound.sh 8e3e968 256 64 512 1024
+```
+
+A default run of four bounds takes about 11 minutes on macOS and about 8 under WSL2. Results go
+to `~/ring-spin/<timestamp>-<pid>/`. Like the quick bench, run it only while plugged into AC power.

@@ -51,6 +51,7 @@ type readOnly[T any] struct {
 	maxDequeueBatch uint32
 	multiProd       bool
 	multiCons       bool
+	clearOnDequeue  bool
 }
 
 // indices holds all four indices on one line, the layout that held up on both benchmarked
@@ -69,7 +70,8 @@ type indices struct {
 // Without options, a ring allows one producer and one consumer at a time. WithMultiProdEnqueue
 // makes the enqueue methods safe for concurrent producers, and WithMultiConsDequeue does the same
 // for the dequeue methods and consumers. WithMaxEnqueueBatch, WithMaxDequeueBatch, and
-// WithMaxBatch limit how many elements one batch call moves.
+// WithMaxBatch limit how many elements one batch call moves. WithoutDequeueClearing leaves dequeued
+// slots uncleared.
 //
 // The ring holds exactly count elements, where count is the count given to New.
 //
@@ -101,6 +103,7 @@ type config struct {
 	multiCons       bool
 	maxEnqueueBatch int
 	maxDequeueBatch int
+	keepDequeued    bool
 }
 
 // Option configures a Ring at construction.
@@ -184,6 +187,22 @@ func WithMaxBatch(n int) Option {
 	}
 }
 
+// WithoutDequeueClearing returns an Option that makes the dequeue methods leave the slots they read
+// as they are, instead of clearing them.
+//
+// It can make SPSC dequeues faster for element types without pointers, where clearing releases
+// nothing. With pointer elements, up to Capacity stale elements stay reachable until their slots
+// are reused, which may be never on a ring that drains and goes quiet. Clearing measured faster
+// for MPMC, and for pointer SPSC batches on some machines, so measure before relying on this
+// option.
+//
+// Reset clears every slot whether or not this option is given.
+func WithoutDequeueClearing() Option {
+	return func(cfg *config) {
+		cfg.keepDequeued = true
+	}
+}
+
 // maxCount is the largest count New accepts, the largest power of two DPDK accepts.
 const maxCount = 1 << 30
 
@@ -218,6 +237,7 @@ func New[T any](count int, options ...Option) (*Ring[T], error) {
 			maxDequeueBatch: uint32(cfg.maxDequeueBatch),
 			multiProd:       cfg.multiProd,
 			multiCons:       cfg.multiCons,
+			clearOnDequeue:  !cfg.keepDequeued,
 		},
 	}
 	return ring, nil
@@ -263,7 +283,7 @@ func (r *Ring[T]) capacity() uint32 {
 // WARNING: Make sure to only do this while the ring is not in use!
 //
 // Reset does not change how the ring was configured. Elements that were enqueued but never
-// dequeued are released.
+// dequeued are released. It clears every slot even on a ring created with WithoutDequeueClearing.
 func (r *Ring[T]) Reset() {
 	clear(r.entries)
 	r.prodHead.Store(0)
@@ -519,21 +539,18 @@ func (r *Ring[T]) doDequeue(dst []T, fixed bool) (dequeued, available uint32) {
 		end = numEntries
 	}
 
-	// A slot that still holds a pointer keeps its target alive until a later enqueue overwrites
-	// it, so every slot read here is cleared. Clearing before the tail store means a producer never
-	// sees a slot as free while it is being cleared.
 	if numEntries == 1 {
 		// avoid the memmove when we can, since it costs more than an assignment for one element
 		dst[0] = r.entries[base]
-		var zero T
-		r.entries[base] = zero
 	} else {
 		copy(dst[:end], r.entries[base:base+end])
-		clear(r.entries[base : base+end])
 
 		// copy whatever is left after the wrap around
 		copy(dst[end:numEntries], r.entries[:numEntries-end])
-		clear(r.entries[:numEntries-end])
+	}
+
+	if r.clearOnDequeue {
+		r.clearSlots(base, end, numEntries)
 	}
 
 	if r.multiCons {
@@ -544,6 +561,21 @@ func (r *Ring[T]) doDequeue(dst []T, fixed bool) (dequeued, available uint32) {
 	r.consTail.Store(next)
 
 	return numEntries, availableBefore - numEntries
+}
+
+// clearSlots zeroes the count slots a dequeue read, starting at base, where end is how many of
+// them come before the end of the backing array. A slot that still holds a pointer keeps its
+// target alive until a later enqueue overwrites it, so clearing it lets the garbage collector
+// release the target. The caller must call it before its consumer tail store, so a producer never
+// sees a slot as free while it is being cleared.
+func (r *Ring[T]) clearSlots(base, end, count uint32) {
+	if count == 1 {
+		var zero T
+		r.entries[base] = zero
+		return
+	}
+	clear(r.entries[base : base+end])
+	clear(r.entries[:count-end])
 }
 
 // tailSpins is how many times waitForTail checks the tail in a plain loop before it starts

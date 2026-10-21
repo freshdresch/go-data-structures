@@ -29,6 +29,12 @@ func TestRingCreation(t *testing.T) {
 	assertNewRing[uintptr](t, simple, 64)
 	assert.False(t, simple.multiProd)
 	assert.False(t, simple.multiCons)
+	assert.True(t, simple.clearOnDequeue)
+
+	keeping, err := New[uintptr](64, WithoutDequeueClearing())
+	assert.NoError(t, err)
+	assertNewRing[uintptr](t, keeping, 64)
+	assert.False(t, keeping.clearOnDequeue)
 
 	mpsc, err := New[uintptr](64, WithMultiProdEnqueue())
 	assert.NoError(t, err)
@@ -815,10 +821,61 @@ func TestDequeueClearsSlots(t *testing.T) {
 	})
 }
 
-// newPointerRing returns an empty 8-slot ring of pointers, so a cleared slot reads nil.
-func newPointerRing(t *testing.T) *Ring[*int] {
+// TestWithoutDequeueClearing checks that a ring created with WithoutDequeueClearing leaves every
+// slot a dequeue reads holding its element, and that Reset still clears every slot.
+func TestWithoutDequeueClearing(t *testing.T) {
+	allSlots := []int{0, 1, 2, 3, 4, 5, 6, 7}
+
+	t.Run("Dequeue", func(t *testing.T) {
+		ring := newPointerRing(t, WithoutDequeueClearing())
+		require.NoError(t, ring.Enqueue(new(int)))
+		_, err := ring.Dequeue()
+		require.NoError(t, err)
+		assertSlotsNotNil(t, ring, 0)
+	})
+
+	t.Run("DequeueBulk", func(t *testing.T) {
+		ring := newPointerRing(t, WithoutDequeueClearing())
+		requireEnqueuePointers(t, ring, 5)
+		_, err := ring.DequeueBulk(make([]*int, 3))
+		require.NoError(t, err)
+		assertSlotsNotNil(t, ring, 0, 1, 2)
+	})
+
+	t.Run("DequeueBulkMultiConsumer", func(t *testing.T) {
+		ring := newPointerRing(t, WithMultiConsDequeue(), WithoutDequeueClearing())
+		requireEnqueuePointers(t, ring, 5)
+		_, err := ring.DequeueBulk(make([]*int, 3))
+		require.NoError(t, err)
+		assertSlotsNotNil(t, ring, 0, 1, 2)
+	})
+
+	// Starting two slots before the end, six enqueues fill slots 6, 7, 0, 1, 2, and 3, and
+	// dequeuing five reads slots 6, 7, 0, 1, and 2.
+	t.Run("DequeueBulkAcrossEnd", func(t *testing.T) {
+		ring := newPointerRing(t, WithoutDequeueClearing())
+		setIndices(ring, 6)
+		requireEnqueuePointers(t, ring, 6)
+		_, err := ring.DequeueBulk(make([]*int, 5))
+		require.NoError(t, err)
+		assertSlotsNotNil(t, ring, 6, 7, 0, 1, 2)
+	})
+
+	t.Run("Reset", func(t *testing.T) {
+		ring := newPointerRing(t, WithoutDequeueClearing())
+		requireEnqueuePointers(t, ring, 5)
+		_, err := ring.DequeueBulk(make([]*int, 3))
+		require.NoError(t, err)
+		ring.Reset()
+		assertSlotsNil(t, ring, allSlots...)
+	})
+}
+
+// newPointerRing returns an empty 8-slot ring of pointers, created with options, so a cleared slot
+// reads nil.
+func newPointerRing(t *testing.T, options ...Option) *Ring[*int] {
 	t.Helper()
-	ring, err := New[*int](8)
+	ring, err := New[*int](8, options...)
 	require.NoError(t, err)
 	return ring
 }
@@ -839,6 +896,14 @@ func assertSlotsNil(t *testing.T, ring *Ring[*int], slots ...int) {
 	t.Helper()
 	for _, slot := range slots {
 		assert.Nil(t, ring.entries[slot], "slot %d", slot)
+	}
+}
+
+// assertSlotsNotNil checks that each listed slot of the ring's backing array is not nil.
+func assertSlotsNotNil(t *testing.T, ring *Ring[*int], slots ...int) {
+	t.Helper()
+	for _, slot := range slots {
+		assert.NotNil(t, ring.entries[slot], "slot %d", slot)
 	}
 }
 

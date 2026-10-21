@@ -539,10 +539,10 @@ func (r *Ring[T]) doDequeue(dst []T, fixed bool) (dequeued, available uint32) {
 }
 
 // tailSpins is how many times waitForTail checks the tail in a plain loop before it starts
-// yielding. On the padded layout, benchmarks on an Apple M3 Pro and an AMD Ryzen chose 1024 over
-// 64, 256, and 512. It cut MPSC, SPMC, and MPMC time per element by 53 to 96% with goroutines that
-// fit the CPUs, and cost nothing with one CPU.
-const tailSpins = 1024
+// yielding. On an Apple M3 Pro and an AMD Ryzen, 4096 beat 1024 by 6 to 23% in geometric mean over
+// the MPSC, SPMC, and MPMC rows, most of what 16384 gained, and cost nothing with one CPU. When the
+// goroutine being waited for is descheduled, one exhausted spin wastes 1 to 3 µs.
+const tailSpins = 4096
 
 // spinForTail checks the tail up to spins times, each with an atomic load, and reports whether
 // one of them saw want. A true result synchronizes with the store that wrote want. It returns

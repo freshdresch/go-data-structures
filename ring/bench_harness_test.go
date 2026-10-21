@@ -178,7 +178,7 @@ type accountingCase struct {
 func accountingCases(mode benchMode) []accountingCase {
 	var cases []accountingCase
 	for _, batch := range []int{1, 32} {
-		for _, impl := range adapterImpls[int64](mode) {
+		for _, impl := range throughputImpls[int64](mode) {
 			cases = append(cases, accountingCase{
 				name:  impl.name,
 				batch: batch,

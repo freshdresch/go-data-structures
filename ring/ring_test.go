@@ -58,6 +58,55 @@ func TestRingCreation(t *testing.T) {
 	assert.Equal(t, modeMulti, mpmc.prodMode)
 	assert.Equal(t, modeMulti, mpmc.consMode)
 
+	rtsProd, err := New[uintptr](64, WithRelaxedMultiProdEnqueue())
+	assert.NoError(t, err)
+	assertNewRing[uintptr](t, rtsProd, 64)
+	assert.Equal(t, modeRelaxed, rtsProd.prodMode)
+	assert.Equal(t, modeSingle, rtsProd.consMode)
+	assert.Equal(t, uint32(8), rtsProd.prodHTDMax)
+	assert.Equal(t, uint32(0), rtsProd.consHTDMax)
+
+	rtsCons, err := New[uintptr](64, WithRelaxedMultiConsDequeue())
+	assert.NoError(t, err)
+	assertNewRing[uintptr](t, rtsCons, 64)
+	assert.Equal(t, modeSingle, rtsCons.prodMode)
+	assert.Equal(t, modeRelaxed, rtsCons.consMode)
+	assert.Equal(t, uint32(0), rtsCons.prodHTDMax)
+	assert.Equal(t, uint32(8), rtsCons.consHTDMax)
+
+	// The last option given for a side applies.
+	lastMulti, err := New[uintptr](
+		64,
+		WithRelaxedMultiProdEnqueue(),
+		WithMultiProdEnqueue(),
+		WithRelaxedMultiConsDequeue(),
+		WithMultiConsDequeue(),
+	)
+	assert.NoError(t, err)
+	assert.Equal(t, modeMulti, lastMulti.prodMode)
+	assert.Equal(t, modeMulti, lastMulti.consMode)
+
+	lastRelaxed, err := New[uintptr](
+		64,
+		WithMultiProdEnqueue(),
+		WithRelaxedMultiProdEnqueue(),
+		WithMultiConsDequeue(),
+		WithRelaxedMultiConsDequeue(),
+	)
+	assert.NoError(t, err)
+	assert.Equal(t, modeRelaxed, lastRelaxed.prodMode)
+	assert.Equal(t, modeRelaxed, lastRelaxed.consMode)
+
+	rtsSmall, err := New[uintptr](4, relaxedOptions()...)
+	assert.NoError(t, err)
+	assert.Equal(t, uint32(0), rtsSmall.prodHTDMax)
+	assert.Equal(t, uint32(0), rtsSmall.consHTDMax)
+
+	rtsEight, err := New[uintptr](8, relaxedOptions()...)
+	assert.NoError(t, err)
+	assert.Equal(t, uint32(1), rtsEight.prodHTDMax)
+	assert.Equal(t, uint32(1), rtsEight.consHTDMax)
+
 	large, err := New[uintptr](1 << 16)
 	assert.NoError(t, err)
 	assertNewRing(t, large, 1<<16)
@@ -96,44 +145,71 @@ func TestRingCount(t *testing.T) {
 
 func TestRingReset(t *testing.T) {
 	buflen := 32
-	buffer, err := New[string](buflen)
-	require.NotNil(t, buffer)
-	require.NoError(t, err)
-
-	// The other occupancy functions are checked along the way, so they need no tests of their own.
-	assert.True(t, buffer.Empty())
-	assert.False(t, buffer.Full())
-	assert.Equal(t, buflen, buffer.Free())
-	assert.Equal(t, 0, buffer.Count())
-
 	item := "test"
-	for i := 0; i < buflen; i++ {
-		err = buffer.Enqueue(item)
+
+	t.Run("default", func(t *testing.T) {
+		buffer, err := New[string](buflen)
+		require.NotNil(t, buffer)
 		require.NoError(t, err)
 
-		assert.False(t, buffer.Empty())
-		if i == buflen-1 {
-			assert.True(t, buffer.Full())
-		} else {
-			assert.False(t, buffer.Full())
+		// The other occupancy functions are checked along the way, so they need no tests of
+		// their own.
+		assert.True(t, buffer.Empty())
+		assert.False(t, buffer.Full())
+		assert.Equal(t, buflen, buffer.Free())
+		assert.Equal(t, 0, buffer.Count())
+
+		for i := 0; i < buflen; i++ {
+			err = buffer.Enqueue(item)
+			require.NoError(t, err)
+
+			assert.False(t, buffer.Empty())
+			if i == buflen-1 {
+				assert.True(t, buffer.Full())
+			} else {
+				assert.False(t, buffer.Full())
+			}
+
+			assert.Equal(t, buflen-1-i, buffer.Free())
+			assert.Equal(t, i+1, buffer.Count())
 		}
 
-		assert.Equal(t, buflen-1-i, buffer.Free())
-		assert.Equal(t, i+1, buffer.Count())
-	}
+		assert.Equal(t, buflen, buffer.Count())
+		assert.Equal(t, 0, buffer.Free())
 
-	assert.Equal(t, buflen, buffer.Count())
-	assert.Equal(t, 0, buffer.Free())
+		buffer.Reset()
 
-	buffer.Reset()
+		assert.True(t, buffer.Empty())
+		assert.False(t, buffer.Full())
+		assert.Equal(t, buflen, buffer.Free())
+		assert.Equal(t, 0, buffer.Count())
 
-	assert.True(t, buffer.Empty())
-	assert.False(t, buffer.Full())
-	assert.Equal(t, buflen, buffer.Free())
-	assert.Equal(t, 0, buffer.Count())
+		_, err = buffer.Dequeue()
+		assert.ErrorIs(t, err, ErrEmpty)
+	})
 
-	_, err = buffer.Dequeue()
-	assert.ErrorIs(t, err, ErrEmpty)
+	t.Run("RTS", func(t *testing.T) {
+		ring, err := New[string](buflen, relaxedOptions()...)
+		require.NoError(t, err)
+		for range buflen {
+			require.NoError(t, ring.Enqueue(item))
+		}
+		require.True(t, ring.Full())
+
+		ring.Reset()
+
+		assert.True(t, ring.Empty())
+		assert.False(t, ring.Full())
+		assert.Equal(t, buflen, ring.Free())
+		assert.Equal(t, 0, ring.Count())
+		assert.Zero(t, ring.prodHeadRTS.Load())
+		assert.Zero(t, ring.prodTailRTS.Load())
+		assert.Zero(t, ring.consHeadRTS.Load())
+		assert.Zero(t, ring.consTailRTS.Load())
+
+		_, err = ring.Dequeue()
+		assert.ErrorIs(t, err, ErrEmpty)
+	})
 }
 
 func TestSPSCRingBuffer(t *testing.T) {
@@ -551,36 +627,39 @@ func assertInvalidCount(t *testing.T, count int) {
 // TestFullCapacity checks that a ring holds exactly its count, from starting indices on both
 // sides of 2^32, so the fill and the drain cross the wrap at different points.
 func TestFullCapacity(t *testing.T) {
-	for _, capacity := range []int{1, 2, 4, 1024} {
-		starts := []uint32{0, math.MaxUint32, math.MaxUint32 - uint32(capacity) + 1}
-		if capacity > 2 {
-			starts = append(starts, math.MaxUint32-uint32(capacity/2)+1)
-		}
-		for i, start := range starts {
-			// For capacity 1, the third start equals the second, so skip the repeat.
-			if slices.Index(starts, start) < i {
-				continue
+	for _, set := range defaultAndRelaxed() {
+		for _, capacity := range []int{1, 2, 4, 1024} {
+			starts := []uint32{0, math.MaxUint32, math.MaxUint32 - uint32(capacity) + 1}
+			if capacity > 2 {
+				starts = append(starts, math.MaxUint32-uint32(capacity/2)+1)
 			}
-			t.Run(fmt.Sprintf("capacity=%d,start=%d", capacity, start), func(t *testing.T) {
-				ring, err := New[int](capacity)
-				require.NoError(t, err)
-				setIndices(ring, start)
-
-				for i := range capacity {
-					require.NoError(t, ring.Enqueue(i))
+			for i, start := range starts {
+				// For capacity 1, the third start equals the second, so skip the repeat.
+				if slices.Index(starts, start) < i {
+					continue
 				}
-				assert.True(t, ring.Full())
-				assert.Equal(t, 0, ring.Free())
-				assert.Equal(t, ring.Capacity(), ring.Count())
-				err = ring.Enqueue(capacity)
-				assert.True(t, err == ErrFull, "got %v", err)
-
-				for i := range capacity {
-					item, err := ring.Dequeue()
+				name := fmt.Sprintf("%s/capacity=%d,start=%d", set.name, capacity, start)
+				t.Run(name, func(t *testing.T) {
+					ring, err := New[int](capacity, set.options...)
 					require.NoError(t, err)
-					assert.Equal(t, i, item)
-				}
-			})
+					setIndices(ring, start)
+
+					for i := range capacity {
+						require.NoError(t, ring.Enqueue(i))
+					}
+					assert.True(t, ring.Full())
+					assert.Equal(t, 0, ring.Free())
+					assert.Equal(t, ring.Capacity(), ring.Count())
+					err = ring.Enqueue(capacity)
+					assert.True(t, err == ErrFull, "got %v", err)
+
+					for i := range capacity {
+						item, err := ring.Dequeue()
+						require.NoError(t, err)
+						assert.Equal(t, i, item)
+					}
+				})
+			}
 		}
 	}
 }
@@ -590,25 +669,27 @@ func TestFullCapacity(t *testing.T) {
 // makes the indices wrap partway through.
 func TestEmptyAgreesWithCount(t *testing.T) {
 	const capacity = 8
-	for _, start := range []uint32{0, math.MaxUint32 - 2} {
-		t.Run(fmt.Sprintf("start=%d", start), func(t *testing.T) {
-			ring, err := New[int](capacity)
-			require.NoError(t, err)
-			setIndices(ring, start)
-
-			assertEmptyAgreesWithCount(t, ring)
-			for i := range capacity {
-				require.NoError(t, ring.Enqueue(i))
-				assertEmptyAgreesWithCount(t, ring)
-			}
-			require.True(t, ring.Full())
-			for range capacity {
-				_, err := ring.Dequeue()
+	for _, set := range defaultAndRelaxed() {
+		for _, start := range []uint32{0, math.MaxUint32 - 2} {
+			t.Run(fmt.Sprintf("%s/start=%d", set.name, start), func(t *testing.T) {
+				ring, err := New[int](capacity, set.options...)
 				require.NoError(t, err)
+				setIndices(ring, start)
+
 				assertEmptyAgreesWithCount(t, ring)
-			}
-			assert.True(t, ring.Empty())
-		})
+				for i := range capacity {
+					require.NoError(t, ring.Enqueue(i))
+					assertEmptyAgreesWithCount(t, ring)
+				}
+				require.True(t, ring.Full())
+				for range capacity {
+					_, err := ring.Dequeue()
+					require.NoError(t, err)
+					assertEmptyAgreesWithCount(t, ring)
+				}
+				assert.True(t, ring.Empty())
+			})
+		}
 	}
 }
 
@@ -1030,18 +1111,22 @@ func TestEnqueueZeroLength(t *testing.T) {
 // TestEnqueueErrorCounts checks the free count EnqueueBulk returns with each error on a ring that
 // is partly full.
 func TestEnqueueErrorCounts(t *testing.T) {
-	ring, err := New[int](8)
-	require.NoError(t, err)
-	requireEnqueueBulk(t, ring, []int{1, 2, 3, 4, 5})
+	for _, set := range defaultAndRelaxed() {
+		t.Run(set.name, func(t *testing.T) {
+			ring, err := New[int](8, set.options...)
+			require.NoError(t, err)
+			requireEnqueueBulk(t, ring, []int{1, 2, 3, 4, 5})
 
-	free, err := ring.EnqueueBulk(make([]int, 4))
-	assert.True(t, err == ErrFull, "got %v", err)
-	assert.Equal(t, 3, free)
+			free, err := ring.EnqueueBulk(make([]int, 4))
+			assert.True(t, err == ErrFull, "got %v", err)
+			assert.Equal(t, 3, free)
 
-	free, err = ring.EnqueueBulk(make([]int, ring.Capacity()+1))
-	assert.ErrorIs(t, err, ErrExceedsCapacity)
-	assert.Equal(t, 3, free)
-	assert.Equal(t, 5, ring.Count())
+			free, err = ring.EnqueueBulk(make([]int, ring.Capacity()+1))
+			assert.ErrorIs(t, err, ErrExceedsCapacity)
+			assert.Equal(t, 3, free)
+			assert.Equal(t, 5, ring.Count())
+		})
+	}
 }
 
 // TestEnqueueCapacityBoundary checks that EnqueueBulk accepts exactly Capacity elements on an empty
@@ -1137,18 +1222,22 @@ func TestDequeueLeavesDst(t *testing.T) {
 // TestDequeueErrorCounts checks the available count DequeueBulk returns with each error on a ring
 // that is partly full.
 func TestDequeueErrorCounts(t *testing.T) {
-	ring, err := New[int](8)
-	require.NoError(t, err)
-	requireEnqueueBulk(t, ring, []int{1, 2, 3, 4, 5})
+	for _, set := range defaultAndRelaxed() {
+		t.Run(set.name, func(t *testing.T) {
+			ring, err := New[int](8, set.options...)
+			require.NoError(t, err)
+			requireEnqueueBulk(t, ring, []int{1, 2, 3, 4, 5})
 
-	available, err := ring.DequeueBulk(make([]int, 6))
-	assert.True(t, err == ErrEmpty, "got %v", err)
-	assert.Equal(t, 5, available)
+			available, err := ring.DequeueBulk(make([]int, 6))
+			assert.True(t, err == ErrEmpty, "got %v", err)
+			assert.Equal(t, 5, available)
 
-	available, err = ring.DequeueBulk(make([]int, ring.Capacity()+1))
-	assert.ErrorIs(t, err, ErrExceedsCapacity)
-	assert.Equal(t, 5, available)
-	assert.Equal(t, 5, ring.Count())
+			available, err = ring.DequeueBulk(make([]int, ring.Capacity()+1))
+			assert.ErrorIs(t, err, ErrExceedsCapacity)
+			assert.Equal(t, 5, available)
+			assert.Equal(t, 5, ring.Count())
+		})
+	}
 }
 
 // TestDequeueCapacityBoundary checks that DequeueBulk accepts exactly Capacity elements from a
@@ -1207,16 +1296,24 @@ func TestDequeueLongSlice(t *testing.T) {
 // through. A bulk enqueue carries the producer indices past 2^32 and a burst dequeue carries the
 // consumer indices past it. Count and Free are checked while only one side has wrapped.
 func TestIndexWrap(t *testing.T) {
-	modes := map[string][]Option{
-		"SPSC": nil,
-		"MPMC": {WithMultiProdEnqueue(), WithMultiConsDequeue()},
+	relaxed := relaxedOptions()
+	cases := []struct {
+		name    string
+		options []Option
+		cnt     uint32
+	}{
+		{name: "SPSC"},
+		{name: "MPMC", options: []Option{WithMultiProdEnqueue(), WithMultiConsDequeue()}},
+		{name: "RTS", options: relaxed},
+		{name: "RTSCounterWrap", options: relaxed, cnt: math.MaxUint32 - 1},
+		{name: "RTSProd", options: []Option{WithRelaxedMultiProdEnqueue()}},
 	}
-	for name, options := range modes {
-		t.Run(name, func(t *testing.T) {
-			ring, err := New[int](8, options...)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ring, err := New[int](8, tc.options...)
 			require.NoError(t, err)
 			const startIndex = math.MaxUint32 - 2
-			setIndices(ring, startIndex)
+			setRelaxedIndices(ring, startIndex, tc.cnt)
 			assertOccupancy(t, ring, 0)
 
 			require.NoError(t, ring.Enqueue(1))
@@ -1259,6 +1356,81 @@ func TestIndexWrap(t *testing.T) {
 	}
 }
 
+// TestRelaxedDispatch runs every enqueue, dequeue, and occupancy call on rings with a relaxed
+// producer, a relaxed consumer, or both, so each call site that dispatches on the mode is covered.
+// The counters start just below 2^32 and wrap during the subtest, while the positions stay near
+// 1000. A site that read a relaxed side's unused 32-bit head, which stays at 0 while the positions
+// are at 1000, would report a wrong count.
+func TestRelaxedDispatch(t *testing.T) {
+	cases := []struct {
+		name    string
+		options []Option
+	}{
+		{name: "rtsProd", options: []Option{WithRelaxedMultiProdEnqueue()}},
+		{name: "rtsCons", options: []Option{WithRelaxedMultiConsDequeue()}},
+		{name: "rts", options: relaxedOptions()},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ring, err := New[int](8, tc.options...)
+			require.NoError(t, err)
+			setRelaxedIndices(ring, 1000, math.MaxUint32-2)
+
+			require.NoError(t, ring.Enqueue(1))
+			require.NoError(t, ring.Enqueue(2))
+			require.NoError(t, ring.Enqueue(3))
+			free, err := ring.EnqueueBulk([]int{4, 5})
+			require.NoError(t, err)
+			assert.Equal(t, 3, free)
+			enqueued, free := ring.EnqueueBurst([]int{6})
+			assert.Equal(t, 1, enqueued)
+			assert.Equal(t, 2, free)
+
+			assertOccupancy(t, ring, 6)
+			assert.False(t, ring.Full())
+			assert.Equal(t, uint32(2), ring.freeEntries())
+			assert.Equal(t, uint32(6), ring.occupiedEntries())
+
+			free, err = ring.EnqueueBulk(make([]int, 3))
+			assert.True(t, err == ErrFull, "got %v", err)
+			assert.Equal(t, 2, free)
+			free, err = ring.EnqueueBulk(make([]int, 9))
+			assert.ErrorIs(t, err, ErrExceedsCapacity)
+			assert.Equal(t, 2, free)
+			available, err := ring.DequeueBulk(make([]int, 9))
+			assert.ErrorIs(t, err, ErrExceedsCapacity)
+			assert.Equal(t, 6, available)
+
+			enqueued, free = ring.EnqueueBurst([]int{7, 8})
+			assert.Equal(t, 2, enqueued)
+			assert.Equal(t, 0, free)
+			assert.True(t, ring.Full())
+
+			item, err := ring.Dequeue()
+			require.NoError(t, err)
+			assert.Equal(t, 1, item)
+			elems := make([]int, 2)
+			available, err = ring.DequeueBulk(elems)
+			require.NoError(t, err)
+			assert.Equal(t, []int{2, 3}, elems)
+			assert.Equal(t, 5, available)
+			elems = make([]int, 4)
+			dequeued, available := ring.DequeueBurst(elems)
+			assert.Equal(t, 4, dequeued)
+			assert.Equal(t, []int{4, 5, 6, 7}, elems)
+			assert.Equal(t, 1, available)
+			item, err = ring.Dequeue()
+			require.NoError(t, err)
+			assert.Equal(t, 8, item)
+
+			assertOccupancy(t, ring, 0)
+			available, err = ring.DequeueBulk(make([]int, 1))
+			assert.True(t, err == ErrEmpty, "got %v", err)
+			assert.Equal(t, 0, available)
+		})
+	}
+}
+
 // assertOccupancy checks that Count, Free, and Empty agree with the expected count.
 func assertOccupancy(t *testing.T, ring *Ring[int], count int) {
 	t.Helper()
@@ -1279,13 +1451,48 @@ func assertNewRing[T any](t *testing.T, ring *Ring[T], count int) {
 	assert.Zero(t, ring.consTail.Load())
 }
 
-// setIndices places all four indices of an empty ring at start, so a test can run the ring across
-// the 2^32 wrap. It is the only test code that writes the indices.
+// setIndices places every index of an empty ring at start, with relaxed counters at 0, so a test
+// can run the ring across the 2^32 wrap.
 func setIndices[T any](ring *Ring[T], start uint32) {
-	fields := []*atomic.Uint32{&ring.prodHead, &ring.prodTail, &ring.consHead, &ring.consTail}
-	for _, index := range fields {
-		index.Store(start)
+	setRelaxedIndices(ring, start, 0)
+}
+
+// setRelaxedIndices places every index of an empty ring at pos, and the counters of the relaxed
+// sides at cnt, so a test can wrap the position and the counter separately. It leaves a relaxed
+// side's unused 32-bit head at 0, so a site that wrongly reads it reports a visibly wrong count.
+// setIndices and setRelaxedIndices are the only test code that writes the indices.
+func setRelaxedIndices[T any](ring *Ring[T], pos, cnt uint32) {
+	ring.prodTail.Store(pos)
+	ring.consTail.Store(pos)
+	if ring.prodMode == modeRelaxed {
+		ring.prodHeadRTS.Store(pack(pos, cnt))
+		ring.prodTailRTS.Store(pack(pos, cnt))
+	} else {
+		ring.prodHead.Store(pos)
 	}
+	if ring.consMode == modeRelaxed {
+		ring.consHeadRTS.Store(pack(pos, cnt))
+		ring.consTailRTS.Store(pack(pos, cnt))
+	} else {
+		ring.consHead.Store(pos)
+	}
+}
+
+// relaxedOptions returns the options that make both sides of a ring relaxed.
+func relaxedOptions() []Option {
+	return []Option{WithRelaxedMultiProdEnqueue(), WithRelaxedMultiConsDequeue()}
+}
+
+// An optionSet is a named set of options a test runs under.
+type optionSet struct {
+	name    string
+	options []Option
+}
+
+// defaultAndRelaxed returns the option sets for a test that runs on a ring with no options and on
+// one with both sides relaxed.
+func defaultAndRelaxed() []optionSet {
+	return []optionSet{{name: "default"}, {name: "RTS", options: relaxedOptions()}}
 }
 
 // TestMaxBatchOptions checks that both batch limits default to the capacity, that each option
@@ -1500,7 +1707,8 @@ type stressMode struct {
 }
 
 // stressModes returns the configurations the tagged stress tests run under: one producer and one
-// consumer on an SPSC ring, and four of each on an MPMC ring.
+// consumer on an SPSC ring, and four of each on an MPMC ring, on a ring with both sides relaxed,
+// and on rings with one relaxed side and one multi side.
 func stressModes() []stressMode {
 	return []stressMode{
 		{name: "SPSC", producers: 1, consumers: 1},
@@ -1509,6 +1717,24 @@ func stressModes() []stressMode {
 			producers: 4,
 			consumers: 4,
 			options:   []Option{WithMultiProdEnqueue(), WithMultiConsDequeue()},
+		},
+		{
+			name:      "RTS",
+			producers: 4,
+			consumers: 4,
+			options:   relaxedOptions(),
+		},
+		{
+			name:      "RTSProdMultiCons",
+			producers: 4,
+			consumers: 4,
+			options:   []Option{WithRelaxedMultiProdEnqueue(), WithMultiConsDequeue()},
+		},
+		{
+			name:      "MultiProdRTSCons",
+			producers: 4,
+			consumers: 4,
+			options:   []Option{WithMultiProdEnqueue(), WithRelaxedMultiConsDequeue()},
 		},
 	}
 }
@@ -1717,7 +1943,9 @@ func TestCapacityOne(t *testing.T) {
 }
 
 // TestConcurrentWrap moves tagged values in bursts through a ring whose indices start just below
-// 2^32, so they wrap while the producers and consumers contend.
+// 2^32, so they wrap while the producers and consumers contend. Relaxed sides start their
+// counters near 2^32 as well, at a different point from the positions, so both wrap under
+// contention.
 func TestConcurrentWrap(t *testing.T) {
 	const (
 		total = 100_000
@@ -1728,7 +1956,7 @@ func TestConcurrentWrap(t *testing.T) {
 			ring, err := New[uint64](64, mode.options...)
 			require.NoError(t, err)
 			const startIndex = math.MaxUint32 - 999
-			setIndices(ring, startIndex)
+			setRelaxedIndices(ring, startIndex, math.MaxUint32-99)
 			enqueue, dequeue := burstCalls(ring)
 
 			perProducer := total / mode.producers
@@ -1748,8 +1976,8 @@ func TestConcurrentWrap(t *testing.T) {
 	}
 }
 
-// TestGOMAXPROCSOne checks that every element arrives exactly once and in order on SPSC and MPMC
-// rings with only one CPU. Whether a waiter actually meets an unpublished predecessor depends on
+// TestGOMAXPROCSOne checks that every element arrives exactly once and in order in every stress
+// mode with only one CPU. Whether a waiter actually meets an unpublished predecessor depends on
 // preemption timing, so TestWaitForTail tests the wait itself. It does not call t.Parallel,
 // because GOMAXPROCS is process-wide.
 func TestGOMAXPROCSOne(t *testing.T) {
@@ -1837,6 +2065,106 @@ func TestWaitForTail(t *testing.T) {
 
 			tail.Store(tc.want)
 			stressDeadline(t, waiting.Wait)
+		})
+	}
+}
+
+// TestWaitHeadTailDistance checks that waitHeadTailDistance returns only once the head position
+// is at most htdMax past the tail position, and then returns the head word. The head changes
+// before the release, so a wait that returned a head loaded before it waited would fail. It runs
+// with one CPU for the reason TestWaitForTail gives, and does not call t.Parallel, because
+// GOMAXPROCS is process-wide. The wrap case catches a distance computed without wrapping
+// arithmetic.
+func TestWaitHeadTailDistance(t *testing.T) {
+	const yields = 1000
+	previous := runtime.GOMAXPROCS(1)
+	t.Cleanup(func() { runtime.GOMAXPROCS(previous) })
+
+	var readyHead, readyTail atomic.Uint64
+	readyHead.Store(pack(10, 5))
+	readyTail.Store(pack(8, 5))
+	var got uint64
+	stressDeadline(t, func() {
+		got = waitHeadTailDistance(&readyHead, &readyTail, 2)
+	})
+	require.Equal(t, pack(10, 5), got)
+
+	cases := []struct {
+		name        string
+		htdMax      uint32
+		head        uint64
+		newHead     uint64
+		tail        uint64
+		tailsBefore []uint64
+		release     uint64
+	}{
+		{
+			name:        "bound2",
+			htdMax:      2,
+			head:        pack(10, 5),
+			newHead:     pack(10, 6),
+			tail:        pack(6, 3),
+			tailsBefore: []uint64{pack(7, 4)},
+			release:     pack(8, 5),
+		},
+		{
+			name:    "bound0",
+			htdMax:  0,
+			head:    pack(5, 3),
+			newHead: pack(5, 4),
+			tail:    pack(4, 2),
+			release: pack(5, 3),
+		},
+		{
+			name:        "wrap",
+			htdMax:      2,
+			head:        pack(1, 9),
+			newHead:     pack(1, 10),
+			tail:        pack(math.MaxUint32-2, 6),
+			tailsBefore: []uint64{pack(math.MaxUint32-1, 7)},
+			release:     pack(math.MaxUint32, 8),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var head, tail atomic.Uint64
+			head.Store(tc.head)
+			tail.Store(tc.tail)
+			var returnedWord atomic.Uint64
+			var returned atomic.Bool
+			var waiting sync.WaitGroup
+			waiting.Go(func() {
+				returnedWord.Store(waitHeadTailDistance(&head, &tail, tc.htdMax))
+				returned.Store(true)
+			})
+
+			for range yields {
+				runtime.Gosched()
+			}
+			require.False(
+				t,
+				returned.Load(),
+				"waitHeadTailDistance returned with the tail at %#x",
+				tc.tail,
+			)
+
+			for _, value := range tc.tailsBefore {
+				tail.Store(value)
+				for range yields {
+					runtime.Gosched()
+				}
+				require.False(
+					t,
+					returned.Load(),
+					"waitHeadTailDistance returned with the tail at %#x",
+					value,
+				)
+			}
+
+			head.Store(tc.newHead)
+			tail.Store(tc.release)
+			stressDeadline(t, waiting.Wait)
+			assert.Equal(t, tc.newHead, returnedWord.Load())
 		})
 	}
 }
@@ -1998,7 +2326,9 @@ func TestRelaxedPublishOrder(t *testing.T) {
 }
 
 // TestRaiseMirror checks that raiseMirror raises the mirror to the tail position, across the wrap,
-// and never lowers it.
+// and never lowers it. Two raisers racing between the load and the compare-and-swap cannot be
+// staged deterministically, so the relaxed stress modes are what catch a raise that stores
+// instead of comparing.
 func TestRaiseMirror(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -2069,7 +2399,8 @@ func TestMirrorLag(t *testing.T) {
 //
 // This test checks correctness. It is not a guaranteed guard for Count's load order, because the
 // reversed order breaks the bound only in a narrow window, which the test may miss on some
-// machines or schedules.
+// machines or schedules. It has no case with relaxed consumers, because a relaxed dequeue can
+// return before the consumer tail moves past its elements, so the bound does not hold there.
 func TestCountSnapshot(t *testing.T) {
 	const (
 		workers     = 4
@@ -2079,66 +2410,84 @@ func TestCountSnapshot(t *testing.T) {
 		checkers    = 2
 		yieldEvery  = 64
 	)
-	ring, err := New[int](64, WithMultiProdEnqueue(), WithMultiConsDequeue())
-	require.NoError(t, err)
+	cases := []struct {
+		name    string
+		options []Option
+	}{
+		{name: "MPMC", options: []Option{WithMultiProdEnqueue(), WithMultiConsDequeue()}},
+		{
+			name:    "RTSProd",
+			options: []Option{WithRelaxedMultiProdEnqueue(), WithMultiConsDequeue()},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ring, err := New[int](64, tc.options...)
+			require.NoError(t, err)
 
-	var enqueuedCount, overcounts atomic.Int64
-	drain := drainState{expected: total}
-	stressDeadline(t, func() {
-		var producing, consuming, checking sync.WaitGroup
-		for range workers {
-			producing.Go(func() {
-				items := make([]int, batch)
-				for sent := 0; sent < perProducer; {
-					request := min(batch, perProducer-sent)
-					enqueuedCount.Add(int64(request))
-					enqueued, _ := ring.EnqueueBurst(items[:request])
-					enqueuedCount.Add(int64(enqueued - request))
-					if enqueued == 0 {
-						runtime.Gosched()
-					}
-					sent += enqueued
+			var enqueuedCount, overcounts atomic.Int64
+			drain := drainState{expected: total}
+			stressDeadline(t, func() {
+				var producing, consuming, checking sync.WaitGroup
+				for range workers {
+					producing.Go(func() {
+						items := make([]int, batch)
+						for sent := 0; sent < perProducer; {
+							request := min(batch, perProducer-sent)
+							enqueuedCount.Add(int64(request))
+							enqueued, _ := ring.EnqueueBurst(items[:request])
+							enqueuedCount.Add(int64(enqueued - request))
+							if enqueued == 0 {
+								runtime.Gosched()
+							}
+							sent += enqueued
+						}
+					})
 				}
-			})
-		}
-		for range workers {
-			consuming.Go(func() {
-				dst := make([]int, batch)
-				drain.consume(func() (moved, requested int) {
-					dequeued, _ := ring.DequeueBurst(dst)
-					return dequeued, len(dst)
-				})
-			})
-		}
-
-		// Each checker yields every yieldEvery checks, so the checkers sample densely without
-		// starving the producers and consumers when they share one processor.
-		var done atomic.Bool
-		for range checkers {
-			checking.Go(func() {
-				for check := 1; !done.Load(); check++ {
-					dequeued := drain.received.Load()
-					count := ring.Count()
-					enqueued := enqueuedCount.Load()
-					if int64(count) > enqueued-dequeued {
-						overcounts.Add(1)
-					}
-					if check%yieldEvery == 0 {
-						runtime.Gosched()
-					}
+				for range workers {
+					consuming.Go(func() {
+						dst := make([]int, batch)
+						drain.consume(func() (moved, requested int) {
+							dequeued, _ := ring.DequeueBurst(dst)
+							return dequeued, len(dst)
+						})
+					})
 				}
-			})
-		}
-		producing.Wait()
-		drain.producersDone.Store(true)
-		consuming.Wait()
-		done.Store(true)
-		checking.Wait()
-	})
 
-	assert.False(t, drain.overReceived.Load(), "the ring returned more elements than were sent")
-	assert.Equal(t, int64(total), drain.received.Load())
-	assert.Zero(t, overcounts.Load(), "Count exceeded enqueued minus dequeued")
+				// Each checker yields every yieldEvery checks, so the checkers sample densely
+				// without starving the producers and consumers when they share one processor.
+				var done atomic.Bool
+				for range checkers {
+					checking.Go(func() {
+						for check := 1; !done.Load(); check++ {
+							dequeued := drain.received.Load()
+							count := ring.Count()
+							enqueued := enqueuedCount.Load()
+							if int64(count) > enqueued-dequeued {
+								overcounts.Add(1)
+							}
+							if check%yieldEvery == 0 {
+								runtime.Gosched()
+							}
+						}
+					})
+				}
+				producing.Wait()
+				drain.producersDone.Store(true)
+				consuming.Wait()
+				done.Store(true)
+				checking.Wait()
+			})
+
+			assert.False(
+				t,
+				drain.overReceived.Load(),
+				"the ring returned more elements than were sent",
+			)
+			assert.Equal(t, int64(total), drain.received.Load())
+			assert.Zero(t, overcounts.Load(), "Count exceeded enqueued minus dequeued")
+		})
+	}
 }
 
 // TestBulkUnderContention moves tagged values with bulk calls on an MPMC ring. Every successful
@@ -2225,83 +2574,98 @@ func TestCountBounds(t *testing.T) {
 		probers      = 3
 		yieldEvery   = 64
 	)
-	ring, err := New[int](64, WithMultiProdEnqueue(), WithMultiConsDequeue())
-	require.NoError(t, err)
-	capacity := ring.Capacity()
-	inBounds := func(count int) bool {
-		return count >= 0 && count <= capacity
+	cases := []struct {
+		name    string
+		options []Option
+	}{
+		{name: "MPMC", options: []Option{WithMultiProdEnqueue(), WithMultiConsDequeue()}},
+		{name: "RTS", options: relaxedOptions()},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ring, err := New[int](64, tc.options...)
+			require.NoError(t, err)
+			capacity := ring.Capacity()
+			inBounds := func(count int) bool {
+				return count >= 0 && count <= capacity
+			}
 
-	var freeOutOfBounds, availableOutOfBounds atomic.Int64
-	drain := drainState{expected: total}
-	stressDeadline(t, func() {
-		var producing, consuming, probing sync.WaitGroup
-		for range workers {
-			producing.Go(func() {
-				items := make([]int, enqueueBatch)
-				for call, sent := 0, 0; sent < perProducer; call++ {
-					request := min(enqueueBatch, perProducer-sent)
-					if call%zeroEvery == zeroEvery-1 {
-						request = 0
-					}
-					enqueued, free := ring.EnqueueBurst(items[:request])
-					if !inBounds(free) {
-						freeOutOfBounds.Add(1)
-					}
-					if enqueued == 0 {
-						runtime.Gosched()
-					}
-					sent += enqueued
+			var freeOutOfBounds, availableOutOfBounds atomic.Int64
+			drain := drainState{expected: total}
+			stressDeadline(t, func() {
+				var producing, consuming, probing sync.WaitGroup
+				for range workers {
+					producing.Go(func() {
+						items := make([]int, enqueueBatch)
+						for call, sent := 0, 0; sent < perProducer; call++ {
+							request := min(enqueueBatch, perProducer-sent)
+							if call%zeroEvery == zeroEvery-1 {
+								request = 0
+							}
+							enqueued, free := ring.EnqueueBurst(items[:request])
+							if !inBounds(free) {
+								freeOutOfBounds.Add(1)
+							}
+							if enqueued == 0 {
+								runtime.Gosched()
+							}
+							sent += enqueued
+						}
+					})
 				}
-			})
-		}
-		for range workers {
-			consuming.Go(func() {
-				dst := make([]int, dequeueBatch)
-				call := 0
-				drain.consume(func() (moved, requested int) {
-					request := dequeueBatch
-					if call%zeroEvery == zeroEvery-1 {
-						request = 0
-					}
-					call++
-					dequeued, available := ring.DequeueBurst(dst[:request])
-					if !inBounds(available) {
-						availableOutOfBounds.Add(1)
-					}
-					return dequeued, request
-				})
-			})
-		}
-		var done atomic.Bool
-		for range probers {
-			probing.Go(func() {
-				for call := 1; !done.Load(); call++ {
-					_, free := ring.EnqueueBurst(nil)
-					if !inBounds(free) {
-						freeOutOfBounds.Add(1)
-					}
-					_, available := ring.DequeueBurst(nil)
-					if !inBounds(available) {
-						availableOutOfBounds.Add(1)
-					}
-					if call%yieldEvery == 0 {
-						runtime.Gosched()
-					}
+				for range workers {
+					consuming.Go(func() {
+						dst := make([]int, dequeueBatch)
+						call := 0
+						drain.consume(func() (moved, requested int) {
+							request := dequeueBatch
+							if call%zeroEvery == zeroEvery-1 {
+								request = 0
+							}
+							call++
+							dequeued, available := ring.DequeueBurst(dst[:request])
+							if !inBounds(available) {
+								availableOutOfBounds.Add(1)
+							}
+							return dequeued, request
+						})
+					})
 				}
+				var done atomic.Bool
+				for range probers {
+					probing.Go(func() {
+						for call := 1; !done.Load(); call++ {
+							_, free := ring.EnqueueBurst(nil)
+							if !inBounds(free) {
+								freeOutOfBounds.Add(1)
+							}
+							_, available := ring.DequeueBurst(nil)
+							if !inBounds(available) {
+								availableOutOfBounds.Add(1)
+							}
+							if call%yieldEvery == 0 {
+								runtime.Gosched()
+							}
+						}
+					})
+				}
+				producing.Wait()
+				drain.producersDone.Store(true)
+				consuming.Wait()
+				done.Store(true)
+				probing.Wait()
 			})
-		}
-		producing.Wait()
-		drain.producersDone.Store(true)
-		consuming.Wait()
-		done.Store(true)
-		probing.Wait()
-	})
 
-	assert.False(t, drain.overReceived.Load(), "the ring returned more elements than were sent")
-	assert.Equal(t, int64(total), drain.received.Load())
-	assert.Zero(t, freeOutOfBounds.Load(), "free out of bounds")
-	assert.Zero(t, availableOutOfBounds.Load(), "available out of bounds")
+			assert.False(
+				t,
+				drain.overReceived.Load(),
+				"the ring returned more elements than were sent",
+			)
+			assert.Equal(t, int64(total), drain.received.Load())
+			assert.Zero(t, freeOutOfBounds.Load(), "free out of bounds")
+			assert.Zero(t, availableOutOfBounds.Load(), "available out of bounds")
+		})
+	}
 }
 
 // TestErrorIdentity checks that every call returns ErrFull and ErrEmpty unwrapped, so they compare

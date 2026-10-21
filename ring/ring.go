@@ -50,7 +50,26 @@ type syncMode uint8
 const (
 	modeSingle syncMode = iota
 	modeMulti
+	modeRelaxed
 )
+
+// pack returns the relaxed index word that holds pos in its high 32 bits and cnt in its low 32.
+// Every relaxed index is built with pack and read with unpackPos and unpackCnt, and all
+// arithmetic happens on the 32-bit fields, so a counter that wraps never carries into the
+// position.
+func pack(pos, cnt uint32) uint64 {
+	return uint64(pos)<<32 | uint64(cnt)
+}
+
+// unpackPos returns the position in a relaxed index word.
+func unpackPos(word uint64) uint32 {
+	return uint32(word >> 32)
+}
+
+// unpackCnt returns the counter in a relaxed index word.
+func unpackCnt(word uint64) uint32 {
+	return uint32(word)
+}
 
 // readOnly holds the fields New sets and nothing writes afterward, so every core can keep the
 // line holding them in its cache.
@@ -59,6 +78,8 @@ type readOnly[T any] struct {
 	mask            uint32
 	maxEnqueueBatch uint32
 	maxDequeueBatch uint32
+	prodHTDMax      uint32
+	consHTDMax      uint32
 	prodMode        syncMode
 	consMode        syncMode
 	clearOnDequeue  bool
@@ -67,11 +88,21 @@ type readOnly[T any] struct {
 // indices holds all four indices on one line, the layout that held up on both benchmarked
 // platforms. A line per side was far slower on Apple silicon. The likely reason is that each
 // side reads the other side's tail on every call, so one line moves between cores instead of two.
+//
+// A relaxed side uses the 64-bit indices, each a pos and cnt word built with pack. It also keeps
+// its 32-bit tail as a copy of its 64-bit tail's position, raised by raiseMirror, so the other
+// side reads the 32-bit tails in every mode. Go has no sound way to load half of a 64-bit atomic
+// word, which is how DPDK lets the other side read the position directly. A relaxed side's
+// 32-bit head stays unused.
 type indices struct {
-	prodHead atomic.Uint32
-	prodTail atomic.Uint32
-	consHead atomic.Uint32
-	consTail atomic.Uint32
+	prodHead    atomic.Uint32
+	prodTail    atomic.Uint32
+	consHead    atomic.Uint32
+	consTail    atomic.Uint32
+	prodHeadRTS atomic.Uint64
+	prodTailRTS atomic.Uint64
+	consHeadRTS atomic.Uint64
+	consTailRTS atomic.Uint64
 }
 
 // Ring is a fixed-size, lock-free ring buffer modeled on DPDK's rte_ring. It works as a FIFO queue
@@ -79,9 +110,11 @@ type indices struct {
 //
 // Without options, a ring allows one producer and one consumer at a time. WithMultiProdEnqueue
 // makes the enqueue methods safe for concurrent producers, and WithMultiConsDequeue does the same
-// for the dequeue methods and consumers. WithMaxEnqueueBatch, WithMaxDequeueBatch, and
-// WithMaxBatch limit how many elements one batch call moves. WithoutDequeueClearing leaves dequeued
-// slots uncleared.
+// for the dequeue methods and consumers. WithRelaxedMultiProdEnqueue and
+// WithRelaxedMultiConsDequeue do the same with relaxed tail sync, so the goroutines on a side do
+// not wait for each other to publish. WithMaxEnqueueBatch, WithMaxDequeueBatch, and WithMaxBatch
+// limit how many elements one batch call moves. WithoutDequeueClearing leaves dequeued slots
+// uncleared.
 //
 // The ring holds exactly count elements, where count is the count given to New.
 //
@@ -120,7 +153,8 @@ type config struct {
 type Option func(*config)
 
 // WithMultiProdEnqueue returns an Option that makes the enqueue methods safe for concurrent use by
-// multiple producers.
+// multiple producers. When it and WithRelaxedMultiProdEnqueue are both given, the last one
+// applies.
 //
 // A producer stalled between loading the producer head and its compare-and-swap, while a multiple
 // of 2^32 elements pass through, would reserve with a stale count and could overwrite unconsumed
@@ -133,7 +167,8 @@ func WithMultiProdEnqueue() Option {
 }
 
 // WithMultiConsDequeue returns an Option that makes the dequeue methods safe for concurrent use by
-// multiple consumers.
+// multiple consumers. When it and WithRelaxedMultiConsDequeue are both given, the last one
+// applies.
 //
 // A consumer stalled between loading the consumer head and its compare-and-swap, while a multiple
 // of 2^32 elements pass through, would reserve with a stale count and could return elements
@@ -145,17 +180,79 @@ func WithMultiConsDequeue() Option {
 	}
 }
 
+// WithRelaxedMultiProdEnqueue returns an Option that makes the enqueue methods safe for concurrent
+// use by multiple producers, with relaxed tail sync, DPDK's RTS mode. When it and
+// WithMultiProdEnqueue are both given, the last one applies.
+//
+// With WithMultiProdEnqueue, a producer publishes only after every producer that reserved before
+// it has published. With this option a producer finishes without waiting for the others, and
+// consumers see the producers' elements once every reservation made so far has finished. A
+// producer descheduled at any point from its reservation to the end of its call still holds back
+// every element reserved after it, and an enqueue can return before consumers can see its
+// elements. Other producers keep enqueuing until the producer head is an eighth of the ring,
+// rounded down, past the producer tail, and then wait. That distance includes finished enqueues
+// still held back by an unfinished one, and a call checks it before reserving, so its own batch
+// can take the head further. On a ring of fewer than 8 slots that bound is 0, so producers take
+// turns. The wait comes before the check for free slots, so a call that finds the ring full, or a
+// zero-length call, can wait before it returns.
+//
+// A producer stalled between loading the producer head and its compare-and-swap, while a multiple
+// of 2^32 reservations pass through, would succeed with a stale view. The head holds both a
+// position and a count of reservations, and both must match. The publish and the update of the
+// tail that consumers read are compare-and-swaps with the same exposure. As with
+// WithMultiProdEnqueue, that many operations during one stall is far outside practical use.
+//
+// On platforms that implement 64-bit atomics with a lock, such as mips, this mode is correct but
+// not lock-free.
+func WithRelaxedMultiProdEnqueue() Option {
+	return func(cfg *config) {
+		cfg.prodMode = modeRelaxed
+	}
+}
+
+// WithRelaxedMultiConsDequeue returns an Option that makes the dequeue methods safe for concurrent
+// use by multiple consumers, with relaxed tail sync, DPDK's RTS mode. When it and
+// WithMultiConsDequeue are both given, the last one applies.
+//
+// With WithMultiConsDequeue, a consumer releases its slots only after every consumer that reserved
+// before it has released theirs. With this option a consumer finishes without waiting for the
+// others, and producers can reuse the consumers' slots once every reservation made so far has
+// finished. A consumer descheduled at any point from its reservation to the end of its call still
+// holds back the release of every slot reserved after it, and Count can include elements a
+// dequeue has already returned. Other consumers keep dequeuing until the consumer head is an
+// eighth of the ring, rounded down, past the consumer tail, and then wait. That distance includes
+// finished dequeues still held back by an unfinished one, and a call checks it before reserving,
+// so its own batch can take the head further. On a ring of fewer than 8 slots that bound is 0, so
+// consumers take turns. The wait comes before the check for occupied entries, so a call that finds
+// the ring empty, or a zero-length call, can wait before it returns.
+//
+// A consumer stalled between loading the consumer head and its compare-and-swap, while a multiple
+// of 2^32 reservations pass through, would succeed with a stale view. The head holds both a
+// position and a count of reservations, and both must match. The release and the update of the
+// tail that producers read are compare-and-swaps with the same exposure. As with
+// WithMultiConsDequeue, that many operations during one stall is far outside practical use.
+//
+// On platforms that implement 64-bit atomics with a lock, such as mips, this mode is correct but
+// not lock-free.
+func WithRelaxedMultiConsDequeue() Option {
+	return func(cfg *config) {
+		cfg.consMode = modeRelaxed
+	}
+}
+
 // WithMaxEnqueueBatch returns an Option that limits every enqueue batch call to at most n
 // elements. EnqueueBurst moves at most n, and EnqueueBulk rejects a request for more than n with
 // ErrExceedsMaxBatch. Enqueue moves one element, so the limit never affects it. Without a limit
 // the enqueue batch may be as large as the capacity. New returns an error wrapping
 // ErrInvalidMaxBatch when the limit is below 1 or above the count.
 //
-// The limit bounds how long one enqueue can make others wait. With multiple producers, a producer
-// publishes only after every producer that reserved before it has published, so a long batch
-// delays every producer that reserved after it until its copy finishes. With one producer or
-// many, a batch is published all at once, so consumers see none of it until its whole copy is
-// done. Choose n from the element size and the delay the ring's users can tolerate.
+// The limit bounds how long one enqueue can make others wait. With WithMultiProdEnqueue, a
+// producer publishes only after every producer that reserved before it has published, so a long
+// batch delays every producer that reserved after it until its copy finishes. With
+// WithRelaxedMultiProdEnqueue, it delays consumers' view of every element reserved after it
+// instead. With one producer or many, a batch is published all at once, so consumers see none of
+// it until its whole copy is done. Choose n from the element size and the delay the ring's users
+// can tolerate.
 //
 // When options set the same limit more than once, the last one given applies. New checks only the
 // limit that applies.
@@ -171,12 +268,13 @@ func WithMaxEnqueueBatch(n int) Option {
 // the dequeue batch may be as large as the capacity. New returns an error wrapping
 // ErrInvalidMaxBatch when the limit is below 1 or above the count.
 //
-// The limit bounds how long one dequeue can make others wait. With multiple consumers, a consumer
-// releases its slots only after every consumer that reserved before it has released theirs, so a
-// long batch delays every consumer that reserved after it until its copy finishes. With one
-// consumer or many, a batch's slots are released all at once, so producers cannot reuse any of
-// them until its whole copy is done. Choose n from the element size and the delay the ring's users
-// can tolerate.
+// The limit bounds how long one dequeue can make others wait. With WithMultiConsDequeue, a
+// consumer releases its slots only after every consumer that reserved before it has released
+// theirs, so a long batch delays every consumer that reserved after it until its copy finishes.
+// With WithRelaxedMultiConsDequeue, it delays the release of every slot reserved after it
+// instead. With one consumer or many, a batch's slots are released all at once, so producers
+// cannot reuse any of them until its whole copy is done. Choose n from the element size and the
+// delay the ring's users can tolerate.
 //
 // When options set the same limit more than once, the last one given applies. New checks only the
 // limit that applies.
@@ -216,6 +314,16 @@ func WithoutDequeueClearing() Option {
 // maxCount is the largest count New accepts, the largest power of two DPDK accepts.
 const maxCount = 1 << 30
 
+// relaxedHTDMax returns the head-to-tail bound for a side in mode on a ring of count slots: an
+// eighth of the ring, DPDK's default, for a relaxed side, and 0 for any other, which never reads
+// it.
+func relaxedHTDMax(mode syncMode, count int) uint32 {
+	if mode != modeRelaxed {
+		return 0
+	}
+	return uint32(count / 8)
+}
+
 // New returns an empty Ring with count slots. A ring of count n holds n elements. Without options,
 // the ring allows one producer and one consumer at a time, and a batch call may move up to the
 // whole capacity. It returns an error wrapping ErrInvalidCount when count is not a power of two
@@ -245,6 +353,8 @@ func New[T any](count int, options ...Option) (*Ring[T], error) {
 			mask:            uint32(count - 1),
 			maxEnqueueBatch: uint32(cfg.maxEnqueueBatch),
 			maxDequeueBatch: uint32(cfg.maxDequeueBatch),
+			prodHTDMax:      relaxedHTDMax(cfg.prodMode, count),
+			consHTDMax:      relaxedHTDMax(cfg.consMode, count),
 			prodMode:        cfg.prodMode,
 			consMode:        cfg.consMode,
 			clearOnDequeue:  !cfg.keepDequeued,
@@ -300,6 +410,10 @@ func (r *Ring[T]) Reset() {
 	r.prodTail.Store(0)
 	r.consHead.Store(0)
 	r.consTail.Store(0)
+	r.prodHeadRTS.Store(0)
+	r.prodTailRTS.Store(0)
+	r.consHeadRTS.Store(0)
+	r.consTailRTS.Store(0)
 }
 
 // Count returns the number of occupied entries in the ring.
@@ -308,15 +422,18 @@ func (r *Ring[T]) Reset() {
 // exactly Capacity elements, so a full ring's difference equals the capacity, and masking it would
 // report a full ring as empty.
 //
-// It loads the consumer tail before the producer tail. The producer tail only grows and is never
-// behind the consumer tail, so the producer tail loaded second is never behind the consumer tail
-// loaded first, and the difference cannot underflow. Loading them in the other order lets
-// consumers pass the producer tail that was read, and the underflow would report a nearly empty
-// ring as full.
+// It loads the consumer tail before the producer tail. In every mode, the 32-bit consumer tail,
+// which trails the 64-bit one on a relaxed side, is never past the consumer head, which is never
+// past the 32-bit producer tail, and both tails only grow. So the producer tail loaded second is
+// never behind the consumer tail loaded first, and the difference cannot underflow. Loading them
+// in the other order lets consumers pass the producer tail that was read, and the underflow
+// would report a nearly empty ring as full.
 //
 // Under concurrency the result is a snapshot. Dequeues that complete between the two loads, with
 // the enqueues that refill the ring, can make it report more entries than the ring holds. It never
-// exceeds Capacity.
+// exceeds Capacity. With relaxed consumers it can also count elements that a dequeue has already
+// returned, until the consumer tail moves past them. With relaxed producers it can miss elements
+// whose enqueue has already returned, until the producer tail moves past them.
 func (r *Ring[T]) Count() int {
 	consTail := r.consTail.Load()
 	prodTail := r.prodTail.Load()
@@ -343,7 +460,7 @@ func (r *Ring[T]) Empty() bool {
 // Enqueue places item in the ring. It returns ErrFull, unwrapped, when the ring has no free slot.
 //
 // Enqueue is safe for concurrent use with other enqueues only when the ring was created with
-// WithMultiProdEnqueue. It is always safe to run alongside dequeues.
+// WithMultiProdEnqueue or WithRelaxedMultiProdEnqueue. It is always safe to run alongside dequeues.
 func (r *Ring[T]) Enqueue(item T) error {
 	items := [1]T{item}
 	enqueued, _ := r.doEnqueue(items[:], true)
@@ -365,7 +482,7 @@ func (r *Ring[T]) Enqueue(item T) error {
 // between 0 and Capacity inclusive.
 //
 // EnqueueBulk is safe for concurrent use with other enqueues only when the ring was created with
-// WithMultiProdEnqueue. It is always safe to run alongside dequeues.
+// WithMultiProdEnqueue or WithRelaxedMultiProdEnqueue. It is always safe to run alongside dequeues.
 func (r *Ring[T]) EnqueueBulk(items []T) (free int, err error) {
 	// The limit is at most the capacity, so one comparison guards both checks on the success
 	// path. It is in int, so a length beyond the uint32 range cannot truncate.
@@ -388,7 +505,7 @@ func (r *Ring[T]) EnqueueBulk(items []T) (free int, err error) {
 // Capacity inclusive.
 //
 // EnqueueBurst is safe for concurrent use with other enqueues only when the ring was created with
-// WithMultiProdEnqueue. It is always safe to run alongside dequeues.
+// WithMultiProdEnqueue or WithRelaxedMultiProdEnqueue. It is always safe to run alongside dequeues.
 func (r *Ring[T]) EnqueueBurst(items []T) (enqueued, free int) {
 	// Clamping in int keeps a slice longer than 2^32 from truncating when its length becomes a
 	// uint32 in doEnqueue. The limit is at most the capacity, so it bounds both.
@@ -401,7 +518,7 @@ func (r *Ring[T]) EnqueueBurst(items []T) (enqueued, free int) {
 // ErrEmpty, unwrapped, when the ring is empty.
 //
 // Dequeue is safe for concurrent use with other dequeues only when the ring was created with
-// WithMultiConsDequeue. It is always safe to run alongside enqueues.
+// WithMultiConsDequeue or WithRelaxedMultiConsDequeue. It is always safe to run alongside enqueues.
 func (r *Ring[T]) Dequeue() (T, error) {
 	var dst [1]T
 	dequeued, _ := r.doDequeue(dst[:], true)
@@ -425,7 +542,7 @@ func (r *Ring[T]) Dequeue() (T, error) {
 // the call, between 0 and Capacity inclusive.
 //
 // DequeueBulk is safe for concurrent use with other dequeues only when the ring was created with
-// WithMultiConsDequeue. It is always safe to run alongside enqueues.
+// WithMultiConsDequeue or WithRelaxedMultiConsDequeue. It is always safe to run alongside enqueues.
 func (r *Ring[T]) DequeueBulk(dst []T) (available int, err error) {
 	// The limit is at most the capacity, so one comparison guards both checks on the success
 	// path. It is in int, so a length beyond the uint32 range cannot truncate.
@@ -449,7 +566,7 @@ func (r *Ring[T]) DequeueBulk(dst []T) (available int, err error) {
 // between 0 and Capacity inclusive.
 //
 // DequeueBurst is safe for concurrent use with other dequeues only when the ring was created with
-// WithMultiConsDequeue. It is always safe to run alongside enqueues.
+// WithMultiConsDequeue or WithRelaxedMultiConsDequeue. It is always safe to run alongside enqueues.
 func (r *Ring[T]) DequeueBurst(dst []T) (dequeued, available int) {
 	// Clamping in int keeps a slice longer than 2^32 from truncating when its length becomes a
 	// uint32 in doDequeue. The limit is at most the capacity, so it bounds both.
@@ -481,6 +598,10 @@ func (r *Ring[T]) bulkLengthError(op string, length uint64, maxBatch uint32) err
 // Callers pass a slice whose length is already at most the capacity, so converting len(items) to
 // uint32 cannot truncate.
 func (r *Ring[T]) doEnqueue(items []T, fixed bool) (enqueued, free uint32) {
+	if r.prodMode == modeRelaxed {
+		return r.doEnqueueRelaxed(items, fixed)
+	}
+
 	var (
 		head uint32
 		next uint32
@@ -508,6 +629,24 @@ func (r *Ring[T]) doEnqueue(items []T, fixed bool) (enqueued, free uint32) {
 	return numEntries, freeBefore - numEntries
 }
 
+// doEnqueueRelaxed is doEnqueue for a relaxed producer side. It publishes without waiting for the
+// producers that reserved before it.
+func (r *Ring[T]) doEnqueueRelaxed(items []T, fixed bool) (enqueued, free uint32) {
+	head, numEntries, freeBefore := r.moveProdHeadRelaxed(uint32(len(items)), fixed)
+	if numEntries == 0 {
+		// As in doEnqueue, only a reservation guarantees the head was current.
+		return 0, min(freeBefore, r.capacity())
+	}
+
+	base, end := r.slotRange(head, numEntries)
+	r.writeSlots(base, end, items[:numEntries])
+
+	if publishRelaxed(&r.prodHeadRTS, &r.prodTailRTS) {
+		raiseMirror(&r.prodTail, &r.prodTailRTS)
+	}
+	return numEntries, freeBefore - numEntries
+}
+
 // doDequeue removes elements from the ring and copies them into the front of dst, oldest first.
 // fixed is true for a bulk dequeue, which fills all of dst or nothing. It returns the number
 // dequeued and the number of occupied entries after the call, which is at most the capacity. It
@@ -516,6 +655,10 @@ func (r *Ring[T]) doEnqueue(items []T, fixed bool) (enqueued, free uint32) {
 // Callers pass a slice whose length is already at most the capacity, so converting len(dst) to
 // uint32 cannot truncate.
 func (r *Ring[T]) doDequeue(dst []T, fixed bool) (dequeued, available uint32) {
+	if r.consMode == modeRelaxed {
+		return r.doDequeueRelaxed(dst, fixed)
+	}
+
 	var (
 		head uint32
 		next uint32
@@ -544,6 +687,28 @@ func (r *Ring[T]) doDequeue(dst []T, fixed bool) (dequeued, available uint32) {
 	// the tail store hands the slots read above back to producers
 	r.consTail.Store(next)
 
+	return numEntries, availableBefore - numEntries
+}
+
+// doDequeueRelaxed is doDequeue for a relaxed consumer side. It releases its slots without waiting
+// for the consumers that reserved before it.
+func (r *Ring[T]) doDequeueRelaxed(dst []T, fixed bool) (dequeued, available uint32) {
+	head, numEntries, availableBefore := r.moveConsHeadRelaxed(uint32(len(dst)), fixed)
+	if numEntries == 0 {
+		// As in doDequeue, only a reservation guarantees the head was current.
+		return 0, min(availableBefore, r.capacity())
+	}
+
+	base, end := r.slotRange(head, numEntries)
+	r.readSlots(base, end, dst[:numEntries])
+
+	if r.clearOnDequeue {
+		r.clearSlots(base, end, numEntries)
+	}
+
+	if publishRelaxed(&r.consHeadRTS, &r.consTailRTS) {
+		raiseMirror(&r.consTail, &r.consTailRTS)
+	}
 	return numEntries, availableBefore - numEntries
 }
 
@@ -624,6 +789,126 @@ func waitForTail(tail *atomic.Uint32, want uint32) {
 	}
 	for tail.Load() != want {
 		runtime.Gosched()
+	}
+}
+
+// waitHeadTailDistance returns the head word once the side's head position is at most htdMax past
+// its tail position, which bounds how many slots are reserved but not yet published. Without the
+// bound, a steady stream of operations could keep one always in flight, and the tail would never
+// move. It spins like waitForTail, then yields between checks.
+//
+// It loads the tail before the head, unlike DPDK, so the tail is never past the loaded head and
+// the distance cannot wrap into a spurious wait. The head is still loaded before the caller reads
+// the other side's tail.
+func waitHeadTailDistance(head, tail *atomic.Uint64, htdMax uint32) uint64 {
+	for spins := 0; ; spins++ {
+		tailPos := unpackPos(tail.Load())
+		word := head.Load()
+		if unpackPos(word)-tailPos <= htdMax {
+			return word
+		}
+		if spins >= tailSpins {
+			runtime.Gosched()
+		}
+	}
+}
+
+// moveProdHeadRelaxed reserves up to n slots for a relaxed enqueue, as moveProdHead does for the
+// multi mode, after waitHeadTailDistance allows it. The head's counter counts reservations. It
+// returns the position the reservation starts at, the number of slots reserved, between 0 and n
+// inclusive and 0 or n when fixed, and the number of free slots before the reservation.
+func (r *Ring[T]) moveProdHeadRelaxed(n uint32, fixed bool) (oldPos, count, free uint32) {
+	capacity := r.capacity()
+	for {
+		head := waitHeadTailDistance(&r.prodHeadRTS, &r.prodTailRTS, r.prodHTDMax)
+		oldPos = unpackPos(head)
+		free = capacity + r.consTail.Load() - oldPos
+		count = n
+		if count > free {
+			if fixed {
+				return oldPos, 0, free
+			}
+			count = free
+		}
+		if count == 0 {
+			return oldPos, 0, free
+		}
+		next := pack(oldPos+count, unpackCnt(head)+1)
+		if r.prodHeadRTS.CompareAndSwap(head, next) {
+			return oldPos, count, free
+		}
+	}
+}
+
+// moveConsHeadRelaxed reserves up to n slots for a relaxed dequeue, as moveConsHead does for the
+// multi mode, after waitHeadTailDistance allows it. The head's counter counts reservations. It
+// returns the position the reservation starts at, the number of slots reserved, between 0 and n
+// inclusive and 0 or n when fixed, and the number of occupied entries before the reservation.
+func (r *Ring[T]) moveConsHeadRelaxed(n uint32, fixed bool) (oldPos, count, available uint32) {
+	for {
+		head := waitHeadTailDistance(&r.consHeadRTS, &r.consTailRTS, r.consHTDMax)
+		oldPos = unpackPos(head)
+		available = r.prodTail.Load() - oldPos
+		count = n
+		if count > available {
+			if fixed {
+				return oldPos, 0, available
+			}
+			count = available
+		}
+		if count == 0 {
+			return oldPos, 0, available
+		}
+		next := pack(oldPos+count, unpackCnt(head)+1)
+		if r.consHeadRTS.CompareAndSwap(head, next) {
+			return oldPos, count, available
+		}
+	}
+}
+
+// nextTail returns the tail word after one more operation finishes, given a head word loaded
+// after tail. The tail's counter counts finished operations. When it then equals the head's
+// counter, every reservation made so far has finished, so the tail position moves to the head's.
+func nextTail(tail, head uint64) uint64 {
+	cnt := unpackCnt(tail) + 1
+	pos := unpackPos(tail)
+	if cnt == unpackCnt(head) {
+		pos = unpackPos(head)
+	}
+	return pack(pos, cnt)
+}
+
+// publishRelaxed records that one operation on a relaxed side has finished, and reports whether
+// that moved the tail position, in which case the caller raises the mirror.
+func publishRelaxed(head, tail *atomic.Uint64) (moved bool) {
+	for {
+		// The tail is loaded before the head. Loaded the other way, a reservation made after the
+		// head load could finish and be counted in the tail, and this call's count could then
+		// match the stale head's, moving the tail past a reservation that has not finished.
+		old := tail.Load()
+		next := nextTail(old, head.Load())
+		if tail.CompareAndSwap(old, next) {
+			return unpackPos(next) != unpackPos(old)
+		}
+	}
+}
+
+// raiseMirror raises the 32-bit copy of a relaxed tail, which the other side reads, to the
+// relaxed tail's position. It loads that position fresh on every attempt and never uses one the
+// caller saw earlier, because a caller descheduled long enough could otherwise move the copy
+// backward and let the other side read unpublished slots or overwrite live ones. A fresh position
+// is at most the capacity ahead of the copy, so the signed comparison is sound. A compare-and-swap
+// rather than a store keeps two raisers that finish out of order from moving it backward.
+func raiseMirror(mirror *atomic.Uint32, tail *atomic.Uint64) {
+	for {
+		mirrorPos := mirror.Load()
+		tailPos := unpackPos(tail.Load())
+		if int32(tailPos-mirrorPos) <= 0 {
+			return
+		}
+		if mirror.CompareAndSwap(mirrorPos, tailPos) {
+			return
+		}
 	}
 }
 
@@ -743,7 +1028,7 @@ func (r *Ring[T]) moveConsHead(
 // capacity, because a consumer tail that advances after the head was loaded can make the value
 // overshoot.
 func (r *Ring[T]) freeEntries() uint32 {
-	head := r.prodHead.Load()
+	head := r.prodHeadPos()
 	capacity := r.capacity()
 	free := capacity + r.consTail.Load() - head
 	return min(free, capacity)
@@ -754,7 +1039,25 @@ func (r *Ring[T]) freeEntries() uint32 {
 // capacity, because a producer tail that advances after the head was loaded can make the value
 // overshoot.
 func (r *Ring[T]) occupiedEntries() uint32 {
-	head := r.consHead.Load()
+	head := r.consHeadPos()
 	occupied := r.prodTail.Load() - head
 	return min(occupied, r.capacity())
+}
+
+// prodHeadPos returns the producer head's position from whichever index the producer side's
+// mode uses.
+func (r *Ring[T]) prodHeadPos() uint32 {
+	if r.prodMode == modeRelaxed {
+		return unpackPos(r.prodHeadRTS.Load())
+	}
+	return r.prodHead.Load()
+}
+
+// consHeadPos returns the consumer head's position from whichever index the consumer side's
+// mode uses.
+func (r *Ring[T]) consHeadPos() uint32 {
+	if r.consMode == modeRelaxed {
+		return unpackPos(r.consHeadRTS.Load())
+	}
+	return r.consHead.Load()
 }

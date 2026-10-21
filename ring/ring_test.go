@@ -1852,6 +1852,216 @@ func TestSpinForTail(t *testing.T) {
 	require.False(t, spinForTail(&tail, 7, 0))
 }
 
+// TestPack checks that unpackPos and unpackCnt return the fields pack put in, at the edges of
+// both fields.
+func TestPack(t *testing.T) {
+	cases := []struct {
+		pos uint32
+		cnt uint32
+	}{
+		{pos: 0, cnt: 0},
+		{pos: 7, cnt: math.MaxUint32},
+		{pos: math.MaxUint32, cnt: 0},
+		{pos: math.MaxUint32, cnt: math.MaxUint32},
+	}
+	for _, tc := range cases {
+		word := pack(tc.pos, tc.cnt)
+		assert.Equal(t, tc.pos, unpackPos(word), "pos of pack(%d, %d)", tc.pos, tc.cnt)
+		assert.Equal(t, tc.cnt, unpackCnt(word), "cnt of pack(%d, %d)", tc.pos, tc.cnt)
+	}
+}
+
+// TestNextTail checks the tail word nextTail returns, with and without a counter match, and with
+// the counter and the position wrapping.
+func TestNextTail(t *testing.T) {
+	cases := []struct {
+		name string
+		tail uint64
+		head uint64
+		want uint64
+	}{
+		{name: "noMatch", tail: pack(4, 1), head: pack(10, 3), want: pack(4, 2)},
+		{name: "match", tail: pack(4, 2), head: pack(10, 3), want: pack(10, 3)},
+		{
+			name: "counterReachesMax",
+			tail: pack(4, math.MaxUint32-1),
+			head: pack(10, 0),
+			want: pack(4, math.MaxUint32),
+		},
+		{
+			name: "counterWrapsToMatch",
+			tail: pack(4, math.MaxUint32),
+			head: pack(10, 0),
+			want: pack(10, 0),
+		},
+		// This case catches a counter that carries into the position, which would give
+		// pack(5, 0).
+		{
+			name: "counterWrapsNoMatch",
+			tail: pack(4, math.MaxUint32),
+			head: pack(10, 1),
+			want: pack(4, 0),
+		},
+		{
+			name: "positionWraps",
+			tail: pack(math.MaxUint32-1, 6),
+			head: pack(3, 7),
+			want: pack(3, 7),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, nextTail(tc.tail, tc.head))
+		})
+	}
+}
+
+// TestRelaxedPublishOrder checks that a relaxed producer tail, and its 32-bit mirror, move only
+// when every reservation made so far has been published, whatever order the publishes come in.
+// The ring has 64 slots, so the head-to-tail bound is 8 and no step waits. The publishes do not
+// say which reservation they finish, because publishRelaxed only counts, so the subtests are named
+// by the order of events. No slots are copied, since only the indices are checked.
+func TestRelaxedPublishOrder(t *testing.T) {
+	newRing := func(t *testing.T) *Ring[int] {
+		t.Helper()
+		ring, err := New[int](64, WithRelaxedMultiProdEnqueue())
+		require.NoError(t, err)
+		return ring
+	}
+	reserve := func(t *testing.T, ring *Ring[int], n uint32) uint32 {
+		t.Helper()
+		oldPos, count, _ := ring.moveProdHeadRelaxed(n, true)
+		require.Equal(t, n, count)
+		return oldPos
+	}
+	publish := func(ring *Ring[int]) bool {
+		moved := publishRelaxed(&ring.prodHeadRTS, &ring.prodTailRTS)
+		if moved {
+			raiseMirror(&ring.prodTail, &ring.prodTailRTS)
+		}
+		return moved
+	}
+	requireTail := func(t *testing.T, ring *Ring[int], want uint32) {
+		t.Helper()
+		require.Equal(t, want, unpackPos(ring.prodTailRTS.Load()), "tail position")
+		require.Equal(t, want, ring.prodTail.Load(), "mirror")
+	}
+
+	t.Run("reverse", func(t *testing.T) {
+		ring := newRing(t)
+		reserve(t, ring, 2)
+		reserve(t, ring, 3)
+		require.False(t, publish(ring))
+		requireTail(t, ring, 0)
+		require.True(t, publish(ring))
+		requireTail(t, ring, 5)
+	})
+
+	t.Run("inFlight", func(t *testing.T) {
+		ring := newRing(t)
+		reserve(t, ring, 2)
+		reserve(t, ring, 3)
+		require.False(t, publish(ring))
+		requireTail(t, ring, 0)
+		reserve(t, ring, 1)
+		require.False(t, publish(ring))
+		requireTail(t, ring, 0)
+		require.True(t, publish(ring))
+		requireTail(t, ring, 6)
+	})
+
+	t.Run("sequential", func(t *testing.T) {
+		ring := newRing(t)
+		reserve(t, ring, 2)
+		require.True(t, publish(ring))
+		requireTail(t, ring, 2)
+		reserve(t, ring, 3)
+		require.True(t, publish(ring))
+		requireTail(t, ring, 5)
+		reserve(t, ring, 1)
+		require.True(t, publish(ring))
+		requireTail(t, ring, 6)
+	})
+
+	t.Run("allThenPublish", func(t *testing.T) {
+		ring := newRing(t)
+		reserve(t, ring, 2)
+		reserve(t, ring, 3)
+		reserve(t, ring, 1)
+		require.False(t, publish(ring))
+		requireTail(t, ring, 0)
+		require.False(t, publish(ring))
+		requireTail(t, ring, 0)
+		require.True(t, publish(ring))
+		requireTail(t, ring, 6)
+	})
+}
+
+// TestRaiseMirror checks that raiseMirror raises the mirror to the tail position, across the wrap,
+// and never lowers it.
+func TestRaiseMirror(t *testing.T) {
+	cases := []struct {
+		name   string
+		mirror uint32
+		tail   uint64
+		want   uint32
+	}{
+		{name: "equal", mirror: 5, tail: pack(5, 1), want: 5},
+		{name: "mirrorAhead", mirror: 5, tail: pack(4, 1), want: 5},
+		// A raiser that saw an older tail position reduces to this case, because raiseMirror
+		// takes no position from its caller.
+		{name: "tailAhead", mirror: 5, tail: pack(9, 1), want: 9},
+		{name: "acrossWrap", mirror: math.MaxUint32 - 1, tail: pack(2, 0), want: 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var mirror atomic.Uint32
+			var tail atomic.Uint64
+			mirror.Store(tc.mirror)
+			tail.Store(tc.tail)
+			raiseMirror(&mirror, &tail)
+			assert.Equal(t, tc.want, mirror.Load())
+		})
+	}
+}
+
+// TestMirrorLag checks that the other side reads a relaxed side's 32-bit mirror, not its 64-bit
+// tail. Each subtest moves the 64-bit head and tail three slots past the mirror, standing for
+// published operations whose mirror raise has not happened yet.
+func TestMirrorLag(t *testing.T) {
+	t.Run("producer", func(t *testing.T) {
+		ring, err := New[int](8, WithRelaxedMultiProdEnqueue())
+		require.NoError(t, err)
+		require.NoError(t, ring.Enqueue(1))
+		require.NoError(t, ring.Enqueue(2))
+		ring.prodHeadRTS.Store(pack(5, 3))
+		ring.prodTailRTS.Store(pack(5, 3))
+
+		assert.Equal(t, 2, ring.Count())
+		assert.Equal(t, uint32(2), ring.occupiedEntries())
+		available, err := ring.DequeueBulk(make([]int, 3))
+		assert.ErrorIs(t, err, ErrEmpty)
+		assert.Equal(t, 2, available)
+	})
+
+	t.Run("consumer", func(t *testing.T) {
+		ring, err := New[int](8, WithRelaxedMultiConsDequeue())
+		require.NoError(t, err)
+		_, err = ring.EnqueueBulk([]int{1, 2, 3, 4, 5, 6, 7, 8})
+		require.NoError(t, err)
+		_, err = ring.DequeueBulk(make([]int, 2))
+		require.NoError(t, err)
+		ring.consHeadRTS.Store(pack(5, 3))
+		ring.consTailRTS.Store(pack(5, 3))
+
+		assert.Equal(t, uint32(2), ring.freeEntries())
+		assert.Equal(t, 2, ring.Free())
+		free, err := ring.EnqueueBulk(make([]int, 3))
+		assert.ErrorIs(t, err, ErrFull)
+		assert.Equal(t, 2, free)
+	})
+}
+
 // TestCountSnapshot checks that Count never reports more entries than have been enqueued and not
 // yet dequeued. enqueuedCount counts elements enqueued or in an enqueue call, and drain.received
 // counts elements whose dequeue call has returned. A checker reads drain.received, then Count,

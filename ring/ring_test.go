@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"weak"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -740,6 +741,162 @@ func TestBatchCopyCrossesEndOfBackingArray(t *testing.T) {
 	assert.Equal(t, 5, dequeued)
 	assert.Equal(t, batch, elems)
 	assert.True(t, ring.Empty())
+}
+
+// TestDequeueClearsSlots checks that every slot a dequeue reads holds nil afterward, while slots it
+// did not read keep their elements, and that Reset clears every slot.
+func TestDequeueClearsSlots(t *testing.T) {
+	allSlots := []int{0, 1, 2, 3, 4, 5, 6, 7}
+
+	t.Run("Dequeue", func(t *testing.T) {
+		ring := newPointerRing(t)
+		require.NoError(t, ring.Enqueue(new(int)))
+		_, err := ring.Dequeue()
+		require.NoError(t, err)
+		assertSlotsNil(t, ring, 0)
+	})
+
+	t.Run("DequeueBulk", func(t *testing.T) {
+		ring := newPointerRing(t)
+		requireEnqueuePointers(t, ring, 5)
+		_, err := ring.DequeueBulk(make([]*int, 3))
+		require.NoError(t, err)
+		assertSlotsNil(t, ring, 0, 1, 2)
+		assert.NotNil(t, ring.entries[3])
+		assert.NotNil(t, ring.entries[4])
+	})
+
+	t.Run("DequeueBulkMultiConsumer", func(t *testing.T) {
+		ring, err := New[*int](8, WithMultiConsDequeue())
+		require.NoError(t, err)
+		requireEnqueuePointers(t, ring, 5)
+		_, err = ring.DequeueBulk(make([]*int, 3))
+		require.NoError(t, err)
+		assertSlotsNil(t, ring, 0, 1, 2)
+		assert.NotNil(t, ring.entries[3])
+		assert.NotNil(t, ring.entries[4])
+	})
+
+	t.Run("DequeueBurst", func(t *testing.T) {
+		ring := newPointerRing(t)
+		requireEnqueuePointers(t, ring, 3)
+		dequeued, _ := ring.DequeueBurst(make([]*int, 5))
+		require.Equal(t, 3, dequeued)
+		assertSlotsNil(t, ring, 0, 1, 2)
+	})
+
+	// Starting two slots before the end, six enqueues fill slots 6, 7, 0, 1, 2, and 3. Dequeuing
+	// five reads slots 6, 7, 0, 1, and 2, so the sixth, unread slot keeps its element.
+	t.Run("DequeueBulkAcrossEnd", func(t *testing.T) {
+		ring := newPointerRing(t)
+		setIndices(ring, 6)
+		requireEnqueuePointers(t, ring, 6)
+		_, err := ring.DequeueBulk(make([]*int, 5))
+		require.NoError(t, err)
+		assertSlotsNil(t, ring, 6, 7, 0, 1, 2)
+		assert.NotNil(t, ring.entries[3])
+	})
+
+	t.Run("DequeueBurstAcrossEnd", func(t *testing.T) {
+		ring := newPointerRing(t)
+		setIndices(ring, 6)
+		requireEnqueuePointers(t, ring, 6)
+		dequeued, _ := ring.DequeueBurst(make([]*int, 5))
+		require.Equal(t, 5, dequeued)
+		assertSlotsNil(t, ring, 6, 7, 0, 1, 2)
+		assert.NotNil(t, ring.entries[3])
+	})
+
+	t.Run("Reset", func(t *testing.T) {
+		ring := newPointerRing(t)
+		requireEnqueuePointers(t, ring, 5)
+		ring.Reset()
+		assertSlotsNil(t, ring, allSlots...)
+	})
+}
+
+// newPointerRing returns an empty 8-slot ring of pointers, so a cleared slot reads nil.
+func newPointerRing(t *testing.T) *Ring[*int] {
+	t.Helper()
+	ring, err := New[*int](8)
+	require.NoError(t, err)
+	return ring
+}
+
+// requireEnqueuePointers enqueues count new non-nil pointers into ring.
+func requireEnqueuePointers(t *testing.T, ring *Ring[*int], count int) {
+	t.Helper()
+	items := make([]*int, count)
+	for i := range items {
+		items[i] = new(int)
+	}
+	_, err := ring.EnqueueBulk(items)
+	require.NoError(t, err)
+}
+
+// assertSlotsNil checks that each listed slot of the ring's backing array is nil.
+func assertSlotsNil(t *testing.T, ring *Ring[*int], slots ...int) {
+	t.Helper()
+	for _, slot := range slots {
+		assert.Nil(t, ring.entries[slot], "slot %d", slot)
+	}
+}
+
+// releasable is the object TestDequeueReleasesMemory watches. It is a 64-byte struct that holds a
+// pointer because small pointer-free objects can be combined by the tiny allocator, which keeps
+// them alive together, so a weak pointer to one could stay set after the ring lets go of it.
+type releasable struct {
+	_ *releasable
+	_ [56]byte
+}
+
+// TestDequeueReleasesMemory checks that the ring keeps no reference to an element once it is
+// dequeued or the ring is reset, so the garbage collector can free it. The helpers keep the object
+// out of the test's own variables, so nothing but the ring can hold it during the collection. Each
+// subtest keeps the ring alive past the collection, since an unreachable ring would release the
+// element even without clearing its slot.
+func TestDequeueReleasesMemory(t *testing.T) {
+	t.Run("Dequeue", func(t *testing.T) {
+		ring, err := New[*releasable](8)
+		require.NoError(t, err)
+		watched := enqueueReleasable(t, ring)
+		requireDequeuesWatched(t, ring, watched)
+
+		runtime.GC()
+		assert.Nil(t, watched.Value())
+		runtime.KeepAlive(ring)
+	})
+
+	t.Run("Reset", func(t *testing.T) {
+		ring, err := New[*releasable](8)
+		require.NoError(t, err)
+		watched := enqueueReleasable(t, ring)
+		ring.Reset()
+
+		runtime.GC()
+		assert.Nil(t, watched.Value())
+		runtime.KeepAlive(ring)
+	})
+}
+
+// enqueueReleasable enqueues a new releasable into ring and returns a weak pointer to it.
+func enqueueReleasable(t *testing.T, ring *Ring[*releasable]) weak.Pointer[releasable] {
+	t.Helper()
+	object := &releasable{}
+	require.NoError(t, ring.Enqueue(object))
+	return weak.Make(object)
+}
+
+// requireDequeuesWatched dequeues one element from ring and requires it to be the watched object.
+func requireDequeuesWatched(
+	t *testing.T,
+	ring *Ring[*releasable],
+	watched weak.Pointer[releasable],
+) {
+	t.Helper()
+	dequeued, err := ring.Dequeue()
+	require.NoError(t, err)
+	require.Same(t, watched.Value(), dequeued)
 }
 
 func TestBatchExceedsCapacity(t *testing.T) {

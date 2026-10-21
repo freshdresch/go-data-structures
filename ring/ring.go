@@ -258,13 +258,14 @@ func (r *Ring[T]) capacity() uint32 {
 	return r.mask + 1
 }
 
-// Reset empties the ring by resetting its indices.
+// Reset empties the ring and clears every slot.
 //
 // WARNING: Make sure to only do this while the ring is not in use!
 //
-// Reset does not change how the ring was configured. It only resets the producer and consumer
-// indices so the ring is empty.
+// Reset does not change how the ring was configured. Elements that were enqueued but never
+// dequeued are released.
 func (r *Ring[T]) Reset() {
+	clear(r.entries)
 	r.prodHead.Store(0)
 	r.prodTail.Store(0)
 	r.consHead.Store(0)
@@ -518,14 +519,21 @@ func (r *Ring[T]) doDequeue(dst []T, fixed bool) (dequeued, available uint32) {
 		end = numEntries
 	}
 
+	// A slot that still holds a pointer keeps its target alive until a later enqueue overwrites
+	// it, so every slot read here is cleared. Clearing before the tail store means a producer never
+	// sees a slot as free while it is being cleared.
 	if numEntries == 1 {
 		// avoid the memmove when we can, since it costs more than an assignment for one element
 		dst[0] = r.entries[base]
+		var zero T
+		r.entries[base] = zero
 	} else {
 		copy(dst[:end], r.entries[base:base+end])
+		clear(r.entries[base : base+end])
 
 		// copy whatever is left after the wrap around
 		copy(dst[end:numEntries], r.entries[:numEntries-end])
+		clear(r.entries[:numEntries-end])
 	}
 
 	if r.multiCons {

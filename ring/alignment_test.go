@@ -18,8 +18,11 @@ type fortyBytes struct {
 	_ [5]uint64
 }
 
-// TestRingAlignment checks that rings from New start on a cache line, so each part of the ring
-// fills a line of its own, shared with neither the other parts nor neighboring heap objects. The
+// TestRingAlignment checks that both allocations New makes for a ring, the ring itself and its
+// index block, start on a cache line, so each line of the ring is shared with neither the other
+// lines nor neighboring heap objects. The ring is aligned because at one cache line it is under
+// the size above which the allocator puts a malloc header in front of an object holding a
+// pointer. The index block is aligned because it holds no pointers, so it never gets a header. The
 // alignment comes from the allocator's size classes, not from a language guarantee, so this
 // catches a Go release that changes it.
 //
@@ -32,7 +35,8 @@ func TestRingAlignment(t *testing.T) {
 	t.Run("string", assertRingsAligned[string])
 }
 
-// assertRingsAligned allocates rings of T with New and checks that each is cacheLine aligned.
+// assertRingsAligned allocates rings of T with New and checks that each ring and its index block
+// are cacheLine aligned.
 func assertRingsAligned[T any](t *testing.T) {
 	const rings = 1000
 	for range rings {
@@ -42,5 +46,13 @@ func assertRingsAligned[T any](t *testing.T) {
 
 		address := uintptr(unsafe.Pointer(ring))
 		require.Zero(t, address%cacheLine, "ring at %#x is not %d-byte aligned", address, cacheLine)
+		indicesAddress := uintptr(unsafe.Pointer(ring.indices))
+		require.Zero(
+			t,
+			indicesAddress%cacheLine,
+			"index block at %#x is not %d-byte aligned",
+			indicesAddress,
+			cacheLine,
+		)
 	}
 }

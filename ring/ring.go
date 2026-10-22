@@ -121,9 +121,12 @@ type readOnly[T any] struct {
 // call holds, compared by plain inequality, so a reload after the other side stood still writes
 // nothing.
 //
-// This is the split layout. Each side's head and its cache share a line, and its tail has a line
-// of its own, so a multi side's head CAS does not disturb the goroutines spinning on that side's
-// tail in the publish wait. Every line is still written by one side only.
+// Each side's head and its cache share a line, and its tail has a line of its own, so a multi
+// side's head CAS does not disturb the goroutines spinning on that side's tail in the publish
+// wait. Every line is written by one side only. The four lines live in indices, a separate
+// pointer-free allocation, so the allocator aligns them to a cache line, which it would not do
+// for a single object over 512 bytes that holds a pointer. The ring's own fields fill one
+// read-only line.
 //
 // A relaxed side uses the 64-bit indices, each a pos and cnt word built with pack. It also keeps
 // its 32-bit tail as a copy of its 64-bit tail's position, raised by raiseMirror, so the other
@@ -158,6 +161,20 @@ type consTailLine struct {
 	consTail    atomic.Uint32
 }
 
+// indices holds the four index lines, each padded to a full line. It holds only atomics, so it
+// contains no pointers, and at exactly 512 bytes it gets no malloc header and comes from the
+// 512-byte size class, whose objects are cacheLine aligned.
+type indices struct {
+	prodHeadLine
+	_ [cacheLine - unsafe.Sizeof(prodHeadLine{})]byte
+	prodTailLine
+	_ [cacheLine - unsafe.Sizeof(prodTailLine{})]byte
+	consHeadLine
+	_ [cacheLine - unsafe.Sizeof(consHeadLine{})]byte
+	consTailLine
+	_ [cacheLine - unsafe.Sizeof(consTailLine{})]byte
+}
+
 // Ring is a fixed-size, lock-free ring buffer modeled on DPDK's rte_ring. It works as a FIFO queue
 // anywhere between single-producer single-consumer and multi-producer multi-consumer.
 //
@@ -174,43 +191,31 @@ type consTailLine struct {
 // A Ring must not be copied once in use.
 type Ring[T any] struct {
 	readOnly[T]
+	// The index lines live in their own allocation, which New sets once, so this pointer is
+	// read-only like the fields above.
+	*indices
 	// An array length must be a constant, so the padding is sized from readOnly[byte]. That holds
 	// for every T because entries is always a slice header, so readOnly's size never depends on T.
-	_ [cacheLine - unsafe.Sizeof(readOnly[byte]{})]byte
-	prodHeadLine
-	_ [cacheLine - unsafe.Sizeof(prodHeadLine{})]byte
-	prodTailLine
-	_ [cacheLine - unsafe.Sizeof(prodTailLine{})]byte
-	consHeadLine
-	_ [cacheLine - unsafe.Sizeof(consHeadLine{})]byte
-	consTailLine
-	_ [cacheLine - unsafe.Sizeof(consTailLine{})]byte
+	_ [cacheLine - unsafe.Sizeof(readOnly[byte]{}) - unsafe.Sizeof((*indices)(nil))]byte
 }
 
-// A layout change that breaks the Ring's size or any index line's offset fails the build here.
-// The [64]byte instance catches a field whose size depends on T, which the byte instance would
-// miss.
+// A layout change that breaks the size of Ring or indices, or any index line's offset, fails the
+// build here. The [64]byte instance catches a Ring field whose size depends on T, which the byte
+// instance would miss.
 var (
-	_ [unsafe.Sizeof(Ring[byte]{}) - 5*cacheLine]struct{}
-	_ [5*cacheLine - unsafe.Sizeof(Ring[byte]{})]struct{}
-	_ [unsafe.Offsetof(Ring[byte]{}.prodHeadLine) - cacheLine]struct{}
-	_ [cacheLine - unsafe.Offsetof(Ring[byte]{}.prodHeadLine)]struct{}
-	_ [unsafe.Offsetof(Ring[byte]{}.prodTailLine) - 2*cacheLine]struct{}
-	_ [2*cacheLine - unsafe.Offsetof(Ring[byte]{}.prodTailLine)]struct{}
-	_ [unsafe.Offsetof(Ring[byte]{}.consHeadLine) - 3*cacheLine]struct{}
-	_ [3*cacheLine - unsafe.Offsetof(Ring[byte]{}.consHeadLine)]struct{}
-	_ [unsafe.Offsetof(Ring[byte]{}.consTailLine) - 4*cacheLine]struct{}
-	_ [4*cacheLine - unsafe.Offsetof(Ring[byte]{}.consTailLine)]struct{}
-	_ [unsafe.Sizeof(Ring[[64]byte]{}) - 5*cacheLine]struct{}
-	_ [5*cacheLine - unsafe.Sizeof(Ring[[64]byte]{})]struct{}
-	_ [unsafe.Offsetof(Ring[[64]byte]{}.prodHeadLine) - cacheLine]struct{}
-	_ [cacheLine - unsafe.Offsetof(Ring[[64]byte]{}.prodHeadLine)]struct{}
-	_ [unsafe.Offsetof(Ring[[64]byte]{}.prodTailLine) - 2*cacheLine]struct{}
-	_ [2*cacheLine - unsafe.Offsetof(Ring[[64]byte]{}.prodTailLine)]struct{}
-	_ [unsafe.Offsetof(Ring[[64]byte]{}.consHeadLine) - 3*cacheLine]struct{}
-	_ [3*cacheLine - unsafe.Offsetof(Ring[[64]byte]{}.consHeadLine)]struct{}
-	_ [unsafe.Offsetof(Ring[[64]byte]{}.consTailLine) - 4*cacheLine]struct{}
-	_ [4*cacheLine - unsafe.Offsetof(Ring[[64]byte]{}.consTailLine)]struct{}
+	_ [unsafe.Sizeof(indices{}) - 4*cacheLine]struct{}
+	_ [4*cacheLine - unsafe.Sizeof(indices{})]struct{}
+	_ [0 - unsafe.Offsetof(indices{}.prodHeadLine)]struct{}
+	_ [unsafe.Offsetof(indices{}.prodTailLine) - cacheLine]struct{}
+	_ [cacheLine - unsafe.Offsetof(indices{}.prodTailLine)]struct{}
+	_ [unsafe.Offsetof(indices{}.consHeadLine) - 2*cacheLine]struct{}
+	_ [2*cacheLine - unsafe.Offsetof(indices{}.consHeadLine)]struct{}
+	_ [unsafe.Offsetof(indices{}.consTailLine) - 3*cacheLine]struct{}
+	_ [3*cacheLine - unsafe.Offsetof(indices{}.consTailLine)]struct{}
+	_ [unsafe.Sizeof(Ring[byte]{}) - cacheLine]struct{}
+	_ [cacheLine - unsafe.Sizeof(Ring[byte]{})]struct{}
+	_ [unsafe.Sizeof(Ring[[64]byte]{}) - cacheLine]struct{}
+	_ [cacheLine - unsafe.Sizeof(Ring[[64]byte]{})]struct{}
 )
 
 type config struct {
@@ -488,6 +493,7 @@ func New[T any](count int, options ...Option) (*Ring[T], error) {
 			clearOnDequeue:   !cfg.keepDequeued,
 			exactBatchCounts: cfg.exactBatchCounts,
 		},
+		indices: new(indices),
 	}
 	return ring, nil
 }

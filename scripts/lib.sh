@@ -103,7 +103,7 @@ cpu_model() {
 	if [ "$platform" = Darwin ]; then
 		sysctl -n machdep.cpu.brand_string
 	else
-		lscpu | grep '^Model name'
+		lscpu | awk '/^Model name/ { sub(/^[^:]*:[ \t]*/, ""); sub(/[ \t]+$/, ""); print }'
 	fi
 }
 

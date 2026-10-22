@@ -88,7 +88,7 @@ platform=$(uname -s)
 source "$(dirname "$0")/lib.sh"
 
 if [ -n "$pad" ] && [ "$platform" != Darwin ]; then
-	usage_error "-pad is for the Mac only, this platform never pads"
+	die "-pad is for the Mac only, this platform never pads"
 fi
 
 check_tools
@@ -514,12 +514,12 @@ elapsed=$((end - start))
 	record "load average after" load_average
 	echo "## notes"
 	echo "Layout: every row comes from one binary, so one placement of runtime.sched, recorded" \
-		"above; a different placement could move the numbers, and possibly a close ranking."
-	echo "Statistics: benchstat does not correct p-values across rows and metrics, so a few" \
-		"rows will show a significant difference by chance."
-	echo "Rows: each row measures a queue together with how its callers wait; ring-single is" \
-		"the like-for-like row for the libraries' single-element calls, and the batch-32 ring" \
-		"rows only show what batching gives the ring."
+		"above. A different placement could move the numbers, and possibly a close ranking."
+	echo "Statistics: benchstat does not correct p-values across rows and metrics. A few rows" \
+		"will show a significant difference by chance."
+	echo "Rows: each row measures a queue together with how its callers wait. ring-single is" \
+		"the like-for-like row for the libraries' single-element calls. The batch-32 ring rows" \
+		"only show what batching gives the ring."
 } >>"$state"
 
 if [ ! -e "$results/results.txt" ]; then

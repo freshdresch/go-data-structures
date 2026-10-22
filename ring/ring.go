@@ -99,8 +99,8 @@ type readOnly[T any] struct {
 	exactBatchCounts bool
 }
 
-// prodIndices holds the producer side's indices and its cached copy of the consumer tail, and
-// consIndices holds the consumer side's counterparts. Each side's indices fill a line of their own.
+// indices holds both sides' indices on one line, and prodCacheLine and consCacheLine each hold one
+// side's cached copy of the other side's tail on a line of its own.
 //
 // The caches depart from DPDK, which loads the other side's tail on every head move. Here a head
 // move first checks its request against the cached copy, and loads the real tail only when the
@@ -120,9 +120,9 @@ type readOnly[T any] struct {
 // call holds, compared by plain inequality, so a reload after the other side stood still writes
 // nothing.
 //
-// A line per side was once far slower on Apple silicon, because each side read the other side's
-// tail on every call, so two lines moved between cores instead of one. With the caches a side
-// reads the other side's line only on a reload, so each side's writes stay on its own line.
+// This is the control layout. Compared with no caches, only the reads of the other side's tail go
+// away, because a side reads that tail only on a reload. Both sides still write the shared index
+// line on every operation, and on a multi side the cache line is shared by that side's goroutines.
 //
 // A relaxed side uses the 64-bit indices, each a pos and cnt word built with pack. It also keeps
 // its 32-bit tail as a copy of its 64-bit tail's position, raised by raiseMirror, so the other
@@ -131,21 +131,24 @@ type readOnly[T any] struct {
 // 32-bit head stays unused.
 //
 // The 64-bit words come first, so the 32-bit fields pack after them without padding.
-type prodIndices struct {
-	prodHeadRTS    atomic.Uint64
-	prodTailRTS    atomic.Uint64
-	prodHead       atomic.Uint32
-	prodTail       atomic.Uint32
+type indices struct {
+	prodHeadRTS atomic.Uint64
+	prodTailRTS atomic.Uint64
+	consHeadRTS atomic.Uint64
+	consTailRTS atomic.Uint64
+	prodHead    atomic.Uint32
+	prodTail    atomic.Uint32
+	consHead    atomic.Uint32
+	consTail    atomic.Uint32
+}
+
+// prodCacheLine holds the producer side's cached copy of the consumer tail. See indices.
+type prodCacheLine struct {
 	cachedConsTail atomic.Uint32
 }
 
-// consIndices holds the consumer side's indices and its cached copy of the producer tail. The
-// prodIndices comment covers both.
-type consIndices struct {
-	consHeadRTS    atomic.Uint64
-	consTailRTS    atomic.Uint64
-	consHead       atomic.Uint32
-	consTail       atomic.Uint32
+// consCacheLine holds the consumer side's cached copy of the producer tail. See indices.
+type consCacheLine struct {
 	cachedProdTail atomic.Uint32
 }
 
@@ -168,27 +171,34 @@ type Ring[T any] struct {
 	// An array length must be a constant, so the padding is sized from readOnly[byte]. That holds
 	// for every T because entries is always a slice header, so readOnly's size never depends on T.
 	_ [cacheLine - unsafe.Sizeof(readOnly[byte]{})]byte
-	prodIndices
-	_ [cacheLine - unsafe.Sizeof(prodIndices{})]byte
-	consIndices
-	_ [cacheLine - unsafe.Sizeof(consIndices{})]byte
+	indices
+	_ [cacheLine - unsafe.Sizeof(indices{})]byte
+	prodCacheLine
+	_ [cacheLine - unsafe.Sizeof(prodCacheLine{})]byte
+	consCacheLine
+	_ [cacheLine - unsafe.Sizeof(consCacheLine{})]byte
 }
 
-// A layout change that breaks the Ring's size or either side's offset fails the build here. The
-// [64]byte instance catches a field whose size depends on T, which the byte instance would miss.
+// A layout change that breaks the Ring's size or the offset of the indices or either cache line
+// fails the build here. The [64]byte instance catches a field whose size depends on T, which the
+// byte instance would miss.
 var (
-	_ [unsafe.Sizeof(Ring[byte]{}) - 3*cacheLine]struct{}
-	_ [3*cacheLine - unsafe.Sizeof(Ring[byte]{})]struct{}
-	_ [unsafe.Offsetof(Ring[byte]{}.prodIndices) - cacheLine]struct{}
-	_ [cacheLine - unsafe.Offsetof(Ring[byte]{}.prodIndices)]struct{}
-	_ [unsafe.Offsetof(Ring[byte]{}.consIndices) - 2*cacheLine]struct{}
-	_ [2*cacheLine - unsafe.Offsetof(Ring[byte]{}.consIndices)]struct{}
-	_ [unsafe.Sizeof(Ring[[64]byte]{}) - 3*cacheLine]struct{}
-	_ [3*cacheLine - unsafe.Sizeof(Ring[[64]byte]{})]struct{}
-	_ [unsafe.Offsetof(Ring[[64]byte]{}.prodIndices) - cacheLine]struct{}
-	_ [cacheLine - unsafe.Offsetof(Ring[[64]byte]{}.prodIndices)]struct{}
-	_ [unsafe.Offsetof(Ring[[64]byte]{}.consIndices) - 2*cacheLine]struct{}
-	_ [2*cacheLine - unsafe.Offsetof(Ring[[64]byte]{}.consIndices)]struct{}
+	_ [unsafe.Sizeof(Ring[byte]{}) - 4*cacheLine]struct{}
+	_ [4*cacheLine - unsafe.Sizeof(Ring[byte]{})]struct{}
+	_ [unsafe.Offsetof(Ring[byte]{}.indices) - cacheLine]struct{}
+	_ [cacheLine - unsafe.Offsetof(Ring[byte]{}.indices)]struct{}
+	_ [unsafe.Offsetof(Ring[byte]{}.prodCacheLine) - 2*cacheLine]struct{}
+	_ [2*cacheLine - unsafe.Offsetof(Ring[byte]{}.prodCacheLine)]struct{}
+	_ [unsafe.Offsetof(Ring[byte]{}.consCacheLine) - 3*cacheLine]struct{}
+	_ [3*cacheLine - unsafe.Offsetof(Ring[byte]{}.consCacheLine)]struct{}
+	_ [unsafe.Sizeof(Ring[[64]byte]{}) - 4*cacheLine]struct{}
+	_ [4*cacheLine - unsafe.Sizeof(Ring[[64]byte]{})]struct{}
+	_ [unsafe.Offsetof(Ring[[64]byte]{}.indices) - cacheLine]struct{}
+	_ [cacheLine - unsafe.Offsetof(Ring[[64]byte]{}.indices)]struct{}
+	_ [unsafe.Offsetof(Ring[[64]byte]{}.prodCacheLine) - 2*cacheLine]struct{}
+	_ [2*cacheLine - unsafe.Offsetof(Ring[[64]byte]{}.prodCacheLine)]struct{}
+	_ [unsafe.Offsetof(Ring[[64]byte]{}.consCacheLine) - 3*cacheLine]struct{}
+	_ [3*cacheLine - unsafe.Offsetof(Ring[[64]byte]{}.consCacheLine)]struct{}
 )
 
 type config struct {

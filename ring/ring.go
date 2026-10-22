@@ -939,7 +939,60 @@ func (r *Ring[T]) clearSlots(base, end, count uint32) {
 // yielding. On an Apple M3 Pro and an AMD Ryzen, 4096 beat 1024 by 6 to 23% in geometric mean over
 // the MPSC, SPMC, and MPMC rows, most of what 16384 gained, and cost nothing with one CPU. When the
 // goroutine being waited for is descheduled, one exhausted spin wastes 1 to 3 µs.
-const tailSpins = 4096
+const tailSpins = 65536
+
+// paddedCounter is an atomic counter alone on its cache line.
+type paddedCounter struct {
+	_     [cacheLine]byte
+	count atomic.Uint64
+	_     [cacheLine - unsafe.Sizeof(atomic.Uint64{})]byte
+}
+
+// Experiment: counts of waitForTail calls by how many checks they needed. Waits of 1024 checks or
+// fewer are not counted, so the fast path never touches a shared counter.
+var (
+	waitsTo4k      paddedCounter
+	waitsTo8k      paddedCounter
+	waitsTo16k     paddedCounter
+	waitsTo64k     paddedCounter
+	waitsExhausted paddedCounter
+)
+
+// waitCounts is a snapshot of the wait counters, in bucket order.
+type waitCounts [5]uint64
+
+func resetWaitCounts() {
+	waitsTo4k.count.Store(0)
+	waitsTo8k.count.Store(0)
+	waitsTo16k.count.Store(0)
+	waitsTo64k.count.Store(0)
+	waitsExhausted.count.Store(0)
+}
+
+func readWaitCounts() waitCounts {
+	return waitCounts{
+		waitsTo4k.count.Load(),
+		waitsTo8k.count.Load(),
+		waitsTo16k.count.Load(),
+		waitsTo64k.count.Load(),
+		waitsExhausted.count.Load(),
+	}
+}
+
+// recordWait counts a wait that saw want on check number checks.
+func recordWait(checks int) {
+	switch {
+	case checks <= 1024:
+	case checks <= 4096:
+		waitsTo4k.count.Add(1)
+	case checks <= 8192:
+		waitsTo8k.count.Add(1)
+	case checks <= 16384:
+		waitsTo16k.count.Add(1)
+	default:
+		waitsTo64k.count.Add(1)
+	}
+}
 
 // spinForTail checks the tail up to spins times, each with an atomic load, and reports whether
 // one of them saw want. A true result synchronizes with the store that wrote want. It returns
@@ -957,16 +1010,22 @@ func spinForTail(tail *atomic.Uint32, want uint32, spins int) bool {
 // waitForTail returns once the tail equals want. A producer or consumer that has finished copying
 // calls it to wait for every earlier one on its side to publish, so publication stays in order.
 //
-// It first calls spinForTail with tailSpins, since the earlier goroutine is usually nanoseconds
-// from publishing. The bound keeps it from burning a whole time slice when that goroutine has
+// Experiment: it counts its checks and records the wait's length with recordWait.
+//
+// It first checks the tail up to tailSpins times, since the earlier goroutine is usually
+// nanoseconds from publishing. The bound keeps it from burning a whole time slice when that goroutine has
 // been descheduled, and after it waitForTail yields with runtime.Gosched between checks, so the
 // goroutine it waits for gets to run and publish, even with GOMAXPROCS=1. Whichever load sees
 // want synchronizes with the earlier goroutine's tail store, so that goroutine's slot writes are
 // published along with the caller's own tail store that follows.
 func waitForTail(tail *atomic.Uint32, want uint32) {
-	if spinForTail(tail, want, tailSpins) {
-		return
+	for check := 1; check <= tailSpins; check++ {
+		if tail.Load() == want {
+			recordWait(check)
+			return
+		}
 	}
+	waitsExhausted.count.Add(1)
 	for tail.Load() != want {
 		runtime.Gosched()
 	}

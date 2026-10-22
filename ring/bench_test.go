@@ -420,6 +420,15 @@ func reportThroughput(b *testing.B, result throughputResult, total int) {
 	b.ReportMetric(result.gcPerMelem, "gc/Melem")
 }
 
+// reportWaitCounts reports each publish-wait bucket as waits per million operations.
+func reportWaitCounts(b *testing.B, counts [5]uint64, ops int) {
+	b.Helper()
+	units := [5]string{"w4k/Mop", "w8k/Mop", "w16k/Mop", "w64k/Mop", "wexh/Mop"}
+	for i, count := range counts {
+		b.ReportMetric(float64(count)*1e6/float64(ops), units[i])
+	}
+}
+
 // benchMode is how many producers and consumers a run has.
 type benchMode struct {
 	name      string
@@ -483,6 +492,7 @@ func benchmarkThroughputImpls[T any](b *testing.B, mode benchMode, batch int, fi
 	for _, impl := range throughputImpls[T](mode) {
 		b.Run("impl="+impl.name, func(b *testing.B) {
 			setElemBytes[T](b)
+			ring.ResetWaitCounts()
 			result, err := runThroughput(
 				b,
 				impl.newQueue,
@@ -497,6 +507,7 @@ func benchmarkThroughputImpls[T any](b *testing.B, mode benchMode, batch int, fi
 				b.Fatal(err)
 			}
 			reportThroughput(b, result, b.N)
+			reportWaitCounts(b, ring.ReadWaitCounts(), b.N)
 		})
 	}
 	if batch != 1 {

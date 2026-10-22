@@ -1,7 +1,6 @@
 package benchmark
 
 import (
-	"errors"
 	"fmt"
 	"runtime"
 	"sync"
@@ -207,16 +206,17 @@ func (q *ringSingleQueue[T]) dequeue(dst []T) int {
 }
 
 // movedOrFail returns 1 when err is nil, and 0 when err is the expected error. Any other error
-// fails the run, and it returns 0.
+// fails the run, and it returns 0. It compares with == because the ring returns ErrFull and
+// ErrEmpty unwrapped, and that keeps each call as cheap as the other libraries' bool checks.
 func (q *ringSingleQueue[T]) movedOrFail(err, expected error) int {
-	if errors.Is(err, expected) {
+	if err == nil {
+		return 1
+	}
+	if err == expected {
 		return 0
 	}
-	if err != nil {
-		q.state.fail(err)
-		return 0
-	}
-	return 1
+	q.state.fail(err)
+	return 0
 }
 
 // xsyncQueue drives xsync's MPMCQueue through TryEnqueue and TryDequeue, one element per call.

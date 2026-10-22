@@ -44,12 +44,12 @@ func BenchmarkExhaustedSpin(b *testing.B) {
 				defer writer.Wait()
 				defer stop.Store(true)
 				writer.Go(func() {
-					for count := uint32(1); !stop.Load(); count++ {
-						r.consHead.Store(count)
+					for count := uint64(1); !stop.Load(); count++ {
+						r.prodTailRTS.Store(count)
 					}
 				})
 				// Timing starts only once the writer is running.
-				for r.consHead.Load() == 0 {
+				for r.prodTailRTS.Load() == 0 {
 					runtime.Gosched()
 				}
 				exhaustSpins(b, &r.prodTail, spins)

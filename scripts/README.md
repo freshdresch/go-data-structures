@@ -33,6 +33,8 @@ Pro the MPMC rows ran 30–60% slower with it at byte 96 than at 0, 32, or 64, w
 code. The linker sorts these symbols by size, so an unrelated test change can move it. When the
 note appears, treat an MPMC difference as unproven until the offsets match.
 
+`lib.sh` holds helpers that `ring-quick-bench.sh` sources. It is not run on its own.
+
 `ring-spin-bound.sh` compares one committed ref built with several publish wait spin bounds, the
 `tailSpins` constant in `ring/ring.go`. It builds one binary per bound, with the first bound as the
 base, runs the MPSC, SPMC, and MPMC throughput rows for every side in rotating order, and prints a

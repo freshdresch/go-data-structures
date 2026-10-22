@@ -22,6 +22,7 @@ var multiModes = []benchMode{mpscMode, spmcMode, mpmcMode}
 // the accounting test, and the runner script's table all follow it.
 var compareRows = []compareRow{
 	{name: "ring", modes: benchModes, batches: []int{1, 32}},
+	{name: "ring-exact", modes: benchModes, batches: []int{1, 32}},
 	{name: "ring-single", modes: benchModes, batches: []int{1}},
 	{name: "ring-rts", modes: multiModes, batches: []int{1, 32}},
 	{name: "chan", modes: benchModes, batches: []int{1}},
@@ -100,6 +101,19 @@ func compareImpls[T any, S sink[T]]() map[string]compareImpl[T, S] {
 			}),
 			fillUntilFull: func(t *testing.T) int {
 				return fillPollingUntilFull(&ringBurstQueue[T]{ring: newTestRing[T](t, mpmcMode)})
+			},
+		},
+		"ring-exact": {
+			run: pollingRun[T, S](func(mode benchMode) (queue[T], *runState, error) {
+				created, err := newModeRing[T](mode, ring.WithExactBatchCounts())
+				if err != nil {
+					return nil, nil, err
+				}
+				return &ringBurstQueue[T]{ring: created}, newRunState(nil), nil
+			}),
+			fillUntilFull: func(t *testing.T) int {
+				created := newTestRing[T](t, mpmcMode, ring.WithExactBatchCounts())
+				return fillPollingUntilFull(&ringBurstQueue[T]{ring: created})
 			},
 		},
 		"ring-single": {
@@ -192,10 +206,11 @@ func compareImpls[T any, S sink[T]]() map[string]compareImpl[T, S] {
 	}
 }
 
-// newTestRing returns a ring built for mode, failing the test if it cannot be built.
-func newTestRing[T any](t *testing.T, mode benchMode) *ring.Ring[T] {
+// newTestRing returns a ring built for mode with the extra options, failing the test if it cannot
+// be built.
+func newTestRing[T any](t *testing.T, mode benchMode, extra ...ring.Option) *ring.Ring[T] {
 	t.Helper()
-	created, err := newModeRing[T](mode)
+	created, err := newModeRing[T](mode, extra...)
 	if err != nil {
 		t.Fatalf("build ring for %s: %v", mode.name, err)
 	}

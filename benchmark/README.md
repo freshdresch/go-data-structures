@@ -33,6 +33,9 @@ the comparison, and a `state.txt` that records how the run was made.
 
 - `ring`: the ring, through `EnqueueBurst` and `DequeueBurst`. Batch 1 is the main row. Batch 32
   is labeled context, to show what batching gives the ring.
+- `ring-exact`: the `ring` row built with `WithExactBatchCounts`. By default, the ring's batch
+  calls check a cached copy of the other side's tail. `ring-exact` loads the real tail on every
+  call and returns exact counts.
 - `ring-single`: the ring, through `Enqueue` and `Dequeue`. It is the like-for-like comparison
   with the libraries, which have only single-element calls.
 - `ring-rts`: the ring with relaxed tail sync on its sides that have several goroutines. It runs
@@ -55,6 +58,7 @@ follows.
 
 - `ring` and `ring-single` wait with our yield on a full or empty call, and with the ring's
   bounded spin in the multi publish wait.
+- `ring-exact` waits as `ring` does. Its difference from `ring` shows what exact batch counts cost.
 - `ring-rts` waits with our yield on a full or empty call, and with the relaxed side's
   head-to-tail distance wait.
 - `chan` parks in the runtime.

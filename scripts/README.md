@@ -51,7 +51,7 @@ A default run of four bounds takes about 11 minutes on macOS and about 8 under W
 to `~/ring-spin/<timestamp>-<pid>/`. Like the quick bench, run it only while plugged into AC power.
 
 `ring-compare-bench.sh` compares the ring with other Go queues through the `benchmark` module. It
-runs the module's tests first and stops if any fails. It then runs the 68 benchmark rows in
+runs the module's tests first and stops if any fails. It then runs the 84 benchmark rows in
 shuffled rounds, checks each run's rows, and prints two `benchstat` comparisons, one led by
 `ring` and one led by `ring-single`. The module's README says what each row measures.
 

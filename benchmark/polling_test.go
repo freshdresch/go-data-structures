@@ -158,8 +158,9 @@ func (q *ringBurstQueue[T]) dequeue(dst []T) int {
 }
 
 // newModeRing returns a ring with ringCapacity slots that allows as many producers and consumers
-// as mode has. Its multi sides use relaxed tail sync when mode is relaxed.
-func newModeRing[T any](mode benchMode) (*ring.Ring[T], error) {
+// as mode has. Its multi sides use relaxed tail sync when mode is relaxed. extra options are
+// applied after the mode's options.
+func newModeRing[T any](mode benchMode, extra ...ring.Option) (*ring.Ring[T], error) {
 	multiProd := ring.WithMultiProdEnqueue()
 	multiCons := ring.WithMultiConsDequeue()
 	if mode.relaxed {
@@ -173,6 +174,7 @@ func newModeRing[T any](mode benchMode) (*ring.Ring[T], error) {
 	if mode.consumers > 1 {
 		options = append(options, multiCons)
 	}
+	options = append(options, extra...)
 	return ring.New[T](ringCapacity, options...)
 }
 

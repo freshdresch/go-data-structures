@@ -33,7 +33,8 @@ Pro the MPMC rows ran 30–60% slower with it at byte 96 than at 0, 32, or 64, w
 code. The linker sorts these symbols by size, so an unrelated test change can move it. When the
 note appears, treat an MPMC difference as unproven until the offsets match.
 
-`lib.sh` holds helpers that `ring-quick-bench.sh` sources. It is not run on its own.
+`lib.sh` holds helpers that `ring-quick-bench.sh` and `ring-compare-bench.sh` source. It is not
+run on its own.
 
 `ring-spin-bound.sh` compares one committed ref built with several publish wait spin bounds, the
 `tailSpins` constant in `ring/ring.go`. It builds one binary per bound, with the first bound as the
@@ -48,3 +49,15 @@ scripts/ring-spin-bound.sh 8e3e968 256 64 512 1024
 
 A default run of four bounds takes about 11 minutes on macOS and about 8 under WSL2. Results go
 to `~/ring-spin/<timestamp>-<pid>/`. Like the quick bench, run it only while plugged into AC power.
+
+`ring-compare-bench.sh` compares the ring with other Go queues through the `benchmark` module. It
+runs the module's tests first and stops if any fails. It then runs the 68 benchmark rows in
+shuffled rounds, checks each run's rows, and prints two `benchstat` comparisons, one led by
+`ring` and one led by `ring-single`. The module's README says what each row measures.
+
+```bash
+scripts/ring-compare-bench.sh [-rounds N] [-benchtime D] [-pad N] [-seed N]
+```
+
+Results go to `~/ring-compare/<timestamp>-<pid>/`. On the Mac, the script stops unless
+`pmset -g batt` reports AC Power, so run it only while plugged into AC power.

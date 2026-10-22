@@ -18,10 +18,10 @@ type fortyBytes struct {
 	_ [5]uint64
 }
 
-// TestRingAlignment checks that rings from New start on a cache line, so the read-only fields and
-// the indices each fill a line of their own, shared with neither each other nor neighboring heap
-// objects. The alignment comes from the allocator's size classes, not from a language guarantee,
-// so this catches a Go release that changes it.
+// TestRingAlignment checks that rings from New start on a cache line, so each part of the ring
+// fills a line of its own, shared with neither the other parts nor neighboring heap objects. The
+// alignment comes from the allocator's size classes, not from a language guarantee, so this
+// catches a Go release that changes it.
 //
 // It is excluded from -asan builds, because the address sanitizer pads each allocation, which
 // moves the ring into a larger size class whose objects are not 128-byte aligned.

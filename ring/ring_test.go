@@ -210,6 +210,33 @@ func TestRingReset(t *testing.T) {
 		_, err = ring.Dequeue()
 		assert.ErrorIs(t, err, ErrEmpty)
 	})
+
+	// The cache invariant requires Reset to zero both caches. A cachedProdTail left at 1000 would
+	// let the Dequeue after Reset admit 1000 cleared slots. Moving 1000 elements, between 1 and the
+	// capacity, keeps the admission check from hiding a missing reset.
+	t.Run("caches", func(t *testing.T) {
+		const moved = 1000
+		for _, mode := range cacheModes() {
+			t.Run(mode.name, func(t *testing.T) {
+				ring, err := New[int](1024, mode.options...)
+				require.NoError(t, err)
+				advanceRing(t, ring, moved)
+				for range ring.Capacity() {
+					require.NoError(t, ring.Enqueue(0))
+				}
+				require.ErrorIs(t, ring.Enqueue(0), ErrFull)
+				require.NotZero(t, ring.cachedConsTail.Load())
+				require.NotZero(t, ring.cachedProdTail.Load())
+
+				ring.Reset()
+
+				_, err = ring.Dequeue()
+				assert.ErrorIs(t, err, ErrEmpty)
+				assert.Zero(t, ring.cachedConsTail.Load())
+				assert.Zero(t, ring.cachedProdTail.Load())
+			})
+		}
+	})
 }
 
 func TestSPSCRingBuffer(t *testing.T) {
@@ -707,28 +734,40 @@ func requireEnqueueBulk(t *testing.T, ring *Ring[int], items []int) {
 	require.NoError(t, err)
 }
 
+// cachedAndExact returns the option sets for a test whose counts hold under both batch-count
+// settings: the default cached counts, and WithExactBatchCounts.
+func cachedAndExact() []optionSet {
+	return []optionSet{{name: "cached"}, {name: "exact", options: []Option{WithExactBatchCounts()}}}
+}
+
+// TestEnqueueBulk never lets the consumer move between calls, so both batch-count settings return
+// the same counts, and the exact subtest keeps the count assertions running under the option.
 func TestEnqueueBulk(t *testing.T) {
-	ring, err := New[int](8)
-	require.NoError(t, err)
+	for _, set := range cachedAndExact() {
+		t.Run(set.name, func(t *testing.T) {
+			ring, err := New[int](8, set.options...)
+			require.NoError(t, err)
 
-	free, err := ring.EnqueueBulk([]int{1, 2, 3, 4, 5, 6})
-	require.NoError(t, err)
-	assert.Equal(t, 2, free)
-	assert.Equal(t, 6, ring.Count())
+			free, err := ring.EnqueueBulk([]int{1, 2, 3, 4, 5, 6})
+			require.NoError(t, err)
+			assert.Equal(t, 2, free)
+			assert.Equal(t, 6, ring.Count())
 
-	free, err = ring.EnqueueBulk([]int{7, 8, 9})
-	assert.True(t, err == ErrFull, "got %v", err)
-	assert.Equal(t, 2, free)
-	assert.Equal(t, 6, ring.Count())
+			free, err = ring.EnqueueBulk([]int{7, 8, 9})
+			assert.True(t, err == ErrFull, "got %v", err)
+			assert.Equal(t, 2, free)
+			assert.Equal(t, 6, ring.Count())
 
-	free, err = ring.EnqueueBulk([]int{7, 8})
-	require.NoError(t, err)
-	assert.Equal(t, 0, free)
+			free, err = ring.EnqueueBulk([]int{7, 8})
+			require.NoError(t, err)
+			assert.Equal(t, 0, free)
 
-	elems := make([]int, 8)
-	_, err = ring.DequeueBulk(elems)
-	require.NoError(t, err)
-	assert.Equal(t, []int{1, 2, 3, 4, 5, 6, 7, 8}, elems)
+			elems := make([]int, 8)
+			_, err = ring.DequeueBulk(elems)
+			require.NoError(t, err)
+			assert.Equal(t, []int{1, 2, 3, 4, 5, 6, 7, 8}, elems)
+		})
+	}
 }
 
 func TestDequeueBulk(t *testing.T) {
@@ -778,20 +817,26 @@ func TestEnqueueBurst(t *testing.T) {
 	assert.Equal(t, []int{1, 2, 3, 4, 5, 6, 7, 8}, elems)
 }
 
+// TestDequeueBurst never lets the producer move between calls, so both batch-count settings return
+// the same counts, and the exact subtest keeps the count assertions running under the option.
 func TestDequeueBurst(t *testing.T) {
-	ring, err := New[int](8)
-	require.NoError(t, err)
-	requireEnqueueBulk(t, ring, []int{1, 2, 3})
+	for _, set := range cachedAndExact() {
+		t.Run(set.name, func(t *testing.T) {
+			ring, err := New[int](8, set.options...)
+			require.NoError(t, err)
+			requireEnqueueBulk(t, ring, []int{1, 2, 3})
 
-	elems := make([]int, 5)
-	dequeued, available := ring.DequeueBurst(elems)
-	assert.Equal(t, 3, dequeued)
-	assert.Equal(t, []int{1, 2, 3}, elems[:dequeued])
-	assert.Equal(t, 0, available)
+			elems := make([]int, 5)
+			dequeued, available := ring.DequeueBurst(elems)
+			assert.Equal(t, 3, dequeued)
+			assert.Equal(t, []int{1, 2, 3}, elems[:dequeued])
+			assert.Equal(t, 0, available)
 
-	dequeued, available = ring.DequeueBurst(make([]int, 2))
-	assert.Equal(t, 0, dequeued)
-	assert.Equal(t, 0, available)
+			dequeued, available = ring.DequeueBurst(make([]int, 2))
+			assert.Equal(t, 0, dequeued)
+			assert.Equal(t, 0, available)
+		})
+	}
 }
 
 // advanceRing moves the indices of an empty ring forward by steps slots, leaving it empty.
@@ -1460,10 +1505,13 @@ func setIndices[T any](ring *Ring[T], start uint32) {
 // setRelaxedIndices places every index of an empty ring at pos, and the counters of the relaxed
 // sides at cnt, so a test can wrap the position and the counter separately. It leaves a relaxed
 // side's unused 32-bit head at 0, so a site that wrongly reads it reports a visibly wrong count.
-// setIndices and setRelaxedIndices are the only test code that writes the indices.
+// It also stores pos into both caches, which keeps the cache invariant. Any test that sets indices
+// by hand must set the caches to match, or break the invariant on purpose and say so.
 func setRelaxedIndices[T any](ring *Ring[T], pos, cnt uint32) {
 	ring.prodTail.Store(pos)
 	ring.consTail.Store(pos)
+	ring.cachedConsTail.Store(pos)
+	ring.cachedProdTail.Store(pos)
 	if ring.prodMode == modeRelaxed {
 		ring.prodHeadRTS.Store(pack(pos, cnt))
 		ring.prodTailRTS.Store(pack(pos, cnt))
@@ -2258,7 +2306,7 @@ func TestRelaxedPublishOrder(t *testing.T) {
 	}
 	reserve := func(t *testing.T, ring *Ring[int], n uint32) uint32 {
 		t.Helper()
-		oldPos, count, _ := ring.moveProdHeadRelaxed(n, true)
+		oldPos, count, _ := ring.moveProdHeadRelaxed(n, true, admitByLoad)
 		require.Equal(t, n, count)
 		return oldPos
 	}
@@ -2689,4 +2737,664 @@ func TestErrorIdentity(t *testing.T) {
 	assert.ErrorIs(t, err, ErrExceedsCapacity)
 	_, err = ring.DequeueBulk(make([]int, 5))
 	assert.ErrorIs(t, err, ErrExceedsCapacity)
+}
+
+// cacheModes returns the option sets the cache tests run under: one goroutine per side, multi on
+// both sides, and relaxed on both sides.
+func cacheModes() []optionSet {
+	return []optionSet{
+		{name: "default"},
+		{name: "multi", options: []Option{WithMultiProdEnqueue(), WithMultiConsDequeue()}},
+		{name: "relaxed", options: relaxedOptions()},
+	}
+}
+
+// cacheTestCapacity is the capacity of the rings the cache tests build with newCacheTestRing.
+const cacheTestCapacity = 8
+
+// newCacheTestRing returns an empty ring of cacheTestCapacity ints built with options.
+func newCacheTestRing(t *testing.T, options []Option) *Ring[int] {
+	t.Helper()
+	ring, err := New[int](cacheTestCapacity, options...)
+	require.NoError(t, err)
+	return ring
+}
+
+// setCacheState places the producer head and tail at prod and the consumer head and tail at cons,
+// on whichever indices each side's mode uses, so the ring holds prod - cons elements. It sets the
+// caches to cachedConsTail and cachedProdTail without checking the cache invariant, so each caller
+// says when its values break it.
+func setCacheState[T any](
+	ring *Ring[T],
+	prod, cons, cachedConsTail, cachedProdTail uint32,
+) {
+	ring.prodTail.Store(prod)
+	ring.consTail.Store(cons)
+	if ring.prodMode == modeRelaxed {
+		ring.prodHeadRTS.Store(pack(prod, 0))
+		ring.prodTailRTS.Store(pack(prod, 0))
+	} else {
+		ring.prodHead.Store(prod)
+	}
+	if ring.consMode == modeRelaxed {
+		ring.consHeadRTS.Store(pack(cons, 0))
+		ring.consTailRTS.Store(pack(cons, 0))
+	} else {
+		ring.consHead.Store(cons)
+	}
+	ring.cachedConsTail.Store(cachedConsTail)
+	ring.cachedProdTail.Store(cachedProdTail)
+}
+
+// enqueueOne enqueues one element with Enqueue.
+func enqueueOne(ring *Ring[int]) error {
+	return ring.Enqueue(1)
+}
+
+// enqueueThree enqueues three elements with EnqueueBulk.
+func enqueueThree(ring *Ring[int]) error {
+	_, err := ring.EnqueueBulk([]int{1, 2, 3})
+	return err
+}
+
+// dequeueOne dequeues one element with Dequeue.
+func dequeueOne(ring *Ring[int]) error {
+	_, err := ring.Dequeue()
+	return err
+}
+
+// dequeueThree dequeues three elements with DequeueBulk.
+func dequeueThree(ring *Ring[int]) error {
+	_, err := ring.DequeueBulk(make([]int, 3))
+	return err
+}
+
+// consCache returns the producer side's cached copy of the consumer tail.
+func consCache(ring *Ring[int]) uint32 {
+	return ring.cachedConsTail.Load()
+}
+
+// prodCache returns the consumer side's cached copy of the producer tail.
+func prodCache(ring *Ring[int]) uint32 {
+	return ring.cachedProdTail.Load()
+}
+
+// A cacheCase is a ring state set with setCacheState, a call made on it, the error the call must
+// return, and the value the cache the case checks must hold afterward.
+type cacheCase struct {
+	name           string
+	prod, cons     uint32
+	cachedConsTail uint32
+	cachedProdTail uint32
+	call           func(ring *Ring[int]) error
+	wantErr        error
+	cache          func(ring *Ring[int]) uint32
+	wantCache      uint32
+}
+
+// runCacheCases runs each case on a new ring in each of cacheModes, as subtests named for the mode
+// and the case.
+func runCacheCases(t *testing.T, cases []cacheCase) {
+	t.Helper()
+	for _, mode := range cacheModes() {
+		t.Run(mode.name, func(t *testing.T) {
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					ring := newCacheTestRing(t, mode.options)
+					setCacheState(ring, tc.prod, tc.cons, tc.cachedConsTail, tc.cachedProdTail)
+					err := tc.call(ring)
+					if tc.wantErr == nil {
+						require.NoError(t, err)
+					} else {
+						require.ErrorIs(t, err, tc.wantErr)
+					}
+					assert.Equal(t, tc.wantCache, tc.cache(ring))
+				})
+			}
+		})
+	}
+}
+
+// TestCachedAdmission checks the design's admission check and store rule. A request the cache
+// shows room or data for is admitted without loading the other side's tail, which shows as a cache
+// that keeps its old value while the real tail differs from it. That includes the boundaries
+// used == capacity - n, avail == n, and avail == capacity. A request the cache refuses reloads, and
+// the store rule leaves the cache equal to the loaded tail, across the 2^32 wrap too. On a relaxed
+// side, a reload caches the other side's tail, never the side's own unused 32-bit head.
+func TestCachedAdmission(t *testing.T) {
+	base := uint32(math.MaxUint32 - 2)
+	runCacheCases(t, []cacheCase{
+		{
+			name: "enqueueFitsCache",
+			prod: 10, cons: 10, cachedConsTail: 4, cachedProdTail: 10,
+			call: enqueueOne, cache: consCache, wantCache: 4,
+		},
+		{
+			name: "dequeueFitsCache",
+			prod: 10, cons: 4, cachedConsTail: 4, cachedProdTail: 6,
+			call: dequeueOne, cache: prodCache, wantCache: 6,
+		},
+		{
+			name: "enqueueReloads",
+			prod: 12, cons: 10, cachedConsTail: 4, cachedProdTail: 12,
+			call: enqueueOne, cache: consCache, wantCache: 10,
+		},
+		{
+			name: "dequeueReloads",
+			prod: 10, cons: 6, cachedConsTail: 6, cachedProdTail: 6,
+			call: dequeueOne, cache: prodCache, wantCache: 10,
+		},
+		{
+			// used is 5, which is capacity - n for n = 3.
+			name: "enqueueUsedIsCapacityMinusN",
+			prod: 10, cons: 10, cachedConsTail: 5, cachedProdTail: 10,
+			call: enqueueThree, cache: consCache, wantCache: 5,
+		},
+		{
+			// avail is 3, which is n.
+			name: "dequeueAvailIsN",
+			prod: 10, cons: 4, cachedConsTail: 4, cachedProdTail: 7,
+			call: dequeueThree, cache: prodCache, wantCache: 7,
+		},
+		{
+			// This breaks the invariant on purpose. With avail == capacity the only valid real
+			// tail equals the cache, so the real producer tail is set to the cache minus 1. A
+			// reload would store that lower value, so an unchanged cache shows no reload.
+			name: "dequeueAvailIsCapacity",
+			prod: 11, cons: 4, cachedConsTail: 4, cachedProdTail: 12,
+			call: dequeueOne, cache: prodCache, wantCache: 12,
+		},
+		{
+			name: "enqueueReloadAcrossWrap",
+			prod: base + 8, cons: base + 4, cachedConsTail: base, cachedProdTail: base + 8,
+			call: enqueueOne, cache: consCache, wantCache: base + 4,
+		},
+		{
+			name: "dequeueReloadAcrossWrap",
+			prod: base + 4, cons: base, cachedConsTail: base, cachedProdTail: base,
+			call: dequeueOne, cache: prodCache, wantCache: base + 4,
+		},
+	})
+
+	// setRelaxedIndices leaves each relaxed side's unused 32-bit head at 0, so a reload that read
+	// it would store 0 instead of the other side's tail at pos.
+	t.Run("relaxedReloadCachesOtherTail", func(t *testing.T) {
+		const pos = 1000
+		ring := newCacheTestRing(t, relaxedOptions())
+		setRelaxedIndices(ring, pos, 7)
+
+		require.ErrorIs(t, dequeueOne(ring), ErrEmpty)
+		assert.Equal(t, uint32(pos), ring.cachedProdTail.Load())
+
+		for range cacheTestCapacity {
+			require.NoError(t, enqueueOne(ring))
+		}
+		require.ErrorIs(t, enqueueOne(ring), ErrFull)
+		assert.Equal(t, uint32(pos), ring.cachedConsTail.Load())
+	})
+}
+
+// TestCacheGuard checks the design's guard: an admission check that sees used above the capacity,
+// or avail below n or above the capacity, reloads instead of admitting. Each case's call fails,
+// and the cache ends equal to the real tail, which shows the reload.
+//
+// Every case breaks the cache invariant on purpose, as a multi side's out-of-order cache store or
+// stale head can. A single side never reaches these states, but the check is the same in every
+// mode, so every mode runs them.
+func TestCacheGuard(t *testing.T) {
+	cases := []cacheCase{
+		{
+			name: "enqueueCacheAheadOfHead",
+			prod: 108, cons: 100, cachedConsTail: 109, cachedProdTail: 108,
+			call: enqueueOne, wantErr: ErrFull, cache: consCache, wantCache: 100,
+		},
+		{
+			name: "dequeueCacheTooFarAhead",
+			prod: 100, cons: 100, cachedConsTail: 100, cachedProdTail: 100 + cacheTestCapacity + 1,
+			call: dequeueOne, wantErr: ErrEmpty, cache: prodCache, wantCache: 100,
+		},
+		{
+			name: "dequeueCacheBehindHead",
+			prod: 100, cons: 100, cachedConsTail: 100, cachedProdTail: 99,
+			call: dequeueOne, wantErr: ErrEmpty, cache: prodCache, wantCache: 100,
+		},
+	}
+	for k := uint32(1); k <= cacheTestCapacity; k++ {
+		cases = append(cases, cacheCase{
+			name: fmt.Sprintf("enqueueCacheBackward/k=%d", k),
+			prod: 108, cons: 100, cachedConsTail: 100 - k, cachedProdTail: 108,
+			call: enqueueOne, wantErr: ErrFull, cache: consCache, wantCache: 100,
+		})
+	}
+	runCacheCases(t, cases)
+}
+
+// TestFixedRequestReloads checks the design rule that a fixed request reloads before it refuses.
+// An Enqueue and an EnqueueBulk that the producer's cache alone would refuse succeed when the ring
+// has room, and a Dequeue and a DequeueBulk that the consumer's cache alone would refuse succeed
+// when the ring has data.
+func TestFixedRequestReloads(t *testing.T) {
+	type fixedCall struct {
+		name string
+		call func(ring *Ring[int]) error
+	}
+	enqueues := []fixedCall{{"Enqueue", enqueueOne}, {"EnqueueBulk", enqueueThree}}
+	dequeues := []fixedCall{{"Dequeue", dequeueOne}, {"DequeueBulk", dequeueThree}}
+	for _, mode := range cacheModes() {
+		t.Run(mode.name, func(t *testing.T) {
+			for _, enqueue := range enqueues {
+				t.Run(enqueue.name, func(t *testing.T) {
+					ring := newCacheTestRing(t, mode.options)
+					for range cacheTestCapacity {
+						require.NoError(t, enqueueOne(ring))
+					}
+					for range 4 {
+						require.NoError(t, dequeueOne(ring))
+					}
+					// The producer's cache still holds the consumer at 0, so it shows no room.
+					require.Zero(t, ring.cachedConsTail.Load())
+					require.NoError(t, enqueue.call(ring))
+				})
+			}
+			for _, dequeue := range dequeues {
+				t.Run(dequeue.name, func(t *testing.T) {
+					ring := newCacheTestRing(t, mode.options)
+					for range 4 {
+						require.NoError(t, enqueueOne(ring))
+						require.NoError(t, dequeueOne(ring))
+					}
+					for range 4 {
+						require.NoError(t, enqueueOne(ring))
+					}
+					// The consumer's cache still holds the producer at 4, so it shows no data.
+					require.Equal(t, uint32(4), ring.cachedProdTail.Load())
+					require.NoError(t, dequeue.call(ring))
+				})
+			}
+		})
+	}
+}
+
+// TestBurstReloads checks the design rule that a Burst call whose cache says fewer elements fit
+// reloads, and moves as many as really fit.
+func TestBurstReloads(t *testing.T) {
+	for _, mode := range cacheModes() {
+		t.Run(mode.name, func(t *testing.T) {
+			t.Run("EnqueueBurst", func(t *testing.T) {
+				ring := newCacheTestRing(t, mode.options)
+				for range 6 {
+					require.NoError(t, enqueueOne(ring))
+					require.NoError(t, dequeueOne(ring))
+				}
+				// Every enqueue fit the cache, so it still holds the consumer at 0 and shows 2
+				// free slots, while all 8 are free.
+				require.Zero(t, ring.cachedConsTail.Load())
+				enqueued, _ := ring.EnqueueBurst(make([]int, 5))
+				assert.Equal(t, 5, enqueued)
+			})
+			t.Run("DequeueBurst", func(t *testing.T) {
+				ring := newCacheTestRing(t, mode.options)
+				for range 2 {
+					require.NoError(t, enqueueOne(ring))
+				}
+				require.NoError(t, dequeueOne(ring))
+				for range 6 {
+					require.NoError(t, enqueueOne(ring))
+				}
+				// The consumer's cache holds the producer at 2 and shows 1 entry, while the ring
+				// holds 7.
+				require.Equal(t, uint32(2), ring.cachedProdTail.Load())
+				dequeued, _ := ring.DequeueBurst(make([]int, 5))
+				assert.Equal(t, 5, dequeued)
+			})
+		})
+	}
+}
+
+// TestStaleCacheNeverOverfills checks the design rule that a stale cache never lets a producer
+// overwrite live elements: after filling the ring and dequeuing some, the producer's cache is
+// stale, and enqueuing until ErrFull adds exactly as many as were dequeued.
+func TestStaleCacheNeverOverfills(t *testing.T) {
+	const drained = 3
+	for _, mode := range cacheModes() {
+		t.Run(mode.name, func(t *testing.T) {
+			ring := newCacheTestRing(t, mode.options)
+			var want []int
+			for value := range cacheTestCapacity {
+				require.NoError(t, ring.Enqueue(value))
+				want = append(want, value)
+			}
+			require.ErrorIs(t, ring.Enqueue(-1), ErrFull)
+			for _, value := range want[:drained] {
+				got, err := ring.Dequeue()
+				require.NoError(t, err)
+				require.Equal(t, value, got)
+			}
+			want = want[drained:]
+
+			refilled := 0
+			for ; refilled <= cacheTestCapacity; refilled++ {
+				value := 100 + refilled
+				if err := ring.Enqueue(value); err != nil {
+					require.ErrorIs(t, err, ErrFull)
+					break
+				}
+				want = append(want, value)
+			}
+			assert.Equal(t, drained, refilled)
+
+			got := make([]int, cacheTestCapacity)
+			_, err := ring.DequeueBulk(got)
+			require.NoError(t, err)
+			assert.Equal(t, want, got)
+		})
+	}
+}
+
+// TestStaleCacheNeverReadsUnpublished checks the design rule that a stale cache never lets a
+// consumer return unpublished slots: after the consumer's cache is refreshed and the producer
+// enqueues more, dequeuing until ErrEmpty returns exactly the elements enqueued, in order.
+func TestStaleCacheNeverReadsUnpublished(t *testing.T) {
+	for _, mode := range cacheModes() {
+		t.Run(mode.name, func(t *testing.T) {
+			ring := newCacheTestRing(t, mode.options)
+			for value := range 5 {
+				require.NoError(t, ring.Enqueue(value))
+			}
+			for value := range 2 {
+				got, err := ring.Dequeue()
+				require.NoError(t, err)
+				require.Equal(t, value, got)
+			}
+			for value := 5; value < 8; value++ {
+				require.NoError(t, ring.Enqueue(value))
+			}
+
+			var got []int
+			for range cacheTestCapacity + 1 {
+				value, err := ring.Dequeue()
+				if err != nil {
+					require.ErrorIs(t, err, ErrEmpty)
+					break
+				}
+				got = append(got, value)
+			}
+			assert.Equal(t, []int{2, 3, 4, 5, 6, 7}, got)
+		})
+	}
+}
+
+// staleProducerCache leaves ring empty with the producer's cache still holding the consumer at 0,
+// so the cache shows no free slots while all of them are free.
+func staleProducerCache(t *testing.T, ring *Ring[int]) {
+	t.Helper()
+	for range cacheTestCapacity {
+		require.NoError(t, enqueueOne(ring))
+	}
+	for range cacheTestCapacity {
+		require.NoError(t, dequeueOne(ring))
+	}
+	require.Zero(t, ring.cachedConsTail.Load())
+}
+
+// staleConsumerCache leaves ring holding 5 elements with the consumer's cache still holding the
+// producer at 1, so the cache shows no entries.
+func staleConsumerCache(t *testing.T, ring *Ring[int]) {
+	t.Helper()
+	require.NoError(t, enqueueOne(ring))
+	require.NoError(t, dequeueOne(ring))
+	for range 5 {
+		require.NoError(t, enqueueOne(ring))
+	}
+	require.Equal(t, uint32(1), ring.cachedProdTail.Load())
+}
+
+// TestZeroLengthFresh checks the design rule that a zero-length batch call always loads the real
+// tail: with a stale cache, each batch call returns the fresh count, by default and under
+// WithExactBatchCounts, in each cache mode.
+func TestZeroLengthFresh(t *testing.T) {
+	calls := []struct {
+		name  string
+		stale func(t *testing.T, ring *Ring[int])
+		count func(t *testing.T, ring *Ring[int]) int
+		want  int
+	}{
+		{
+			name:  "EnqueueBulk",
+			stale: staleProducerCache,
+			count: func(t *testing.T, ring *Ring[int]) int {
+				free, err := ring.EnqueueBulk(nil)
+				require.NoError(t, err)
+				return free
+			},
+			want: cacheTestCapacity,
+		},
+		{
+			name:  "EnqueueBurst",
+			stale: staleProducerCache,
+			count: func(t *testing.T, ring *Ring[int]) int {
+				enqueued, free := ring.EnqueueBurst(nil)
+				require.Zero(t, enqueued)
+				return free
+			},
+			want: cacheTestCapacity,
+		},
+		{
+			name:  "DequeueBulk",
+			stale: staleConsumerCache,
+			count: func(t *testing.T, ring *Ring[int]) int {
+				available, err := ring.DequeueBulk(nil)
+				require.NoError(t, err)
+				return available
+			},
+			want: 5,
+		},
+		{
+			name:  "DequeueBurst",
+			stale: staleConsumerCache,
+			count: func(t *testing.T, ring *Ring[int]) int {
+				dequeued, available := ring.DequeueBurst(nil)
+				require.Zero(t, dequeued)
+				return available
+			},
+			want: 5,
+		},
+	}
+	for _, mode := range cacheModes() {
+		t.Run(mode.name, func(t *testing.T) {
+			for _, set := range cachedAndExact() {
+				t.Run(set.name, func(t *testing.T) {
+					options := slices.Concat(mode.options, set.options)
+					for _, call := range calls {
+						t.Run(call.name, func(t *testing.T) {
+							ring := newCacheTestRing(t, options)
+							call.stale(t, ring)
+							assert.Equal(t, call.want, call.count(t, ring))
+						})
+					}
+				})
+			}
+		})
+	}
+}
+
+// TestCachedBatchCounts checks the design's cached counts. The quiet-ring example returns the
+// stale count by default and the fresh one under WithExactBatchCounts, in each cache mode. A call
+// that reloads returns a fresh count. On a single own side, every count a sequence of calls returns
+// is at most the real value after the call.
+func TestCachedBatchCounts(t *testing.T) {
+	const (
+		quietCapacity = 1024
+		quietMoved    = 1000
+	)
+	// quietRing enqueues and dequeues quietMoved elements in one batch each, so the producer's
+	// cache still holds the consumer at 0.
+	quietRing := func(t *testing.T, options ...Option) *Ring[int] {
+		t.Helper()
+		ring, err := New[int](quietCapacity, options...)
+		require.NoError(t, err)
+		_, err = ring.EnqueueBulk(make([]int, quietMoved))
+		require.NoError(t, err)
+		_, err = ring.DequeueBulk(make([]int, quietMoved))
+		require.NoError(t, err)
+		return ring
+	}
+
+	t.Run("quietRing", func(t *testing.T) {
+		wantFree := map[string]int{
+			"cached": quietCapacity - quietMoved - 1,
+			"exact":  quietCapacity - 1,
+		}
+		for _, mode := range cacheModes() {
+			t.Run(mode.name, func(t *testing.T) {
+				for _, set := range cachedAndExact() {
+					t.Run(set.name, func(t *testing.T) {
+						ring := quietRing(t, slices.Concat(mode.options, set.options)...)
+						enqueued, free := ring.EnqueueBurst([]int{1})
+						require.Equal(t, 1, enqueued)
+						assert.Equal(t, wantFree[set.name], free)
+					})
+				}
+			})
+		}
+	})
+
+	t.Run("reloadIsFresh", func(t *testing.T) {
+		ring := quietRing(t)
+		_, err := ring.EnqueueBulk([]int{1})
+		require.NoError(t, err)
+		// The cache shows 23 free slots, so a burst of 24 reloads.
+		enqueued, free := ring.EnqueueBurst(make([]int, 24))
+		require.Equal(t, 24, enqueued)
+		assert.Equal(t, ring.Free(), free)
+	})
+
+	t.Run("singleSideAtMostReal", func(t *testing.T) {
+		ring, err := New[int](16)
+		require.NoError(t, err)
+		for step := range 200 {
+			_, free := ring.EnqueueBurst(make([]int, step%7+1))
+			require.LessOrEqual(t, free, ring.Free(), "EnqueueBurst at step %d", step)
+			free, _ = ring.EnqueueBulk(make([]int, step%3+1))
+			require.LessOrEqual(t, free, ring.Free(), "EnqueueBulk at step %d", step)
+			_, available := ring.DequeueBurst(make([]int, step%5+1))
+			require.LessOrEqual(t, available, ring.Count(), "DequeueBurst at step %d", step)
+			available, _ = ring.DequeueBulk(make([]int, step%4+1))
+			require.LessOrEqual(t, available, ring.Count(), "DequeueBulk at step %d", step)
+		}
+	})
+}
+
+// TestCountIgnoresCaches checks the design rule that nothing outside the head moves reads a cache:
+// on a ring whose caches are stale, Count, Free, freeEntries, and occupiedEntries return the real
+// values.
+func TestCountIgnoresCaches(t *testing.T) {
+	for _, mode := range cacheModes() {
+		t.Run(mode.name, func(t *testing.T) {
+			ring := newCacheTestRing(t, mode.options)
+			// The ring holds 6 elements. The caches show 0 free slots and 1 entry.
+			setCacheState(ring, 10, 4, 2, 5)
+			assert.Equal(t, 6, ring.Count())
+			assert.Equal(t, 2, ring.Free())
+			assert.Equal(t, uint32(2), ring.freeEntries())
+			assert.Equal(t, uint32(6), ring.occupiedEntries())
+		})
+	}
+}
+
+// TestHelpersSetCaches checks the design rule that anything that sets the indices sets the caches
+// to match: after setIndices and setRelaxedIndices, each cache equals the tail it copies.
+func TestHelpersSetCaches(t *testing.T) {
+	for _, mode := range cacheModes() {
+		t.Run(mode.name, func(t *testing.T) {
+			ring := newCacheTestRing(t, mode.options)
+			setIndices(ring, 1234)
+			assert.Equal(t, ring.consTail.Load(), ring.cachedConsTail.Load(), "setIndices")
+			assert.Equal(t, ring.prodTail.Load(), ring.cachedProdTail.Load(), "setIndices")
+
+			setRelaxedIndices(ring, math.MaxUint32-5, 7)
+			assert.Equal(t, ring.consTail.Load(), ring.cachedConsTail.Load(), "setRelaxedIndices")
+			assert.Equal(t, ring.prodTail.Load(), ring.cachedProdTail.Load(), "setRelaxedIndices")
+		})
+	}
+}
+
+// singleCalls returns batchCalls that move one value at a time through ring with Enqueue and
+// Dequeue.
+func singleCalls(ring *Ring[uint64]) (enqueue, dequeue batchCall) {
+	enqueue = func(items []uint64) int {
+		if ring.Enqueue(items[0]) != nil {
+			return 0
+		}
+		return 1
+	}
+	dequeue = func(dst []uint64) int {
+		value, err := ring.Dequeue()
+		if err != nil {
+			return 0
+		}
+		dst[0] = value
+		return 1
+	}
+	return enqueue, dequeue
+}
+
+// TestCachedStress moves tagged values through small rings in every stress mode, with
+// single-element calls and with burst calls, so the cache reloads and the guard run often under
+// contention. The 64-slot ring starts its indices and caches just below 2^32, so they wrap while
+// the goroutines contend.
+func TestCachedStress(t *testing.T) {
+	const (
+		total = 20_000
+		batch = 3
+	)
+	rings := []struct {
+		name  string
+		count int
+		wrap  bool
+	}{
+		{name: "slots=4", count: 4},
+		{name: "slots=64,wrap", count: 64, wrap: true},
+	}
+	callKinds := []struct {
+		name  string
+		batch int
+		calls func(ring *Ring[uint64]) (enqueue, dequeue batchCall)
+	}{
+		{name: "single", batch: 1, calls: singleCalls},
+		{name: "burst", batch: batch, calls: burstCalls},
+	}
+	const startIndex = math.MaxUint32 - 999
+	for _, layout := range rings {
+		t.Run(layout.name, func(t *testing.T) {
+			for _, mode := range stressModes() {
+				for _, kind := range callKinds {
+					t.Run(mode.name+"/"+kind.name, func(t *testing.T) {
+						ring, err := New[uint64](layout.count, mode.options...)
+						require.NoError(t, err)
+						if layout.wrap {
+							setRelaxedIndices(ring, startIndex, math.MaxUint32-99)
+						}
+						enqueue, dequeue := kind.calls(ring)
+
+						perProducer := total / mode.producers
+						results := sendTagged(
+							t,
+							mode.producers,
+							mode.consumers,
+							perProducer,
+							kind.batch,
+							kind.batch,
+							enqueue,
+							dequeue,
+						)
+						assertTaggedDelivery(t, results, mode.producers, perProducer)
+						if layout.wrap {
+							assert.Less(t, ring.consTail.Load(), uint32(startIndex))
+						}
+					})
+				}
+			}
+		})
+	}
 }

@@ -154,9 +154,10 @@ type readOnly[T any] struct {
 //
 // The 64-bit words come first, so the 32-bit fields pack after them without padding.
 type prodHeadLine struct {
-	prodHeadRTS    atomic.Uint64
-	prodHead       atomic.Uint32
-	cachedConsTail atomic.Uint32
+	prodHeadRTS          atomic.Uint64
+	prodHead             atomic.Uint32
+	cachedConsTail       atomic.Uint32
+	singleCachedConsTail uint32
 }
 
 // prodTailLine holds the producer side's tails. The prodHeadLine comment covers it.
@@ -168,9 +169,10 @@ type prodTailLine struct {
 // consHeadLine holds the consumer side's heads and its cached copy of the producer tail. The
 // prodHeadLine comment covers it.
 type consHeadLine struct {
-	consHeadRTS    atomic.Uint64
-	consHead       atomic.Uint32
-	cachedProdTail atomic.Uint32
+	consHeadRTS          atomic.Uint64
+	consHead             atomic.Uint32
+	cachedProdTail       atomic.Uint32
+	singleCachedProdTail uint32
 }
 
 // consTailLine holds the consumer side's tails. The prodHeadLine comment covers it.
@@ -192,6 +194,11 @@ type consTailLine struct {
 // sets how long a waiting goroutine spins before it yields.
 //
 // The ring holds exactly count elements, where count is the count given to New.
+//
+// Each single side permits one operation at a time across all its methods, including failed
+// and zero-length calls. Owners may change goroutines, but callers must synchronize every
+// handoff with a happens-before edge, such as a mutex or channel. Opposite-side operations and
+// Count, Free, Full, and Empty may run concurrently.
 //
 // A Ring must not be copied once in use.
 type Ring[T any] struct {
@@ -510,6 +517,10 @@ func relaxedHTDMax(mode syncMode, count int) uint32 {
 // between 1 and 2^30, and one wrapping ErrInvalidMaxBatch when a maximum enqueue or dequeue batch
 // is below 1 or above count. It returns one wrapping ErrInvalidSpinsBeforeYield when the bound set
 // with WithSpinsBeforeYield is below 0 or above math.MaxInt32.
+// Each single side permits one operation at a time across all its methods, including failed
+// and zero-length calls. Owners may change goroutines, but callers must synchronize every
+// handoff with a happens-before edge, such as a mutex or channel. Opposite-side operations and
+// Count, Free, Full, and Empty may run concurrently.
 func New[T any](count int, options ...Option) (*Ring[T], error) {
 	inRange := count >= 1 && count <= maxCount
 	isPowerOfTwo := count&(count-1) == 0
@@ -604,6 +615,9 @@ func (r *Ring[T]) capacity() uint32 {
 //
 // WARNING: Make sure to only do this while the ring is not in use!
 //
+// Callers must give Reset exclusive access, synchronize completion of all prior use, and
+// synchronize publication of the reset ring to future users.
+//
 // Reset does not change how the ring was configured. Elements that were enqueued but never
 // dequeued are released. It clears every slot even on a ring created with WithoutDequeueClearing.
 // It also zeroes each side's cached copy of the other side's tail, because a cache left at its old
@@ -620,6 +634,8 @@ func (r *Ring[T]) Reset() {
 	r.consTailRTS.Store(0)
 	r.cachedConsTail.Store(0)
 	r.cachedProdTail.Store(0)
+	r.singleCachedConsTail = 0
+	r.singleCachedProdTail = 0
 }
 
 // Count returns the number of occupied entries in the ring.

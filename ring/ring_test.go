@@ -229,15 +229,17 @@ func TestRingReset(t *testing.T) {
 					require.NoError(t, ring.Enqueue(0))
 				}
 				require.ErrorIs(t, ring.Enqueue(0), ErrFull)
-				require.NotZero(t, ring.cachedConsTail.Load())
-				require.NotZero(t, ring.cachedProdTail.Load())
+				require.NotZero(t, consCache(t, ring))
+				require.NotZero(t, prodCache(t, ring))
 
 				ring.Reset()
 
 				_, err = ring.Dequeue()
 				assert.ErrorIs(t, err, ErrEmpty)
-				assert.Zero(t, ring.cachedConsTail.Load())
-				assert.Zero(t, ring.cachedProdTail.Load())
+				assert.Zero(t, consCache(t, ring))
+				assert.Zero(t, prodCache(t, ring))
+				assert.Zero(t, ring.singleCachedConsTail)
+				assert.Zero(t, ring.singleCachedProdTail)
 			})
 		}
 	})
@@ -673,7 +675,7 @@ func TestFullCapacity(t *testing.T) {
 				t.Run(name, func(t *testing.T) {
 					ring, err := New[int](capacity, set.options...)
 					require.NoError(t, err)
-					setIndices(ring, start)
+					setIndices(t, ring, start)
 
 					for i := range capacity {
 						require.NoError(t, ring.Enqueue(i))
@@ -705,7 +707,7 @@ func TestEmptyAgreesWithCount(t *testing.T) {
 			t.Run(fmt.Sprintf("%s/start=%d", set.name, start), func(t *testing.T) {
 				ring, err := New[int](capacity, set.options...)
 				require.NoError(t, err)
-				setIndices(ring, start)
+				setIndices(t, ring, start)
 
 				assertEmptyAgreesWithCount(t, ring)
 				for i := range capacity {
@@ -861,7 +863,7 @@ func TestBatchCopyCrossesEndOfBackingArray(t *testing.T) {
 	// Starting two slots before the end, a batch of five fills the last two slots of the backing
 	// array and then the first three.
 	advanceRing(t, ring, 6)
-	require.Equal(t, uint32(6), ring.prodHead.Load()&ring.mask)
+	require.Equal(t, uint32(6), ring.prodTail.Load()&ring.mask)
 	requireEnqueueBulk(t, ring, batch)
 	elems := make([]int, 5)
 	_, err = ring.DequeueBulk(elems)
@@ -869,7 +871,7 @@ func TestBatchCopyCrossesEndOfBackingArray(t *testing.T) {
 	assert.Equal(t, batch, elems)
 
 	advanceRing(t, ring, 3)
-	require.Equal(t, uint32(6), ring.prodHead.Load()&ring.mask)
+	require.Equal(t, uint32(6), ring.prodTail.Load()&ring.mask)
 	enqueued, _ := ring.EnqueueBurst(batch)
 	assert.Equal(t, 5, enqueued)
 	elems = make([]int, 5)
@@ -925,7 +927,7 @@ func TestDequeueClearsSlots(t *testing.T) {
 	// five reads slots 6, 7, 0, 1, and 2, so the sixth, unread slot keeps its element.
 	t.Run("DequeueBulkAcrossEnd", func(t *testing.T) {
 		ring := newPointerRing(t)
-		setIndices(ring, 6)
+		setIndices(t, ring, 6)
 		requireEnqueuePointers(t, ring, 6)
 		_, err := ring.DequeueBulk(make([]*int, 5))
 		require.NoError(t, err)
@@ -935,7 +937,7 @@ func TestDequeueClearsSlots(t *testing.T) {
 
 	t.Run("DequeueBurstAcrossEnd", func(t *testing.T) {
 		ring := newPointerRing(t)
-		setIndices(ring, 6)
+		setIndices(t, ring, 6)
 		requireEnqueuePointers(t, ring, 6)
 		dequeued, _ := ring.DequeueBurst(make([]*int, 5))
 		require.Equal(t, 5, dequeued)
@@ -984,7 +986,7 @@ func TestWithoutDequeueClearing(t *testing.T) {
 	// dequeuing five reads slots 6, 7, 0, 1, and 2.
 	t.Run("DequeueBulkAcrossEnd", func(t *testing.T) {
 		ring := newPointerRing(t, WithoutDequeueClearing())
-		setIndices(ring, 6)
+		setIndices(t, ring, 6)
 		requireEnqueuePointers(t, ring, 6)
 		_, err := ring.DequeueBulk(make([]*int, 5))
 		require.NoError(t, err)
@@ -1362,7 +1364,7 @@ func TestIndexWrap(t *testing.T) {
 			ring, err := New[int](8, tc.options...)
 			require.NoError(t, err)
 			const startIndex = math.MaxUint32 - 2
-			setRelaxedIndices(ring, startIndex, tc.cnt)
+			setRelaxedIndices(t, ring, startIndex, tc.cnt)
 			assertOccupancy(t, ring, 0)
 
 			require.NoError(t, ring.Enqueue(1))
@@ -1423,7 +1425,7 @@ func TestRelaxedDispatch(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ring, err := New[int](8, tc.options...)
 			require.NoError(t, err)
-			setRelaxedIndices(ring, 1000, math.MaxUint32-2)
+			setRelaxedIndices(t, ring, 1000, math.MaxUint32-2)
 
 			require.NoError(t, ring.Enqueue(1))
 			require.NoError(t, ring.Enqueue(2))
@@ -1498,12 +1500,14 @@ func assertNewRing[T any](t *testing.T, ring *Ring[T], count int) {
 	assert.Zero(t, ring.prodTail.Load())
 	assert.Zero(t, ring.consHead.Load())
 	assert.Zero(t, ring.consTail.Load())
+	assert.Zero(t, ring.singleCachedConsTail)
+	assert.Zero(t, ring.singleCachedProdTail)
 }
 
 // setIndices places every index of an empty ring at start, with relaxed counters at 0, so a test
 // can run the ring across the 2^32 wrap.
-func setIndices[T any](ring *Ring[T], start uint32) {
-	setRelaxedIndices(ring, start, 0)
+func setIndices[T any](t *testing.T, ring *Ring[T], start uint32) {
+	setRelaxedIndices(t, ring, start, 0)
 }
 
 // setRelaxedIndices places every index of an empty ring at pos, and the counters of the relaxed
@@ -1511,21 +1515,23 @@ func setIndices[T any](ring *Ring[T], start uint32) {
 // side's unused 32-bit head at 0, so a site that wrongly reads it reports a visibly wrong count.
 // It also stores pos into both caches, which keeps the cache invariant. Any test that sets indices
 // by hand must set the caches to match, or break the invariant on purpose and say so.
-func setRelaxedIndices[T any](ring *Ring[T], pos, cnt uint32) {
+func setRelaxedIndices[T any](t *testing.T, ring *Ring[T], pos, cnt uint32) {
 	ring.prodTail.Store(pos)
 	ring.consTail.Store(pos)
 	ring.cachedConsTail.Store(pos)
 	ring.cachedProdTail.Store(pos)
+	ring.singleCachedConsTail = pos
+	ring.singleCachedProdTail = pos
 	if ring.prodMode == modeRelaxed {
 		ring.prodHeadRTS.Store(pack(pos, cnt))
 		ring.prodTailRTS.Store(pack(pos, cnt))
-	} else {
+	} else if ring.prodMode == modeMulti || probeSingleRepresentation(t) == singleLegacy {
 		ring.prodHead.Store(pos)
 	}
 	if ring.consMode == modeRelaxed {
 		ring.consHeadRTS.Store(pack(pos, cnt))
 		ring.consTailRTS.Store(pack(pos, cnt))
-	} else {
+	} else if ring.consMode == modeMulti || probeSingleRepresentation(t) == singleLegacy {
 		ring.consHead.Store(pos)
 	}
 }
@@ -2042,7 +2048,7 @@ func TestConcurrentWrap(t *testing.T) {
 			ring, err := New[uint64](64, mode.options...)
 			require.NoError(t, err)
 			const startIndex = math.MaxUint32 - 999
-			setRelaxedIndices(ring, startIndex, math.MaxUint32-99)
+			setRelaxedIndices(t, ring, startIndex, math.MaxUint32-99)
 			enqueue, dequeue := burstCalls(ring)
 
 			perProducer := total / mode.producers
@@ -2920,6 +2926,7 @@ func newCacheTestRing(t *testing.T, options []Option) *Ring[int] {
 // caches to cachedConsTail and cachedProdTail without checking the cache invariant, so each caller
 // says when its values break it.
 func setCacheState[T any](
+	t *testing.T,
 	ring *Ring[T],
 	prod, cons, cachedConsTail, cachedProdTail uint32,
 ) {
@@ -2928,17 +2935,19 @@ func setCacheState[T any](
 	if ring.prodMode == modeRelaxed {
 		ring.prodHeadRTS.Store(pack(prod, 0))
 		ring.prodTailRTS.Store(pack(prod, 0))
-	} else {
+	} else if ring.prodMode == modeMulti || probeSingleRepresentation(t) == singleLegacy {
 		ring.prodHead.Store(prod)
 	}
 	if ring.consMode == modeRelaxed {
 		ring.consHeadRTS.Store(pack(cons, 0))
 		ring.consTailRTS.Store(pack(cons, 0))
-	} else {
+	} else if ring.consMode == modeMulti || probeSingleRepresentation(t) == singleLegacy {
 		ring.consHead.Store(cons)
 	}
 	ring.cachedConsTail.Store(cachedConsTail)
 	ring.cachedProdTail.Store(cachedProdTail)
+	ring.singleCachedConsTail = cachedConsTail
+	ring.singleCachedProdTail = cachedProdTail
 }
 
 // enqueueOne enqueues one element with Enqueue.
@@ -2965,12 +2974,18 @@ func dequeueThree(ring *Ring[int]) error {
 }
 
 // consCache returns the producer side's cached copy of the consumer tail.
-func consCache(ring *Ring[int]) uint32 {
+func consCache[T any](t *testing.T, ring *Ring[T]) uint32 {
+	if ring.prodMode == modeSingle && probeSingleRepresentation(t) == singleOwner {
+		return ring.singleCachedConsTail
+	}
 	return ring.cachedConsTail.Load()
 }
 
 // prodCache returns the consumer side's cached copy of the producer tail.
-func prodCache(ring *Ring[int]) uint32 {
+func prodCache[T any](t *testing.T, ring *Ring[T]) uint32 {
+	if ring.consMode == modeSingle && probeSingleRepresentation(t) == singleOwner {
+		return ring.singleCachedProdTail
+	}
 	return ring.cachedProdTail.Load()
 }
 
@@ -2983,7 +2998,7 @@ type cacheCase struct {
 	cachedProdTail uint32
 	call           func(ring *Ring[int]) error
 	wantErr        error
-	cache          func(ring *Ring[int]) uint32
+	cache          func(t *testing.T, ring *Ring[int]) uint32
 	wantCache      uint32
 }
 
@@ -2996,14 +3011,14 @@ func runCacheCases(t *testing.T, cases []cacheCase) {
 			for _, tc := range cases {
 				t.Run(tc.name, func(t *testing.T) {
 					ring := newCacheTestRing(t, mode.options)
-					setCacheState(ring, tc.prod, tc.cons, tc.cachedConsTail, tc.cachedProdTail)
+					setCacheState(t, ring, tc.prod, tc.cons, tc.cachedConsTail, tc.cachedProdTail)
 					err := tc.call(ring)
 					if tc.wantErr == nil {
 						require.NoError(t, err)
 					} else {
 						require.ErrorIs(t, err, tc.wantErr)
 					}
-					assert.Equal(t, tc.wantCache, tc.cache(ring))
+					assert.Equal(t, tc.wantCache, tc.cache(t, ring))
 				})
 			}
 		})
@@ -3022,34 +3037,34 @@ func TestCachedAdmission(t *testing.T) {
 		{
 			name: "enqueueFitsCache",
 			prod: 10, cons: 10, cachedConsTail: 4, cachedProdTail: 10,
-			call: enqueueOne, cache: consCache, wantCache: 4,
+			call: enqueueOne, cache: consCache[int], wantCache: 4,
 		},
 		{
 			name: "dequeueFitsCache",
 			prod: 10, cons: 4, cachedConsTail: 4, cachedProdTail: 6,
-			call: dequeueOne, cache: prodCache, wantCache: 6,
+			call: dequeueOne, cache: prodCache[int], wantCache: 6,
 		},
 		{
 			name: "enqueueReloads",
 			prod: 12, cons: 10, cachedConsTail: 4, cachedProdTail: 12,
-			call: enqueueOne, cache: consCache, wantCache: 10,
+			call: enqueueOne, cache: consCache[int], wantCache: 10,
 		},
 		{
 			name: "dequeueReloads",
 			prod: 10, cons: 6, cachedConsTail: 6, cachedProdTail: 6,
-			call: dequeueOne, cache: prodCache, wantCache: 10,
+			call: dequeueOne, cache: prodCache[int], wantCache: 10,
 		},
 		{
 			// used is 5, which is capacity - n for n = 3.
 			name: "enqueueUsedIsCapacityMinusN",
 			prod: 10, cons: 10, cachedConsTail: 5, cachedProdTail: 10,
-			call: enqueueThree, cache: consCache, wantCache: 5,
+			call: enqueueThree, cache: consCache[int], wantCache: 5,
 		},
 		{
 			// avail is 3, which is n.
 			name: "dequeueAvailIsN",
 			prod: 10, cons: 4, cachedConsTail: 4, cachedProdTail: 7,
-			call: dequeueThree, cache: prodCache, wantCache: 7,
+			call: dequeueThree, cache: prodCache[int], wantCache: 7,
 		},
 		{
 			// This breaks the invariant on purpose. With avail == capacity the only valid real
@@ -3057,17 +3072,17 @@ func TestCachedAdmission(t *testing.T) {
 			// reload would store that lower value, so an unchanged cache shows no reload.
 			name: "dequeueAvailIsCapacity",
 			prod: 11, cons: 4, cachedConsTail: 4, cachedProdTail: 12,
-			call: dequeueOne, cache: prodCache, wantCache: 12,
+			call: dequeueOne, cache: prodCache[int], wantCache: 12,
 		},
 		{
 			name: "enqueueReloadAcrossWrap",
 			prod: base + 8, cons: base + 4, cachedConsTail: base, cachedProdTail: base + 8,
-			call: enqueueOne, cache: consCache, wantCache: base + 4,
+			call: enqueueOne, cache: consCache[int], wantCache: base + 4,
 		},
 		{
 			name: "dequeueReloadAcrossWrap",
 			prod: base + 4, cons: base, cachedConsTail: base, cachedProdTail: base,
-			call: dequeueOne, cache: prodCache, wantCache: base + 4,
+			call: dequeueOne, cache: prodCache[int], wantCache: base + 4,
 		},
 	})
 
@@ -3076,16 +3091,16 @@ func TestCachedAdmission(t *testing.T) {
 	t.Run("relaxedReloadCachesOtherTail", func(t *testing.T) {
 		const pos = 1000
 		ring := newCacheTestRing(t, relaxedOptions())
-		setRelaxedIndices(ring, pos, 7)
+		setRelaxedIndices(t, ring, pos, 7)
 
 		require.ErrorIs(t, dequeueOne(ring), ErrEmpty)
-		assert.Equal(t, uint32(pos), ring.cachedProdTail.Load())
+		assert.Equal(t, uint32(pos), prodCache(t, ring))
 
 		for range cacheTestCapacity {
 			require.NoError(t, enqueueOne(ring))
 		}
 		require.ErrorIs(t, enqueueOne(ring), ErrFull)
-		assert.Equal(t, uint32(pos), ring.cachedConsTail.Load())
+		assert.Equal(t, uint32(pos), consCache(t, ring))
 	})
 }
 
@@ -3101,24 +3116,24 @@ func TestCacheGuard(t *testing.T) {
 		{
 			name: "enqueueCacheAheadOfHead",
 			prod: 108, cons: 100, cachedConsTail: 109, cachedProdTail: 108,
-			call: enqueueOne, wantErr: ErrFull, cache: consCache, wantCache: 100,
+			call: enqueueOne, wantErr: ErrFull, cache: consCache[int], wantCache: 100,
 		},
 		{
 			name: "dequeueCacheTooFarAhead",
 			prod: 100, cons: 100, cachedConsTail: 100, cachedProdTail: 100 + cacheTestCapacity + 1,
-			call: dequeueOne, wantErr: ErrEmpty, cache: prodCache, wantCache: 100,
+			call: dequeueOne, wantErr: ErrEmpty, cache: prodCache[int], wantCache: 100,
 		},
 		{
 			name: "dequeueCacheBehindHead",
 			prod: 100, cons: 100, cachedConsTail: 100, cachedProdTail: 99,
-			call: dequeueOne, wantErr: ErrEmpty, cache: prodCache, wantCache: 100,
+			call: dequeueOne, wantErr: ErrEmpty, cache: prodCache[int], wantCache: 100,
 		},
 	}
 	for k := uint32(1); k <= cacheTestCapacity; k++ {
 		cases = append(cases, cacheCase{
 			name: fmt.Sprintf("enqueueCacheBackward/k=%d", k),
 			prod: 108, cons: 100, cachedConsTail: 100 - k, cachedProdTail: 108,
-			call: enqueueOne, wantErr: ErrFull, cache: consCache, wantCache: 100,
+			call: enqueueOne, wantErr: ErrFull, cache: consCache[int], wantCache: 100,
 		})
 	}
 	runCacheCases(t, cases)
@@ -3147,7 +3162,7 @@ func TestFixedRequestReloads(t *testing.T) {
 						require.NoError(t, dequeueOne(ring))
 					}
 					// The producer's cache still holds the consumer at 0, so it shows no room.
-					require.Zero(t, ring.cachedConsTail.Load())
+					require.Zero(t, consCache(t, ring))
 					require.NoError(t, enqueue.call(ring))
 				})
 			}
@@ -3162,7 +3177,7 @@ func TestFixedRequestReloads(t *testing.T) {
 						require.NoError(t, enqueueOne(ring))
 					}
 					// The consumer's cache still holds the producer at 4, so it shows no data.
-					require.Equal(t, uint32(4), ring.cachedProdTail.Load())
+					require.Equal(t, uint32(4), prodCache(t, ring))
 					require.NoError(t, dequeue.call(ring))
 				})
 			}
@@ -3183,7 +3198,7 @@ func TestBurstReloads(t *testing.T) {
 				}
 				// Every enqueue fit the cache, so it still holds the consumer at 0 and shows 2
 				// free slots, while all 8 are free.
-				require.Zero(t, ring.cachedConsTail.Load())
+				require.Zero(t, consCache(t, ring))
 				enqueued, _ := ring.EnqueueBurst(make([]int, 5))
 				assert.Equal(t, 5, enqueued)
 			})
@@ -3198,7 +3213,7 @@ func TestBurstReloads(t *testing.T) {
 				}
 				// The consumer's cache holds the producer at 2 and shows 1 entry, while the ring
 				// holds 7.
-				require.Equal(t, uint32(2), ring.cachedProdTail.Load())
+				require.Equal(t, uint32(2), prodCache(t, ring))
 				dequeued, _ := ring.DequeueBurst(make([]int, 5))
 				assert.Equal(t, 5, dequeued)
 			})
@@ -3289,7 +3304,7 @@ func staleProducerCache(t *testing.T, ring *Ring[int]) {
 	for range cacheTestCapacity {
 		require.NoError(t, dequeueOne(ring))
 	}
-	require.Zero(t, ring.cachedConsTail.Load())
+	require.Zero(t, consCache(t, ring))
 }
 
 // staleConsumerCache leaves ring holding 5 elements with the consumer's cache still holding the
@@ -3301,7 +3316,7 @@ func staleConsumerCache(t *testing.T, ring *Ring[int]) {
 	for range 5 {
 		require.NoError(t, enqueueOne(ring))
 	}
-	require.Equal(t, uint32(1), ring.cachedProdTail.Load())
+	require.Equal(t, uint32(1), prodCache(t, ring))
 }
 
 // TestZeroLengthFresh checks the design rule that a zero-length batch call always loads the real
@@ -3448,7 +3463,7 @@ func TestCountIgnoresCaches(t *testing.T) {
 		t.Run(mode.name, func(t *testing.T) {
 			ring := newCacheTestRing(t, mode.options)
 			// The ring holds 6 elements. The caches show 0 free slots and 1 entry.
-			setCacheState(ring, 10, 4, 2, 5)
+			setCacheState(t, ring, 10, 4, 2, 5)
 			assert.Equal(t, 6, ring.Count())
 			assert.Equal(t, 2, ring.Free())
 			assert.Equal(t, uint32(2), ring.freeEntries())
@@ -3463,13 +3478,21 @@ func TestHelpersSetCaches(t *testing.T) {
 	for _, mode := range cacheModes() {
 		t.Run(mode.name, func(t *testing.T) {
 			ring := newCacheTestRing(t, mode.options)
-			setIndices(ring, 1234)
-			assert.Equal(t, ring.consTail.Load(), ring.cachedConsTail.Load(), "setIndices")
-			assert.Equal(t, ring.prodTail.Load(), ring.cachedProdTail.Load(), "setIndices")
+			setIndices(t, ring, 1234)
+			assert.Equal(t, uint32(1234), ring.singleCachedConsTail)
+			assert.Equal(t, uint32(1234), ring.singleCachedProdTail)
+			assert.Equal(t, uint32(1234), ring.cachedConsTail.Load())
+			assert.Equal(t, uint32(1234), ring.cachedProdTail.Load())
+			assert.Equal(t, ring.consTail.Load(), consCache(t, ring), "setIndices")
+			assert.Equal(t, ring.prodTail.Load(), prodCache(t, ring), "setIndices")
 
-			setRelaxedIndices(ring, math.MaxUint32-5, 7)
-			assert.Equal(t, ring.consTail.Load(), ring.cachedConsTail.Load(), "setRelaxedIndices")
-			assert.Equal(t, ring.prodTail.Load(), ring.cachedProdTail.Load(), "setRelaxedIndices")
+			setRelaxedIndices(t, ring, math.MaxUint32-5, 7)
+			assert.Equal(t, uint32(math.MaxUint32-5), ring.singleCachedConsTail)
+			assert.Equal(t, uint32(math.MaxUint32-5), ring.singleCachedProdTail)
+			assert.Equal(t, uint32(math.MaxUint32-5), ring.cachedConsTail.Load())
+			assert.Equal(t, uint32(math.MaxUint32-5), ring.cachedProdTail.Load())
+			assert.Equal(t, ring.consTail.Load(), consCache(t, ring), "setRelaxedIndices")
+			assert.Equal(t, ring.prodTail.Load(), prodCache(t, ring), "setRelaxedIndices")
 		})
 	}
 }
@@ -3522,13 +3545,13 @@ func TestCachedStress(t *testing.T) {
 	const startIndex = math.MaxUint32 - 999
 	for _, layout := range rings {
 		t.Run(layout.name, func(t *testing.T) {
-			for _, mode := range stressModes() {
+			for _, mode := range cachedStressModes() {
 				for _, kind := range callKinds {
 					t.Run(mode.name+"/"+kind.name, func(t *testing.T) {
 						ring, err := New[uint64](layout.count, mode.options...)
 						require.NoError(t, err)
 						if layout.wrap {
-							setRelaxedIndices(ring, startIndex, math.MaxUint32-99)
+							setRelaxedIndices(t, ring, startIndex, math.MaxUint32-99)
 						}
 						enqueue, dequeue := kind.calls(ring)
 
@@ -3551,5 +3574,450 @@ func TestCachedStress(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func cachedStressModes() []stressMode {
+	modes := append(stressModes(),
+		stressMode{"MPSC", 4, 1, []Option{WithMultiProdEnqueue()}},
+		stressMode{"SPMC", 1, 4, []Option{WithMultiConsDequeue()}},
+		stressMode{"RTSProdSingleCons", 4, 1, []Option{WithRelaxedMultiProdEnqueue()}},
+		stressMode{"SingleProdRTSCons", 1, 4, []Option{WithRelaxedMultiConsDequeue()}},
+	)
+	for _, mode := range slices.Clone(modes) {
+		mode.name += "/exact"
+		mode.options = append(slices.Clone(mode.options), WithExactBatchCounts())
+		modes = append(modes, mode)
+	}
+	return modes
+}
+
+type singleRepresentation string
+
+const (
+	singleLegacy singleRepresentation = "legacy"
+	singleOwner  singleRepresentation = "owner"
+)
+
+func probeSingleRepresentation(t *testing.T) singleRepresentation {
+	t.Helper()
+	ring, err := New[int](4)
+	require.NoError(t, err)
+	free, err := ring.EnqueueBulk([]int{11, 12})
+	require.NoError(t, err)
+	require.Equal(t, 2, free)
+	dst := []int{-1}
+	available, err := ring.DequeueBulk(dst)
+	require.NoError(t, err)
+	require.Equal(t, 1, available)
+	require.Equal(t, []int{11}, dst)
+	free, err = ring.EnqueueBulk(nil)
+	require.NoError(t, err)
+	require.Equal(t, 3, free)
+	require.Equal(t, 1, ring.Count())
+	require.Equal(t, uint32(2), ring.prodTail.Load())
+	require.Equal(t, uint32(1), ring.consTail.Load())
+	state := [6]uint32{
+		ring.prodHead.Load(), ring.consHead.Load(),
+		ring.cachedConsTail.Load(), ring.cachedProdTail.Load(),
+		ring.singleCachedConsTail, ring.singleCachedProdTail,
+	}
+	switch state {
+	case [6]uint32{2, 1, 1, 2, 0, 0}:
+		return singleLegacy
+	case [6]uint32{0, 0, 0, 0, 1, 2}:
+		return singleOwner
+	default:
+		t.Fatalf("unrecognized single representation: %v", state)
+		return ""
+	}
+}
+
+func TestSingleRepresentation(t *testing.T) {
+	representation := probeSingleRepresentation(t)
+	expected := os.Getenv("RING_EXPECT_SINGLE_REPRESENTATION")
+	switch expected {
+	case "":
+	case "legacy", "owner":
+		require.Equal(t, singleRepresentation(expected), representation)
+	default:
+		t.Fatalf("invalid RING_EXPECT_SINGLE_REPRESENTATION: %q", expected)
+	}
+}
+
+func singleOwnershipModes() []optionSet {
+	return []optionSet{
+		{name: "SPSC"},
+		{name: "MPSC", options: []Option{WithMultiProdEnqueue()}},
+		{name: "SPMC", options: []Option{WithMultiConsDequeue()}},
+		{name: "RTSProd", options: []Option{WithRelaxedMultiProdEnqueue()}},
+		{name: "RTSCons", options: []Option{WithRelaxedMultiConsDequeue()}},
+	}
+}
+
+func TestSinglePositionAndCacheOwnership(t *testing.T) {
+	representation := probeSingleRepresentation(t)
+	for _, mode := range singleOwnershipModes() {
+		for _, exact := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/exact=%t", mode.name, exact), func(t *testing.T) {
+				options := append(slices.Clone(mode.options), WithMaxBatch(3))
+				if exact {
+					options = append(options, WithExactBatchCounts())
+				}
+				ring, err := New[int](4, options...)
+				require.NoError(t, err)
+				const start = uint32(math.MaxUint32 - 2)
+				setIndices(t, ring, start)
+				if representation == singleOwner {
+					if ring.prodMode == modeSingle {
+						ring.prodHead.Store(71)
+						ring.cachedConsTail.Store(73)
+					}
+					if ring.consMode == modeSingle {
+						ring.consHead.Store(79)
+						ring.cachedProdTail.Store(83)
+					}
+				}
+				if ring.prodMode != modeSingle {
+					ring.singleCachedConsTail = 89
+				}
+				if ring.consMode != modeSingle {
+					ring.singleCachedProdTail = 97
+				}
+				require.NoError(t, ring.Enqueue(11))
+				_, err = ring.EnqueueBulk([]int{12, 13})
+				require.NoError(t, err)
+				moved, free := ring.EnqueueBurst([]int{14, 15})
+				require.Equal(t, 1, moved)
+				require.Zero(t, free)
+				_, err = ring.EnqueueBulk([]int{16, 17})
+				require.ErrorIs(t, err, ErrFull)
+				free, err = ring.EnqueueBulk(nil)
+				require.NoError(t, err)
+				require.Zero(t, free)
+				value, err := ring.Dequeue()
+				require.NoError(t, err)
+				require.Equal(t, 11, value)
+				dst := []int{-1, -1}
+				_, err = ring.DequeueBulk(dst)
+				require.NoError(t, err)
+				require.Equal(t, []int{12, 13}, dst)
+				dst = []int{-1, -1}
+				moved, available := ring.DequeueBurst(dst)
+				require.Equal(t, 1, moved)
+				require.Zero(t, available)
+				require.Equal(t, []int{14, -1}, dst)
+				_, err = ring.DequeueBulk(dst)
+				require.ErrorIs(t, err, ErrEmpty)
+				require.Equal(t, []int{14, -1}, dst)
+				available, err = ring.DequeueBulk(nil)
+				require.NoError(t, err)
+				require.Zero(t, available)
+				prodCacheBefore := [2]uint32{ring.cachedConsTail.Load(), ring.singleCachedConsTail}
+				consCacheBefore := [2]uint32{ring.cachedProdTail.Load(), ring.singleCachedProdTail}
+				for _, length := range []int{4, 5} {
+					wantErr := ErrExceedsMaxBatch
+					if length > ring.Capacity() {
+						wantErr = ErrExceedsCapacity
+					}
+					free, err = ring.EnqueueBulk(make([]int, length))
+					require.ErrorIs(t, err, wantErr)
+					require.Equal(t, 4, free)
+					dst := make([]int, length)
+					for i := range dst {
+						dst[i] = -1
+					}
+					available, err = ring.DequeueBulk(dst)
+					require.ErrorIs(t, err, wantErr)
+					require.Zero(t, available)
+					for _, value := range dst {
+						require.Equal(t, -1, value)
+					}
+				}
+				require.Equal(t, prodCacheBefore,
+					[2]uint32{ring.cachedConsTail.Load(), ring.singleCachedConsTail})
+				require.Equal(t, consCacheBefore,
+					[2]uint32{ring.cachedProdTail.Load(), ring.singleCachedProdTail})
+				wantTail := start
+				wantTail += 4
+				require.Equal(t, wantTail, ring.prodTail.Load())
+				require.Equal(t, wantTail, ring.consTail.Load())
+				require.Equal(t, wantTail, ring.prodHeadPos())
+				require.Equal(t, wantTail, ring.consHeadPos())
+				if representation == singleOwner {
+					if ring.prodMode == modeSingle {
+						require.Equal(t, uint32(71), ring.prodHead.Load())
+						require.Equal(t, uint32(73), ring.cachedConsTail.Load())
+					}
+					if ring.consMode == modeSingle {
+						require.Equal(t, uint32(79), ring.consHead.Load())
+						require.Equal(t, uint32(83), ring.cachedProdTail.Load())
+					}
+				} else {
+					if ring.prodMode == modeSingle {
+						require.Equal(t, wantTail, ring.prodHead.Load())
+					}
+					if ring.consMode == modeSingle {
+						require.Equal(t, wantTail, ring.consHead.Load())
+					}
+				}
+				if ring.prodMode != modeSingle {
+					require.Equal(t, uint32(89), ring.singleCachedConsTail)
+				}
+				if ring.consMode != modeSingle {
+					require.Equal(t, uint32(97), ring.singleCachedProdTail)
+				}
+			})
+		}
+	}
+}
+
+func TestSingleOwnerHandoff(t *testing.T) {
+	for _, producer := range []bool{false, true} {
+		for _, opposite := range []syncMode{modeSingle, modeMulti, modeRelaxed} {
+			for _, exact := range []bool{false, true} {
+				name := fmt.Sprintf("producer=%t/opposite=%d/exact=%t", producer, opposite, exact)
+				t.Run(name, func(t *testing.T) {
+					options := []Option{WithMaxBatch(3)}
+					if opposite == modeMulti {
+						if producer {
+							options = append(options, WithMultiConsDequeue())
+						} else {
+							options = append(options, WithMultiProdEnqueue())
+						}
+					}
+					if opposite == modeRelaxed {
+						if producer {
+							options = append(options, WithRelaxedMultiConsDequeue())
+						} else {
+							options = append(options, WithRelaxedMultiProdEnqueue())
+						}
+					}
+					if exact {
+						options = append(options, WithExactBatchCounts())
+					}
+					ring, err := New[int](4, options...)
+					require.NoError(t, err)
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					stop := make(chan struct{})
+					var workers sync.WaitGroup
+					type phase struct {
+						call func()
+						done chan struct{}
+					}
+					startWorker := func() chan phase {
+						phases := make(chan phase)
+						workers.Go(func() {
+							for {
+								select {
+								case <-stop:
+									return
+								case task := <-phases:
+									func() {
+										defer close(task.done)
+										task.call()
+									}()
+								}
+							}
+						})
+						return phases
+					}
+					owners := [2]chan phase{startWorker(), startWorker()}
+					other := startWorker()
+					workers.Go(func() {
+						for {
+							select {
+							case <-stop:
+								return
+							default:
+								assert.InDelta(t, 2, ring.Count(), 2)
+								assert.InDelta(t, 2, ring.Free(), 2)
+								_ = ring.Full()
+								_ = ring.Empty()
+								runtime.Gosched()
+							}
+						}
+					})
+					defer func() {
+						close(stop)
+						workers.Wait()
+					}()
+					nextOwner := 0
+					run := func(own bool, call func()) {
+						worker := other
+						if own {
+							worker = owners[nextOwner]
+							nextOwner = 1 - nextOwner
+						}
+						task := phase{call: call, done: make(chan struct{})}
+						select {
+						case worker <- task:
+						case <-ctx.Done():
+							t.Fatal(ctx.Err())
+						}
+						select {
+						case <-task.done:
+						case <-ctx.Done():
+							t.Fatal(ctx.Err())
+						}
+						require.False(t, t.Failed())
+					}
+					// These phases force a changed cache on a failed request without publication.
+					if producer {
+						run(true, func() {
+							require.NoError(t, ring.Enqueue(0))
+							_, err := ring.EnqueueBulk([]int{1, 2, 3})
+							require.NoError(t, err)
+						})
+						run(false, func() {
+							value, err := ring.Dequeue()
+							require.NoError(t, err)
+							require.Zero(t, value)
+						})
+						run(true, func() {
+							before := ring.prodTail.Load()
+							free, err := ring.EnqueueBulk([]int{4, 5})
+							require.ErrorIs(t, err, ErrFull)
+							require.Equal(t, 1, free)
+							require.Equal(t, before, ring.prodTail.Load())
+						})
+						run(false, func() {
+							dst := make([]int, 3)
+							_, err := ring.DequeueBulk(dst)
+							require.NoError(t, err)
+							require.Equal(t, []int{1, 2, 3}, dst)
+						})
+					} else {
+						run(false, func() { require.NoError(t, ring.Enqueue(0)) })
+						run(true, func() {
+							before := ring.consTail.Load()
+							dst := []int{-1, -1}
+							available, err := ring.DequeueBulk(dst)
+							require.ErrorIs(t, err, ErrEmpty)
+							require.Equal(t, 1, available)
+							require.Equal(t, []int{-1, -1}, dst)
+							require.Equal(t, before, ring.consTail.Load())
+						})
+						run(true, func() {
+							value, err := ring.Dequeue()
+							require.NoError(t, err)
+							require.Zero(t, value)
+						})
+					}
+					for value := range 256 {
+						run(true, func() {
+							prod, cons := ring.prodTail.Load(), ring.consTail.Load()
+							if producer {
+								free, err := ring.EnqueueBulk(nil)
+								require.NoError(t, err)
+								require.Equal(t, 4, free)
+								_, err = ring.EnqueueBulk(make([]int, 5))
+								require.ErrorIs(t, err, ErrExceedsCapacity)
+							} else {
+								available, err := ring.DequeueBulk(nil)
+								require.NoError(t, err)
+								require.Zero(t, available)
+								_, err = ring.DequeueBulk(make([]int, 5))
+								require.ErrorIs(t, err, ErrExceedsCapacity)
+							}
+							require.Equal(t, prod, ring.prodTail.Load())
+							require.Equal(t, cons, ring.consTail.Load())
+						})
+						run(producer, func() {
+							switch value % 3 {
+							case 0:
+								require.NoError(t, ring.Enqueue(value))
+							case 1:
+								_, err := ring.EnqueueBulk([]int{value})
+								require.NoError(t, err)
+							default:
+								moved, _ := ring.EnqueueBurst([]int{value})
+								require.Equal(t, 1, moved)
+							}
+						})
+						require.Equal(t, 1, ring.Count())
+						run(!producer, func() {
+							dst := []int{-1}
+							switch value % 3 {
+							case 0:
+								got, err := ring.Dequeue()
+								require.NoError(t, err)
+								dst[0] = got
+							case 1:
+								_, err := ring.DequeueBulk(dst)
+								require.NoError(t, err)
+							default:
+								moved, _ := ring.DequeueBurst(dst)
+								require.Equal(t, 1, moved)
+							}
+							require.Equal(t, value, dst[0])
+						})
+						require.Zero(t, ring.Count())
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestSingleResetHandoff(t *testing.T) {
+	modes := append(singleOwnershipModes(), optionSet{
+		name:    "Multi",
+		options: []Option{WithMultiProdEnqueue(), WithMultiConsDequeue()},
+	})
+	modes = append(modes, optionSet{"Relaxed", relaxedOptions()})
+	for _, mode := range modes {
+		for _, keep := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/keep=%t", mode.name, keep), func(t *testing.T) {
+				options := slices.Clone(mode.options)
+				if keep {
+					options = append(options, WithoutDequeueClearing())
+				}
+				ring, err := New[*int](4, options...)
+				require.NoError(t, err)
+				var users sync.WaitGroup
+				users.Go(func() {
+					for range 4 {
+						require.NoError(t, ring.Enqueue(new(int)))
+					}
+					_, err := ring.Dequeue()
+					require.NoError(t, err)
+					_, err = ring.EnqueueBulk(nil)
+					require.NoError(t, err)
+				})
+				users.Wait()
+				ring.cachedConsTail.Store(31)
+				ring.cachedProdTail.Store(37)
+				ring.singleCachedConsTail = 41
+				ring.singleCachedProdTail = 43
+				ring.Reset()
+				assertNewRing(t, ring, 4)
+				require.Zero(t, ring.prodHeadRTS.Load())
+				require.Zero(t, ring.prodTailRTS.Load())
+				require.Zero(t, ring.consHeadRTS.Load())
+				require.Zero(t, ring.consTailRTS.Load())
+				require.Zero(t, ring.cachedConsTail.Load())
+				require.Zero(t, ring.cachedProdTail.Load())
+				assertSlotsNil(t, ring, 0, 1, 2, 3)
+				publication := make(chan *Ring[*int])
+				users.Go(func() {
+					fresh := <-publication
+					require.True(t, fresh.Empty())
+					for range 4 {
+						require.NoError(t, fresh.Enqueue(new(int)))
+					}
+					require.True(t, fresh.Full())
+					for range 4 {
+						value, err := fresh.Dequeue()
+						require.NoError(t, err)
+						require.NotNil(t, value)
+					}
+					require.True(t, fresh.Empty())
+				})
+				publication <- ring
+				users.Wait()
+			})
+		}
 	}
 }

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 #
 # Compares the MPSC, SPMC, and MPMC throughput of one committed ref built with different publish
-# wait spin bounds, the tailSpins constant in ring/ring.go. The first bound is the base, and the
-# other sides follow in the order given, in the builds, the rotation, and the comparison. Run it to
-# choose the spin bound after a change to the publish wait or to the ring's layout. See
-# scripts/README.md.
+# wait spin bounds, the defaultSpinsBeforeYield constant in ring/ring.go, or tailSpins in commits
+# before it was renamed. The first bound is the base, and the other sides follow in the order
+# given, in the builds, the rotation, and the comparison. Run it to choose the spin bound after a
+# change to the publish wait or to the ring's layout. See scripts/README.md.
 
 set -euo pipefail
 
@@ -116,14 +116,15 @@ build() {
 	local spins=$2
 	local dir="$out/src-$name"
 	local source_file="$dir/ring/ring.go"
-	local spins_line='^const tailSpins = [0-9]+$'
+	local spins_line='^const (tailSpins|defaultSpinsBeforeYield) = [0-9]+$'
 
 	mkdir "$dir"
 	git -C "$repo" archive "$hash" | tar -x -C "$dir"
 	grep -Eq "$spins_line" "$source_file" ||
 		die "ring/ring.go at $hash has no line matching '$spins_line'"
-	sed -E -i.orig "s/$spins_line/const tailSpins = $spins/" "$source_file"
-	grep -q "^const tailSpins = $spins$" "$source_file" || die "$name edit did not apply"
+	sed -E -i.orig "s/$spins_line/const \1 = $spins/" "$source_file"
+	grep -Eq "^const (tailSpins|defaultSpinsBeforeYield) = $spins$" "$source_file" ||
+		die "$name edit did not apply"
 	(cd "$dir" && GOTOOLCHAIN=local GOWORK=off GOFLAGS=-mod=readonly \
 		go test -c -o "$out/$name.test" ./ring)
 }

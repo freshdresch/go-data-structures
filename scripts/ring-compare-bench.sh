@@ -9,7 +9,7 @@ prog=ring-compare-bench
 
 # Seconds each round invocation may run. Go's -test.timeout does not cover benchmarks, so the
 # script times each invocation itself.
-invocation_limit=120
+invocation_limit=${RING_COMPARE_INVOCATION_LIMIT:-120}
 
 usage() {
 	echo "usage: scripts/ring-compare-bench.sh [-rounds N] [-benchtime D] [-pad N] [-seed N]"

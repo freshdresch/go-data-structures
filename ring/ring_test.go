@@ -3961,6 +3961,268 @@ func TestSingleOwnerHandoff(t *testing.T) {
 	}
 }
 
+func TestSingleOwnerHandoffConcurrent(t *testing.T) {
+	for _, producer := range []bool{false, true} {
+		for _, opposite := range []syncMode{modeSingle, modeMulti, modeRelaxed} {
+			for _, exact := range []bool{false, true} {
+				name := fmt.Sprintf("producer=%t/opposite=%d/exact=%t", producer, opposite, exact)
+				t.Run(name, func(t *testing.T) {
+					representation := probeSingleRepresentation(t)
+					options := []Option{WithMaxBatch(3)}
+					if opposite == modeMulti {
+						if producer {
+							options = append(options, WithMultiConsDequeue())
+						} else {
+							options = append(options, WithMultiProdEnqueue())
+						}
+					}
+					if opposite == modeRelaxed {
+						if producer {
+							options = append(options, WithRelaxedMultiConsDequeue())
+						} else {
+							options = append(options, WithRelaxedMultiProdEnqueue())
+						}
+					}
+					if exact {
+						options = append(options, WithExactBatchCounts())
+					}
+					ring, err := New[int](4, options...)
+					require.NoError(t, err)
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					var workers, traffic sync.WaitGroup
+					defer func() {
+						cancel()
+						workers.Wait()
+					}()
+					failures := make(chan error, 1)
+					report := func(err error) {
+						if err == nil {
+							return
+						}
+						select {
+						case failures <- err:
+						default:
+						}
+						cancel()
+					}
+					readCache := func() uint32 {
+						if producer {
+							if representation == singleOwner {
+								return ring.singleCachedConsTail
+							}
+							return ring.cachedConsTail.Load()
+						}
+						if representation == singleOwner {
+							return ring.singleCachedProdTail
+						}
+						return ring.cachedProdTail.Load()
+					}
+					move := func(enqueue bool, next, method, requested int) (int, error) {
+						values := []int{-1, -1}[:requested]
+						if enqueue {
+							for i := range values {
+								values[i] = next + i
+							}
+						}
+						moved, count := 0, 0
+						var err error
+						if enqueue {
+							switch method {
+							case 0:
+								err = ring.Enqueue(next)
+							case 1:
+								count, err = ring.EnqueueBulk(values)
+							case 2:
+								moved, count = ring.EnqueueBurst(values)
+							}
+						} else {
+							switch method {
+							case 0:
+								values[0], err = ring.Dequeue()
+							case 1:
+								count, err = ring.DequeueBulk(values)
+							case 2:
+								moved, count = ring.DequeueBurst(values)
+							}
+						}
+						if count < 0 || count > 4 {
+							return 0, fmt.Errorf("batch count out of range: %d", count)
+						}
+						if err != nil {
+							expected := ErrEmpty
+							if enqueue {
+								expected = ErrFull
+							}
+							if err != expected {
+								return 0, fmt.Errorf("unexpected operation error: %w", err)
+							}
+							return 0, nil
+						}
+						if method != 2 {
+							moved = requested
+						}
+						if moved < 0 || moved > requested {
+							return 0, fmt.Errorf("moved %d, requested %d", moved, requested)
+						}
+						if !enqueue {
+							for i, value := range values[:moved] {
+								if value != next+i {
+									return 0, fmt.Errorf("tag %d, expected %d", value, next+i)
+								}
+							}
+						}
+						return moved, nil
+					}
+					type ownerResult struct {
+						completed int
+						epochs    int
+					}
+					var results [2]ownerResult
+					var outgoingCache, incomingCache, advancedTail uint32
+					tokens := [2]chan int{make(chan int, 1), make(chan int, 1)}
+					runOwner := func(owner int) error {
+						for {
+							var next int
+							select {
+							case <-ctx.Done():
+								return ctx.Err()
+							case next = <-tokens[owner]:
+							}
+							if next == 256 {
+								return nil
+							}
+							if next == 16 {
+								incomingCache = readCache()
+								if incomingCache != outgoingCache {
+									return fmt.Errorf("handoff cache changed: %d", incomingCache)
+								}
+							}
+							end := next + 16
+							method := 0
+							for next < end {
+								if err := ctx.Err(); err != nil {
+									return err
+								}
+								requested := min(2, end-next)
+								if method == 0 {
+									requested = 1
+								}
+								moved, err := move(producer, next, method, requested)
+								if err != nil {
+									return err
+								}
+								if moved == 0 {
+									runtime.Gosched()
+									continue
+								}
+								next += moved
+								results[owner].completed += moved
+								method = (method + 1) % 3
+							}
+							results[owner].epochs++
+							if next == 16 {
+								outgoingCache = readCache()
+								// Opposite progress makes the transferred cache provably stale.
+								for {
+									if err := ctx.Err(); err != nil {
+										return err
+									}
+									advancedTail = ring.prodTail.Load()
+									if producer {
+										advancedTail = ring.consTail.Load()
+									}
+									if advancedTail > outgoingCache {
+										if !producer || advancedTail >= uint32(next) {
+											break
+										}
+									}
+									runtime.Gosched()
+								}
+							}
+							// The token publishes all cache accesses before the next owner's call.
+							select {
+							case <-ctx.Done():
+								return ctx.Err()
+							case tokens[1-owner] <- next:
+							}
+							if next == 256 {
+								return nil
+							}
+						}
+					}
+					for owner := range 2 {
+						traffic.Add(1)
+						workers.Go(func() {
+							defer traffic.Done()
+							report(runOwner(owner))
+						})
+					}
+					oppositeCompleted := 0
+					traffic.Add(1)
+					workers.Go(func() {
+						defer traffic.Done()
+						for oppositeCompleted < 256 {
+							if err := ctx.Err(); err != nil {
+								report(err)
+								return
+							}
+							moved, err := move(!producer, oppositeCompleted, 0, 1)
+							if err != nil {
+								report(err)
+								return
+							}
+							oppositeCompleted += moved
+							if moved == 0 {
+								runtime.Gosched()
+							}
+						}
+					})
+					workers.Go(func() {
+						for ctx.Err() == nil {
+							if count := ring.Count(); count < 0 || count > 4 {
+								report(fmt.Errorf("Count out of range: %d", count))
+								return
+							}
+							if free := ring.Free(); free < 0 || free > 4 {
+								report(fmt.Errorf("Free out of range: %d", free))
+								return
+							}
+							_ = ring.Full()
+							_ = ring.Empty()
+							runtime.Gosched()
+						}
+					})
+					select {
+					case tokens[0] <- 0:
+					case <-ctx.Done():
+						report(ctx.Err())
+					}
+					traffic.Wait()
+					cancel()
+					workers.Wait()
+					select {
+					case err := <-failures:
+						require.NoError(t, err)
+					default:
+					}
+					for _, result := range results {
+						require.Equal(t, 128, result.completed)
+						require.Equal(t, 8, result.epochs)
+					}
+					require.Equal(t, 256, oppositeCompleted)
+					require.Equal(t, outgoingCache, incomingCache)
+					require.Greater(t, advancedTail, outgoingCache)
+					require.True(t, ring.Empty())
+					require.Zero(t, ring.Count())
+					require.Equal(t, 4, ring.Free())
+					require.Equal(t, uint32(256), ring.prodTail.Load())
+					require.Equal(t, uint32(256), ring.consTail.Load())
+				})
+			}
+		}
+	}
+}
+
 func TestSingleResetHandoff(t *testing.T) {
 	modes := append(singleOwnershipModes(), optionSet{
 		name:    "Multi",

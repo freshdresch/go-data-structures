@@ -2,7 +2,10 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "ring",
-    srcs = ["ring.go"],
+    srcs = [
+        "ring.go",
+        "spsc.go",
+    ],
     importpath = "github.com/freshdresch/go-data-structures/ring",
     visibility = ["//visibility:public"],
 )
@@ -12,6 +15,9 @@ go_test(
     srcs = [
         "alignment_test.go",
         "ring_test.go",
+        "spsc_alloc_test.go",
+        "spsc_layout_test.go",
+        "spsc_test.go",
         "spin_bench_test.go",
     ],
     embed = [":ring"],

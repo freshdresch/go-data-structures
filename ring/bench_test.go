@@ -564,9 +564,8 @@ func (api ringAPI) total(n, batch, producers int) int {
 	return (n + multiple - 1) / multiple * multiple
 }
 
-// BenchmarkRingAPI measures each style of ring call through the queue harness, so ns/op is
-// nanoseconds per element transferred end to end. api=seq instead measures one Enqueue and one
-// Dequeue in a single goroutine, the per-call cost without contention.
+// BenchmarkRingAPI reports ns/elem per verified concurrent transfer. Raw ns/op retains the
+// Go iteration denominator. api=seq measures one enqueue/dequeue pair in one goroutine.
 func BenchmarkRingAPI(b *testing.B) {
 	for _, mode := range ringAPIModes {
 		b.Run("mode="+mode.name, func(b *testing.B) {
@@ -611,9 +610,8 @@ func benchmarkRingAPIElems(b *testing.B, mode benchMode, api ringAPI, batch int)
 	})
 }
 
-// benchmarkRingAPIRun sends api's total for b.N elements through runThroughput. For apiBulk
-// that total is rounded up, but testing still divides by b.N, so ns/op is off by at most
-// batch times producers divided by b.N, which is negligible at the b.N a benchmark settles on.
+// benchmarkRingAPIRun normalizes the stopped timed interval by verified transfers.
+// Bulk rounds the transfer total, so elem/op records its ratio to Go iterations.
 func benchmarkRingAPIRun[T any](
 	b *testing.B,
 	mode benchMode,
@@ -640,6 +638,14 @@ func benchmarkRingAPIRun[T any](
 		b.Fatal(err)
 	}
 	reportThroughput(b, result, total)
+	nsPerElem, elemPerOp, metricErr := ringAPIMetrics(b.Elapsed(), b.N, total, result.received)
+	if metricErr != nil {
+		b.Fatal(metricErr)
+	}
+	b.ReportMetric(nsPerElem, "ns/elem")
+	if api == apiBulk {
+		b.ReportMetric(elemPerOp, "elem/op")
+	}
 }
 
 // benchmarkRingAPISeq calls Enqueue and then Dequeue on one element per b.Loop iteration, in one
@@ -667,4 +673,18 @@ func benchmarkRingAPISeq[T any](b *testing.B, fill fillFunc[T]) {
 	})
 	result := newThroughputResult([]int{iterations}, gcCycles, iterations)
 	reportThroughput(b, result, iterations)
+}
+
+func ringAPIMetrics(
+	elapsed time.Duration,
+	iterations, expected, received int,
+) (nsPerElem, elemPerOp float64, err error) {
+	if elapsed < 0 || iterations <= 0 || received <= 0 {
+		return 0, 0, fmt.Errorf("invalid metric duration or denominator")
+	}
+	if received != expected {
+		return 0, 0, fmt.Errorf("received %d elements, want %d", received, expected)
+	}
+	return float64(elapsed.Nanoseconds()) / float64(received),
+		float64(received) / float64(iterations), nil
 }

@@ -31,8 +31,8 @@ the comparison, and a `state.txt` that records how the run was made.
 
 ## Implementations
 
-- `ring`: the ring, through `EnqueueBurst` and `DequeueBurst`. Batch 1 is the main row. Batch 32
-  is labeled context, to show what batching gives the ring.
+- `ring`: the ring, through `EnqueueBurst` and `DequeueBurst`. Batch 1 provides burst API context.
+  Batch 32 shows batching context. `ring-single` is the main single-element reference.
 - `ring-exact`: the `ring` row built with `WithExactBatchCounts`. By default, the ring's batch
   calls check a cached copy of the other side's tail. `ring-exact` loads the real tail on every
   call and returns exact counts.
@@ -47,8 +47,9 @@ the comparison, and a `state.txt` that records how the run was made.
 - `workiva`: `queue.NewRingBuffer` from `github.com/Workiva/go-datastructures`, at v1.1.8. It is
   the most widely used Go ring buffer. It stores `interface{}` values.
 
-Every implementation is built with 1024 slots. Each multi-goroutine side runs 4 goroutines, as
-the ring's own benchmarks do.
+Every implementation must hold exactly 1024 usable elements. SPSC uses 1 producer and 1 consumer,
+MPSC uses 4 and 1, SPMC uses 1 and 4, and MPMC uses 4 and 4. Worker count is independent of actual
+GOMAXPROCS and CPU affinity. Pointer rows rotate through a pool of 1024 items.
 
 ## What each row measures
 
@@ -76,8 +77,10 @@ The following points also apply.
 - **Algorithms.** xsync and workiva are both bounded queues in the style of Dmitry Vyukov's
   design, which gives each slot a sequence number. They differ in generics against `interface{}`,
   and in where they wait, not in the algorithm.
-- **Capacity.** `TestCompareCapacity` fills each implementation and logs how many elements it
-  holds.
+- **Capacity.** `TestCompareCapacity` checks every implementation and mode for exactly 1024 usable
+  elements, an unsuccessful extra put, a complete ordered drain, an empty result, and a second
+  fill/drain on the same instance. Attempts are bounded. Workiva uses `Offer`, positive `Len()`
+  before `Poll(0)`, and a zero-length empty check. Channels use nonblocking selects.
 - **Allocations.** workiva stores `interface{}`, so its `int64` rows box nearly every element, at
   8 bytes each. The benchmark values carry a producer and a sequence number, so they are far above
   the small values that Go boxes without allocating. Go reports `allocs/op` as a whole number per
@@ -103,6 +106,32 @@ The following points also apply.
   physical cores, and the Hyper-V host adds scheduling noise.
 - **Statistics.** benchstat does not correct p-values across rows and metrics. A few rows will
   show a significant difference by chance.
+
+## Timing and provenance
+
+Each comparison row transfers exactly the requested element count, so its `ns/op` is time per
+transferred element. Setup and pre-run GC are excluded. Worker startup, payload fill, operations,
+retries or blocking waits, completion, drain, stop, and joins are included. Internal waiting and
+interface conversion remain part of each API. Burst permits partial progress. Bulk in the root
+harness remains all-or-nothing and is a different workload.
+
+Before timing, the runner saves all 84 workload contracts through `TestBenchmarkManifest` and
+checks their exact names, multiplicity, CPU suffix, and required metadata. Ordinary, padded, and
+race builds each have a prebuild source snapshot and independent postbuild discovery. Added,
+removed, or changed selected inputs stop finalization. Saved source bytes include dirty and
+untracked compiled inputs, all compiled correctness tests, dependency sources, module inputs,
+and the actual runner bundle. Pre-timing checks run again after the validation gates. Raw gate,
+export, discovery, and round logs remain available on failure.
+
+The runner keeps both ordinary and padded binary identities when padding applies, plus the
+separate unpadded race identity. Layout choice precedes results. Equal scheduler offsets do not
+prove layout equivalence. Further placement investigations, retries, and padding searches are
+deferred. Do not run timing campaigns concurrently. A new methodology requires a new baseline
+under an agreed experiment protocol. Verification tests establish no performance improvement.
+
+See [the runner documentation](../scripts/README.md) for artifact names, source reconstruction,
+units, and the quick runner's stricter two-origin admission policy. The two modules use different
+abort behavior and binaries. Their tables are not interchangeable.
 
 ## Results
 

@@ -209,7 +209,7 @@ func (q *ringSingleQueue[T]) dequeue(dst []T) int {
 
 // movedOrFail returns 1 when err is nil, and 0 when err is the expected error. Any other error
 // fails the run, and it returns 0. It compares with == because the ring returns ErrFull and
-// ErrEmpty unwrapped, and that keeps each call as cheap as the other libraries' bool checks.
+// ErrEmpty unwrapped.
 func (q *ringSingleQueue[T]) movedOrFail(err, expected error) int {
 	if err == nil {
 		return 1

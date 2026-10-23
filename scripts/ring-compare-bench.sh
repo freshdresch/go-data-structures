@@ -94,13 +94,7 @@ fi
 check_tools
 select_cpus
 
-if [ "$platform" = Darwin ]; then
-	power=$(pmset -g batt)
-	case "$power" in
-	*"AC Power"*) ;;
-	*) die "not on AC power, pmset -g batt reports: $power" ;;
-	esac
-fi
+check_ac_power
 
 repo=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
 
@@ -117,6 +111,7 @@ on_exit() {
 trap on_exit EXIT
 
 load_before=$(record "load average" load_average)
+prepare_benchmeta
 
 # Mirrors compareRows in benchmark/impls_test.go: each implementation's name, modes, and batches.
 impl_table="ring SPSC,MPSC,SPMC,MPMC 1,32
@@ -148,9 +143,9 @@ expected_rows() {
 }
 
 go_env=(env GOTOOLCHAIN=local GOWORK=off GOFLAGS=-mod=readonly)
-compare_build=("${go_env[@]}" go -C benchmark test -c -o "$results/compare.test" .)
+compare_build=("${go_env[@]}" go -C benchmark test -c -o "$results/compare-unpadded.test" .)
 padded_build=(
-	"${go_env[@]}" go -C benchmark test -c -o "$results/compare.test"
+	"${go_env[@]}" go -C benchmark test -c -o "$results/compare-padded.test"
 	-overlay "$results/overlay.json" .
 )
 race_build=("${go_env[@]}" go -C benchmark test -race -c -o "$results/compare-race.test" .)
@@ -193,12 +188,25 @@ check_pad_symbol() {
 		die "$pad_symbol is $size bytes, want $((8 * pad_count)): $nm_line"
 }
 
+expected_all=""
+while read -r implementation _; do
+	expected_all="$expected_all$(expected_rows "$implementation")"$'\n'
+done <<<"$impl_table"
+printf '%s' "$expected_all" >"$results/provenance/expected-compare.txt"
+snapshot_variant compare-unpadded "$repo" "$repo/benchmark" . \
+	"$(git -C "$repo" rev-parse HEAD) working tree" false "" "${compare_build[@]}"
+status="aborted building compare-unpadded"
 build_compare "${compare_build[@]}"
-if ! first_offset=$(sched_offset "$results/compare.test" 2>/dev/null); then
+if ! first_offset=$(sched_offset "$results/compare-unpadded.test" 2>/dev/null); then
 	[ "$platform" != Darwin ] ||
 		die "cannot read runtime.sched's offset, so the layout check cannot run"
 	first_offset=unknown
 fi
+export_workload "$results/compare-unpadded.test" compare-unpadded "$own"
+"$benchmeta" rows --manifest "$results/provenance/compare-unpadded.manifest.json" \
+	--expected "$results/provenance/expected-compare.txt" --cpu "$own"
+finalize_variant compare-unpadded "$results/compare-unpadded.test" "$first_offset"
+selected_variant=compare-unpadded
 
 pad_count=""
 pad_nm_line=none
@@ -211,13 +219,22 @@ fi
 final_offset=$first_offset
 if [ -n "$pad_count" ]; then
 	write_pad_overlay
+	snapshot_variant compare-padded "$repo" "$repo/benchmark" . \
+		"$(git -C "$repo" rev-parse HEAD) working tree" false "$results/overlay.json" \
+		"${padded_build[@]}"
+	status="aborted building compare-padded"
 	build_compare "${padded_build[@]}"
-	nm_output=$(go tool nm -size "$results/compare.test") ||
+	nm_output=$(go tool nm -size "$results/compare-padded.test") ||
 		die "go tool nm failed on $results/compare.test"
 	pad_nm_line=$(printf '%s\n' "$nm_output" | awk -v symbol="$pad_symbol" '$4 == symbol')
 	check_pad_symbol "$pad_nm_line"
-	final_offset=$(sched_offset "$results/compare.test" 2>/dev/null) ||
+	final_offset=$(sched_offset "$results/compare-padded.test" 2>/dev/null) ||
 		die "cannot read runtime.sched's offset in the padded binary"
+	export_workload "$results/compare-padded.test" compare-padded "$own"
+	"$benchmeta" rows --manifest "$results/provenance/compare-padded.manifest.json" \
+		--expected "$results/provenance/expected-compare.txt" --cpu "$own"
+	finalize_variant compare-padded "$results/compare-padded.test" "$final_offset"
+	selected_variant=compare-padded
 fi
 
 if [ "$platform" = Darwin ] && [ "$final_offset" = 96 ]; then
@@ -225,10 +242,22 @@ if [ "$platform" = Darwin ] && [ "$final_offset" = 96 ]; then
 		"padding ${pad_count:-none}; rerun with another -pad"
 fi
 
+snapshot_variant compare-race "$repo" "$repo/benchmark" . \
+	"$(git -C "$repo" rev-parse HEAD) working tree" true "" "${race_build[@]}"
+status="aborted building compare-race"
 if ! race_err=$(cd "$repo" && "${race_build[@]}" 2>&1 >/dev/null); then
 	echo "$race_err" >&2
 	die "building the race binary failed, -race needs cgo and a C compiler, see the output above"
 fi
+
+export_workload "$results/compare-race.test" compare-race "$own"
+"$benchmeta" rows --manifest "$results/provenance/compare-race.manifest.json" \
+	--expected "$results/provenance/expected-compare.txt" --cpu "$own"
+race_offset=$(sched_offset "$results/compare-race.test" 2>/dev/null) || race_offset=unknown
+finalize_variant compare-race "$results/compare-race.test" "$race_offset"
+cp "$results/$selected_variant.test" "$results/compare.test"
+cmp "$results/$selected_variant.test" "$results/compare.test" || die "selected binary copy changed"
+cp "$results/provenance/$selected_variant.json" "$results/provenance/compare.json"
 
 gate1_names='TestCompareAccounting TestCompareCapacity TestWorkivaAbort TestPollingAbort'
 gate1_names="$gate1_names TestRunFail TestRunLayout TestRingRTSRelaxed"
@@ -406,6 +435,11 @@ run_gate 3 compare.test "$gate3_names" "$gate3_count" "${gate3_flags[@]}"
 	echo "## capacity"
 	grep -F 'capacity: impl=' "$results/gate3.txt" || echo "none logged"
 } >>"$state"
+
+check_variant compare-unpadded
+if [ "$selected_variant" = compare-padded ]; then check_variant compare-padded; fi
+check_variant compare-race
+cmp "$results/$selected_variant.test" "$results/compare.test" || die "selected binary changed"
 
 findings=()
 mkdir "$results/rounds"

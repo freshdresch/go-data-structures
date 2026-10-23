@@ -46,11 +46,10 @@ type compareRun[T any, S sink[T]] func(
 	sinks func(consumer int) S,
 ) (received int, err error)
 
-// compareImpl is how one implementation runs, and how its capacity is measured. fillUntilFull
-// builds the implementation and returns how many elements it holds before it reports full.
+// compareImpl supplies the timed run and the exact capacity and reuse gate.
 type compareImpl[T any, S sink[T]] struct {
 	run           compareRun[T, S]
-	fillUntilFull func(t *testing.T) int
+	checkCapacity func(t *testing.T, mode benchMode) int
 }
 
 // pollingRun returns a compareRun that builds a fresh queue and run state for each run with build,
@@ -99,8 +98,8 @@ func compareImpls[T any, S sink[T]]() map[string]compareImpl[T, S] {
 				}
 				return &ringBurstQueue[T]{ring: created}, newRunState(nil), nil
 			}),
-			fillUntilFull: func(t *testing.T) int {
-				return fillPollingUntilFull(&ringBurstQueue[T]{ring: newTestRing[T](t, mpmcMode)})
+			checkCapacity: func(t *testing.T, mode benchMode) int {
+				return checkCompareCapacity(t, "ring", mode)
 			},
 		},
 		"ring-exact": {
@@ -111,9 +110,8 @@ func compareImpls[T any, S sink[T]]() map[string]compareImpl[T, S] {
 				}
 				return &ringBurstQueue[T]{ring: created}, newRunState(nil), nil
 			}),
-			fillUntilFull: func(t *testing.T) int {
-				created := newTestRing[T](t, mpmcMode, ring.WithExactBatchCounts())
-				return fillPollingUntilFull(&ringBurstQueue[T]{ring: created})
+			checkCapacity: func(t *testing.T, mode benchMode) int {
+				return checkCompareCapacity(t, "ring-exact", mode)
 			},
 		},
 		"ring-single": {
@@ -125,14 +123,8 @@ func compareImpls[T any, S sink[T]]() map[string]compareImpl[T, S] {
 				state := newRunState(nil)
 				return &ringSingleQueue[T]{ring: created, state: state}, state, nil
 			}),
-			fillUntilFull: func(t *testing.T) int {
-				state := newRunState(nil)
-				target := &ringSingleQueue[T]{ring: newTestRing[T](t, mpmcMode), state: state}
-				filled := fillPollingUntilFull(target)
-				if err := state.firstError(); err != nil {
-					t.Fatalf("ring-single fill: %v", err)
-				}
-				return filled
+			checkCapacity: func(t *testing.T, mode benchMode) int {
+				return checkCompareCapacity(t, "ring-single", mode)
 			},
 		},
 		"ring-rts": {
@@ -143,43 +135,32 @@ func compareImpls[T any, S sink[T]]() map[string]compareImpl[T, S] {
 				}
 				return &ringBurstQueue[T]{ring: created}, newRunState(nil), nil
 			}),
-			fillUntilFull: func(t *testing.T) int {
-				created := newTestRing[T](t, rtsMode(mpmcMode))
-				return fillPollingUntilFull(&ringBurstQueue[T]{ring: created})
+			checkCapacity: func(t *testing.T, mode benchMode) int {
+				return checkCompareCapacity(t, "ring-rts", mode)
 			},
 		},
 		"chan": {
 			run: blockingRun[T, S](func() (blockingQueue[T], *runState) {
 				return newChanQueue[T](), newRunState(nil)
 			}),
-			fillUntilFull: func(_ *testing.T) int {
-				target := newChanQueue[T]()
-				var zero T
-				filled := 0
-				for {
-					select {
-					case target.ch <- zero:
-						filled++
-					default:
-						return filled
-					}
-				}
+			checkCapacity: func(t *testing.T, mode benchMode) int {
+				return checkCompareCapacity(t, "chan", mode)
 			},
 		},
 		"mutex": {
 			run: pollingRun[T, S](func(_ benchMode) (queue[T], *runState, error) {
 				return newMutexQueue[T](), newRunState(nil), nil
 			}),
-			fillUntilFull: func(_ *testing.T) int {
-				return fillPollingUntilFull(newMutexQueue[T]())
+			checkCapacity: func(t *testing.T, mode benchMode) int {
+				return checkCompareCapacity(t, "mutex", mode)
 			},
 		},
 		"xsync": {
 			run: pollingRun[T, S](func(_ benchMode) (queue[T], *runState, error) {
 				return newXsyncQueue[T](), newRunState(nil), nil
 			}),
-			fillUntilFull: func(_ *testing.T) int {
-				return fillPollingUntilFull(newXsyncQueue[T]())
+			checkCapacity: func(t *testing.T, mode benchMode) int {
+				return checkCompareCapacity(t, "xsync", mode)
 			},
 		},
 		"workiva": {
@@ -187,20 +168,8 @@ func compareImpls[T any, S sink[T]]() map[string]compareImpl[T, S] {
 				_, state, target := newWorkivaRun[T]()
 				return target, state
 			}),
-			fillUntilFull: func(t *testing.T) int {
-				buffer, _, _ := newWorkivaRun[T]()
-				var zero T
-				filled := 0
-				for {
-					accepted, err := buffer.Offer(zero)
-					if err != nil {
-						t.Fatalf("workiva offer: %v", err)
-					}
-					if !accepted {
-						return filled
-					}
-					filled++
-				}
+			checkCapacity: func(t *testing.T, mode benchMode) int {
+				return checkCompareCapacity(t, "workiva", mode)
 			},
 		},
 	}
@@ -215,17 +184,6 @@ func newTestRing[T any](t *testing.T, mode benchMode, extra ...ring.Option) *rin
 		t.Fatalf("build ring for %s: %v", mode.name, err)
 	}
 	return created
-}
-
-// fillPollingUntilFull enqueues one element at a time on target until an enqueue moves nothing,
-// and returns how many it enqueued.
-func fillPollingUntilFull[T any](target queue[T]) int {
-	items := make([]T, 1)
-	filled := 0
-	for target.enqueue(items) > 0 {
-		filled++
-	}
-	return filled
 }
 
 // BenchmarkCompare moves b.N elements from producers to consumers through each implementation, in

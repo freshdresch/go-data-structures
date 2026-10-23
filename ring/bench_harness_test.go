@@ -1,7 +1,10 @@
 package ring_test
 
 import (
+	"errors"
 	"fmt"
+
+	"github.com/freshdresch/go-data-structures/ring"
 	"math"
 	"runtime"
 	"slices"
@@ -371,7 +374,7 @@ func TestRingAPIAccounting(t *testing.T) {
 						)
 					},
 				}
-				for _, requested := range []int{1, 10_007} {
+				for _, requested := range []int{1, 128, 10_007} {
 					total := api.total(requested, batch, mode.producers)
 					name := fmt.Sprintf("api=%s/mode=%s/batch=%d/total=%d", tc.name, mode.name, batch, total)
 					t.Run(name, func(t *testing.T) {
@@ -1059,4 +1062,113 @@ func TestLoadedSmoke(t *testing.T) {
 	})
 	achieved := achievedRate(result.dequeued, result.lastDequeue)
 	assert.InDelta(t, rate, achieved, 0.1*rate)
+}
+
+func TestMovedOrPanic(t *testing.T) {
+	for _, expected := range []error{ring.ErrFull, ring.ErrEmpty} {
+		if got := movedOrPanic(nil, expected, 7); got != 7 {
+			t.Fatalf("success moved %d", got)
+		}
+		if got := movedOrPanic(expected, expected, 7); got != 0 {
+			t.Fatalf("retry moved %d", got)
+		}
+		opposite := ring.ErrFull
+		if expected == opposite {
+			opposite = ring.ErrEmpty
+		}
+		for _, unexpected := range []error{opposite, errors.New("unexpected"),
+			fmt.Errorf("wrapped: %w", expected)} {
+			func() {
+				defer func() {
+					if got := recover(); got != unexpected {
+						t.Errorf("panic = %v, want %v", got, unexpected)
+					}
+				}()
+				movedOrPanic(unexpected, expected, 7)
+			}()
+		}
+	}
+}
+
+func TestHarnessCapacity(t *testing.T) {
+	for _, mode := range benchModes {
+		for _, impl := range throughputImpls[int64](mode) {
+			t.Run(mode.name+"/"+impl.name, func(t *testing.T) {
+				target, err := impl.newQueue()
+				require.NoError(t, err)
+				checkHarnessCapacity(t, target)
+			})
+		}
+	}
+	for _, mode := range ringAPIModes {
+		for _, api := range ringAPIs {
+			t.Run(mode.name+"/"+api.String(), func(t *testing.T) {
+				target, err := newRingAPIQueue[int64](api, mode)
+				require.NoError(t, err)
+				checkHarnessCapacity(t, target)
+			})
+		}
+	}
+}
+
+func checkHarnessCapacity(t *testing.T, target queue[int64]) {
+	t.Helper()
+	for cycle := range 2 {
+		for index := range ringCapacity + 1 {
+			value := int64(cycle*ringCapacity + index)
+			want := 1
+			if index == ringCapacity {
+				want = 0
+			}
+			require.Equal(t, want, target.enqueue([]int64{value}), "cycle %d put %d", cycle, index)
+		}
+		for index := range ringCapacity + 1 {
+			dst := []int64{-1}
+			want := 1
+			if index == ringCapacity {
+				want = 0
+			}
+			require.Equal(t, want, target.dequeue(dst), "cycle %d get %d", cycle, index)
+			if want == 1 {
+				require.Equal(t, int64(cycle*ringCapacity+index), dst[0])
+			}
+		}
+	}
+}
+
+func TestRingAPIMetrics(t *testing.T) {
+	for _, tc := range []struct {
+		api       ringAPI
+		requested int
+		total     int
+		nsPerElem float64
+		elemPerOp float64
+	}{
+		{apiBulk, 1, 128, 20, 128},
+		{apiBulk, 127, 128, 20, 128.0 / 127},
+		{apiBulk, 128, 128, 20, 1},
+		{apiBulk, 129, 256, 10, 256.0 / 129},
+		{apiSingle, 128, 128, 20, 1},
+		{apiBurst, 128, 128, 20, 1},
+	} {
+		require.Equal(t, tc.total, tc.api.total(tc.requested, 32, 4))
+		nsPerElem, elemPerOp, err := ringAPIMetrics(2560*time.Nanosecond,
+			tc.requested, tc.total, tc.total)
+		require.NoError(t, err)
+		assert.Equal(t, tc.nsPerElem, nsPerElem)
+		assert.Equal(t, tc.elemPerOp, elemPerOp)
+	}
+	for _, tc := range []struct {
+		elapsed                        time.Duration
+		iterations, expected, received int
+	}{
+		{-1, 1, 1, 1}, {0, 0, 1, 1}, {0, 1, 0, 0}, {0, 1, 2, 1},
+	} {
+		_, _, err := ringAPIMetrics(tc.elapsed, tc.iterations, tc.expected, tc.received)
+		require.Error(t, err)
+	}
+	nsPerElem, elemPerOp, err := ringAPIMetrics(0, 1, 1, 1)
+	require.NoError(t, err)
+	assert.Zero(t, nsPerElem)
+	assert.Equal(t, 1.0, elemPerOp)
 }

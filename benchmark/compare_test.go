@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/freshdresch/go-data-structures/ring"
 )
 
 // abortTotal is how many elements each abort test sends, far more than any implementation holds,
@@ -82,11 +84,15 @@ func TestCompareCapacity(t *testing.T) {
 		if !ok {
 			t.Fatalf("compareRows names %s, which has no compareImpls entry", row.name)
 		}
-		slots := impl.fillUntilFull(t)
-		if slots <= 0 {
-			t.Fatalf("impl=%s held %d elements, want a positive count", row.name, slots)
+		for _, mode := range row.modes {
+			t.Run(row.name+"/"+mode.name, func(t *testing.T) {
+				slots := impl.checkCapacity(t, mode)
+				if slots != ringCapacity {
+					t.Fatalf("impl=%s mode=%s slots=%d, want %d", row.name, mode.name, slots, ringCapacity)
+				}
+				t.Logf("capacity: impl=%s mode=%s slots=%d reuse=true", row.name, mode.name, slots)
+			})
 		}
-		t.Logf("capacity: impl=%s slots=%d", row.name, slots)
 	}
 }
 
@@ -215,4 +221,162 @@ func waitForGoroutines(t *testing.T, limit int) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+func TestRingAdapterOutcomes(t *testing.T) {
+	for _, expected := range []error{ring.ErrFull, ring.ErrEmpty} {
+		opposite := ring.ErrFull
+		if expected == opposite {
+			opposite = ring.ErrEmpty
+		}
+		for _, original := range []error{nil, expected, opposite, errors.New("unexpected"),
+			fmt.Errorf("wrapped: %w", expected)} {
+			state := newRunState(nil)
+			target := &ringSingleQueue[int64]{state: state}
+			want := 0
+			if original == nil {
+				want = 1
+			}
+			if got := target.movedOrFail(original, expected); got != want {
+				t.Errorf("moved = %d, want %d", got, want)
+			}
+			wantErr := original
+			if original == expected {
+				wantErr = nil
+			}
+			if state.firstError() != wantErr {
+				t.Errorf("stored error = %v, want %v", state.firstError(), wantErr)
+			}
+			if state.aborted() != (wantErr != nil) {
+				t.Errorf("abort = %v", state.aborted())
+			}
+		}
+	}
+}
+
+func checkCompareCapacity(t *testing.T, name string, mode benchMode) int {
+	t.Helper()
+	if name == "chan" {
+		return checkChannelCapacity(t)
+	}
+	if name == "workiva" {
+		return checkWorkivaCapacity(t)
+	}
+	state := newRunState(nil)
+	var target queue[int64]
+	switch name {
+	case "ring", "ring-exact", "ring-rts":
+		var options []ring.Option
+		if name == "ring-exact" {
+			options = append(options, ring.WithExactBatchCounts())
+		}
+		if name == "ring-rts" {
+			mode = rtsMode(mode)
+		}
+		target = &ringBurstQueue[int64]{ring: newTestRing[int64](t, mode, options...)}
+	case "ring-single":
+		target = &ringSingleQueue[int64]{ring: newTestRing[int64](t, mode), state: state}
+	case "mutex":
+		target = newMutexQueue[int64]()
+	case "xsync":
+		target = newXsyncQueue[int64]()
+	default:
+		t.Fatalf("unknown capacity implementation %q", name)
+	}
+	return checkCapacityCycles(t, func(value int64) bool {
+		moved := target.enqueue([]int64{value})
+		if err := state.firstError(); err != nil {
+			t.Fatal(err)
+		}
+		if moved != 0 && moved != 1 {
+			t.Fatalf("enqueue moved %d", moved)
+		}
+		return moved == 1
+	}, func() (int64, bool) {
+		dst := []int64{-1}
+		moved := target.dequeue(dst)
+		if err := state.firstError(); err != nil {
+			t.Fatal(err)
+		}
+		if moved != 0 && moved != 1 {
+			t.Fatalf("dequeue moved %d", moved)
+		}
+		return dst[0], moved == 1
+	})
+}
+
+func checkChannelCapacity(t *testing.T) int {
+	t.Helper()
+	target := newChanQueue[int64]()
+	t.Cleanup(func() { close(target.ch) })
+	return checkCapacityCycles(t, func(value int64) bool {
+		select {
+		case target.ch <- value:
+			return true
+		default:
+			return false
+		}
+	}, func() (int64, bool) {
+		select {
+		case value := <-target.ch:
+			return value, true
+		default:
+			return 0, false
+		}
+	})
+}
+
+func checkWorkivaCapacity(t *testing.T) int {
+	t.Helper()
+	buffer, _, _ := newWorkivaRun[int64]()
+	t.Cleanup(buffer.Dispose)
+	return checkCapacityCycles(t, func(value int64) bool {
+		accepted, err := buffer.Offer(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return accepted
+	}, func() (int64, bool) {
+		if buffer.Len() == 0 {
+			return 0, false
+		}
+		value, err := buffer.Poll(0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		typed, ok := value.(int64)
+		if !ok {
+			t.Fatalf("workiva returned %T", value)
+		}
+		return typed, true
+	})
+}
+
+func checkCapacityCycles(
+	t *testing.T,
+	put func(int64) bool,
+	get func() (int64, bool),
+) int {
+	t.Helper()
+	if _, ok := get(); ok {
+		t.Fatal("new queue is not empty")
+	}
+	for cycle := range 2 {
+		for index := range ringCapacity + 1 {
+			accepted := put(int64(cycle*ringCapacity + index))
+			if accepted != (index < ringCapacity) {
+				t.Fatalf("cycle %d put %d accepted=%v", cycle, index, accepted)
+			}
+		}
+		for index := range ringCapacity + 1 {
+			value, ok := get()
+			if ok != (index < ringCapacity) {
+				t.Fatalf("cycle %d get %d ok=%v", cycle, index, ok)
+			}
+			if ok && value != int64(cycle*ringCapacity+index) {
+				t.Fatalf("cycle %d get %d value=%d", cycle, index, value)
+			}
+		}
+	}
+	return ringCapacity
 }

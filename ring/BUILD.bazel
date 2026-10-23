@@ -36,9 +36,13 @@ go_test(
         "bench_adapters_test.go",
         "bench_harness_test.go",
         "bench_latency_test.go",
+        "bench_manifest_test.go",
         "bench_test.go",
         "race_off_test.go",
         "race_on_test.go",
+        "spsc_bench_test.go",
+        "spsc_concrete_bench_test.go",
+        "spsc_bench_harness_test.go",
     ],
     tags = ["exclusive"],
     deps = [

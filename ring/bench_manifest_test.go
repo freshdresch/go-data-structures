@@ -2,6 +2,7 @@ package ring_test
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"runtime"
 	"strings"
@@ -78,8 +79,30 @@ func manifestRow(name, implementation string, mode benchMode, batch int) benchma
 	}
 }
 
+var spscManifestSelection = flag.String(
+	"spsc-manifest",
+	"legacy",
+	"legacy, concurrent, or sequential",
+)
+
+func selectedBenchmarkManifest(selection string) (benchmarkManifest, error) {
+	switch selection {
+	case "legacy":
+		return buildBenchmarkManifest(), nil
+	case "concurrent":
+		return buildSPSCConcurrentManifest(), nil
+	case "sequential":
+		return buildSPSCSequentialManifest(), nil
+	default:
+		return benchmarkManifest{}, fmt.Errorf("unknown SPSC manifest %q", selection)
+	}
+}
+
 func TestBenchmarkManifest(t *testing.T) {
-	manifest := buildBenchmarkManifest()
+	manifest, err := selectedBenchmarkManifest(*spscManifestSelection)
+	if err != nil {
+		t.Fatal(err)
+	}
 	encoded, err := json.Marshal(manifest)
 	if err != nil {
 		t.Fatal(err)
@@ -211,4 +234,74 @@ func checkManifestExamples(t *testing.T, rows []benchmarkManifestRow) {
 	if !bulk32 || !single {
 		t.Fatal("missing bulk32 or single contract")
 	}
+}
+
+func spscElementContract(row benchmarkManifestRow, element string) benchmarkManifestRow {
+	row.Element = element
+	if element == "ptr" {
+		row.PointerPoolSize = manifestPointer(ptrPoolSize)
+		row.PointerPoolReason = ""
+		row.Storage = "typed *item pointing into a rotating pool of 1024 items"
+	}
+	return row
+}
+
+func buildSPSCConcurrentManifest() benchmarkManifest {
+	manifest := benchmarkManifest{Schema: 1, GOMAXPROCS: runtime.GOMAXPROCS(0)}
+	for _, implementation := range []string{"ring", "spsc"} {
+		root := "BenchmarkRingAPI"
+		if implementation == "spsc" {
+			root = "BenchmarkSPSCAPI"
+		}
+		for _, api := range []ringAPI{apiSingle, apiBulk, apiBurst} {
+			for _, batch := range []int{1, 32} {
+				if api == apiSingle && batch != 1 {
+					continue
+				}
+				for _, element := range []string{"int64", "ptr"} {
+					name := root + "/mode=SPSC/api=" + api.String()
+					if api != apiSingle {
+						name += fmt.Sprintf("/batch=%d", batch)
+					}
+					row := manifestRow(name+"/elem="+element, implementation, spscMode, batch)
+					row.Family, row.PrimaryMetric = "SPSCSharedAPI", "ns/elem"
+					row.API, row.APIReason = manifestPointer(api.String()), ""
+					row.Participants = 2
+					manifest.Rows = append(manifest.Rows, spscElementContract(row, element))
+				}
+			}
+		}
+		row := manifestRow(
+			"BenchmarkSPSCComparisonHandoff/impl="+implementation,
+			implementation,
+			spscMode,
+			1,
+		)
+		row.Family, row.API, row.APIReason = "SPSCSharedHandoff", manifestPointer("burst"), ""
+		row.Participants, row.QueueCount = 2, 2
+		row.ConsumerWait = manifestPointer("64 unsuccessful dequeue attempts before runtime.Gosched")
+		row.TimingBoundary = "round trips between two participants over two SPSC queues; " +
+			"excludes setup, pre-run GC and warm-up; half-round-trip percentiles are estimates"
+		manifest.Rows = append(manifest.Rows, row)
+	}
+	return manifest
+}
+
+func buildSPSCSequentialManifest() benchmarkManifest {
+	manifest := benchmarkManifest{Schema: 1, GOMAXPROCS: runtime.GOMAXPROCS(0)}
+	for _, implementation := range []string{"ring", "spsc"} {
+		for _, element := range []string{"int64", "ptr"} {
+			name := "BenchmarkSPSCConcrete/impl=" + implementation + "/api=seq/elem=" + element
+			row := manifestRow(name, implementation, spscMode, 1)
+			row.Family, row.API, row.APIReason = "SPSCConcreteSequential", manifestPointer("seq"), ""
+			row.Producers, row.Consumers = nil, nil
+			row.WorkerReason = "one sequential caller has no concurrent worker pair"
+			row.Callers, row.Participants = 1, 1
+			row.ProducerWait, row.ConsumerWait = nil, nil
+			row.WaitReason = "sequential enqueue/dequeue pairs do not wait"
+			row.TimingBoundary = "enqueue/dequeue pairs in one goroutine; excludes setup and GC"
+			manifest.Rows = append(manifest.Rows, spscElementContract(row, element))
+		}
+	}
+	return manifest
 }

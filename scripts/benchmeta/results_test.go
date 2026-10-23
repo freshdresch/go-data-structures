@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -116,5 +117,136 @@ func TestProjectCanonicalMetrics(t *testing.T) {
 		if err := projectResults(input, output); err == nil {
 			t.Fatalf("accepted %q", metric)
 		}
+	}
+}
+
+func TestSPSCProjectionParity(t *testing.T) {
+	directory := t.TempDir()
+	input, output := filepath.Join(directory, "raw"), filepath.Join(directory, "primary")
+	metrics := []struct {
+		value string
+		valid bool
+	}{
+		{"20 ns/op 10 ns/elem 2 elem/op 0 B/op", true},
+		{"20 ns/op", false},
+		{"20 ns/op 1 ns/elem 2 ns/elem", false},
+		{"20 ns/op 1 ns/elem dangling", false},
+		{"20 ns/op invalid ns/elem", false},
+		{"20 ns/op -1 ns/elem", false},
+		{"20 ns/op NaN ns/elem", false},
+		{"20 ns/op Inf ns/elem", false},
+		{"20 ns/op -Inf ns/elem", false},
+	}
+	for _, metric := range metrics {
+		var projections []string
+		for _, family := range []string{"BenchmarkRingAPI", "BenchmarkSPSCAPI"} {
+			name := family + "/mode=SPSC/api=bulk/batch=32/elem=int64-2"
+			writeFixture(t, input, name+" 129 "+metric.value+"\n")
+			err := projectResults(input, output)
+			if !metric.valid {
+				if err == nil {
+					t.Fatalf("%s accepted %q", family, metric.value)
+				}
+				continue
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			content, err := os.ReadFile(output)
+			if err != nil {
+				t.Fatal(err)
+			}
+			projection := strings.TrimPrefix(string(content), name)
+			if strings.Contains(projection, "ns/op") ||
+				!strings.Contains(projection, "10\tns/elem") ||
+				!strings.Contains(projection, "2\telem/op") {
+				t.Fatalf("bad projection %q", projection)
+			}
+			projections = append(projections, projection)
+		}
+		if metric.valid && projections[0] != projections[1] {
+			t.Fatal("unequal projection behavior")
+		}
+	}
+	preserved := "BenchmarkSPSCConcrete/impl=spsc/api=seq/elem=ptr 1 4 ns/op\n" +
+		"BenchmarkSPSCComparisonHandoff/impl=spsc-2 1 8 ns/op 4 handoff-p50\n"
+	writeFixture(t, input, preserved)
+	if err := projectResults(input, output); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != preserved {
+		t.Fatal("concrete or handoff metrics changed")
+	}
+}
+
+func TestExplicitManifestRows(t *testing.T) {
+	for _, sequential := range []bool{false, true} {
+		t.Run(strconv.FormatBool(sequential), func(t *testing.T) {
+			directory := t.TempDir()
+			manifest := tinyManifest(t)
+			name := "BenchmarkSPSCAPI/mode=SPSC/api=single/elem=ptr"
+			if sequential {
+				name = "BenchmarkSPSCConcrete/impl=spsc/api=seq/elem=ptr"
+			}
+			encoded, err := json.Marshal(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifest.Rows[0]["name"] = encoded
+			manifestPath, expected := filepath.Join(directory, "manifest"), filepath.Join(directory, "rows")
+			if err := writeJSON(manifestPath, manifest); err != nil {
+				t.Fatal(err)
+			}
+			writeFixture(t, expected, name+"-2\n")
+			if err := checkSelectedRows(manifestPath, expected, 2, "all"); err != nil {
+				t.Fatal(err)
+			}
+			if err := checkSelectedRows(manifestPath, expected, 1, "all"); err == nil {
+				t.Fatal("wrong CPU accepted")
+			}
+			if err := checkSelectedRows(manifestPath, expected, 2, "unknown"); err == nil {
+				t.Fatal("unknown selection accepted")
+			}
+			for _, rows := range []string{"", name + "-2\nextra-2", name + "-2\n" + name + "-2", name} {
+				writeFixture(t, expected, rows)
+				if err := checkSelectedRows(manifestPath, expected, 2, "all"); err == nil {
+					t.Fatalf("wrong rows accepted %q", rows)
+				}
+			}
+			writeFixture(t, expected, name+"-2\n")
+			manifest.Rows = append(manifest.Rows, manifest.Rows[0])
+			if err := writeJSON(manifestPath, manifest); err != nil {
+				t.Fatal(err)
+			}
+			if err := checkSelectedRows(manifestPath, expected, 2, "all"); err == nil {
+				t.Fatal("duplicate manifest row accepted")
+			}
+		})
+	}
+}
+
+func TestLegacySequentialFiltering(t *testing.T) {
+	directory := t.TempDir()
+	manifest := tinyManifest(t)
+	sequential := map[string]json.RawMessage{}
+	for key, value := range manifest.Rows[0] {
+		sequential[key] = value
+	}
+	sequential["name"] = json.RawMessage(`"BenchmarkRingAPI/api=seq/elem=int64"`)
+	manifest.Rows = append(manifest.Rows, sequential)
+	manifestPath, expected := filepath.Join(directory, "manifest"), filepath.Join(directory, "rows")
+	if err := writeJSON(manifestPath, manifest); err != nil {
+		t.Fatal(err)
+	}
+	writeFixture(t, expected, "BenchmarkRingAPI/api=seq/elem=int64-2\n")
+	if err := checkRows(manifestPath, expected, 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkSelectedRows(manifestPath, expected, 2, "all"); err == nil {
+		t.Fatal("all unexpectedly filtered a manifest row")
 	}
 }

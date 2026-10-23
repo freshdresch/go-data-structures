@@ -83,8 +83,10 @@ func checkSPSCSteadyStateAllocations[T any](t *testing.T, value T) {
 					}
 				}
 			})
-			t.Logf("payload=%T exact=%t method=%s allocations=%g", value, exact, method,
-				allocations)
+			t.Logf(
+				"payload=%T exact=%t method=%s allocations=%g",
+				value, exact, method, allocations,
+			)
 			if allocations != 0 {
 				t.Fatal("steady-state allocation")
 			}

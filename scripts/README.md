@@ -133,3 +133,81 @@ but investigation, automatic retries, and new padding searches remain deferred.
 For verification without performance measurements, run `bash scripts/bench-runners-test.sh`.
 It compiles only the metadata helper. Temporary shell binaries emit fixed metadata and results,
 and markers establish that rejected inputs never dispatch timed invocations.
+
+## Bounded SPSC comparison corpus
+
+The SPSC proof uses one frozen `go test -c ./ring` binary for both implementations.
+`-spsc-manifest=concurrent` exports exactly 22 rows: ten existing RingAPI rows, ten SPSCAPI
+rows, and two `BenchmarkSPSCComparisonHandoff/impl={ring,spsc}` rows. The API rows use
+SPSC ownership, `int64` and `ptr`, single calls, and bulk/burst batches of 1 and 32.
+`-spsc-manifest=sequential` exports four
+`BenchmarkSPSCConcrete/impl={ring,spsc}/api=seq/elem={int64,ptr}` rows. Every queue has
+capacity 1024 and default options. Pointer rows rotate through the existing 1024-item pool.
+The default selector remains `legacy`, with the original 24-row contract.
+
+Shared API rows cross the same queue interface and report canonical `ns/elem` per verified
+transfer. Bulk also reports actual `elem/op`. Concrete sequential rows call concrete queue
+pointers and report `ns/op` per enqueue/dequeue pair. Handoff reports `ns/op` per round trip
+and estimates one-way latency with half-round-trip histogram samples. It uses two int64 queues.
+The manifest records each family's participants, waiting, storage, options, and lifecycle timing.
+Keep shared dispatch and concrete results separate. Sequential direct calls answer the compiler
+question. Concurrent shared dispatch answers the transfer question.
+
+The parent's approved protocol sets CPU placement, durations, rounds, and acceptance criteria.
+Use the existing `benchmeta snapshot`, `finalize`, and `finalize --check-only` commands with
+that protocol's request and artifact JSON files. Snapshot before building, finalize after building,
+and check again before timing. Source discovery through `go list -deps -test -json` includes the
+new compiled files. Preserve discovery logs, source bytes, build information, binary hashes,
+manifest export logs, exact commands, affinity, environment, raw output, and each process status.
+Both selected manifests must come from that frozen binary at their intended CPU settings.
+For example, after the protocol creates its snapshot request:
+
+```bash
+export GOTOOLCHAIN=local GOWORK=off GOFLAGS=-mod=readonly
+go build -o /tmp/spsc-proof/benchmeta ./scripts/benchmeta
+/tmp/spsc-proof/benchmeta snapshot \
+  --request=/tmp/spsc-proof/request.json --output=/tmp/spsc-proof/snapshot.json
+go test -c -o /tmp/spsc-proof/ring.test ./ring
+/tmp/spsc-proof/ring.test -test.run='^TestBenchmarkManifest$' -test.v \
+  -test.cpu=2 -spsc-manifest=concurrent > /tmp/spsc-proof/concurrent.export.log
+/tmp/spsc-proof/ring.test -test.run='^TestBenchmarkManifest$' -test.v \
+  -test.cpu=1 -spsc-manifest=sequential > /tmp/spsc-proof/sequential.export.log
+```
+
+Extract the single `BENCHMARK_MANIFEST ` JSON payload from each export log into its manifest
+file. Keep the explicit test PASS in the original log. The protocol supplies exact expected row
+files, including Go's CPU suffix when the requested CPU count exceeds one. Admit every selected
+row before timing:
+
+```bash
+/tmp/spsc-proof/benchmeta rows --selection=all --cpu=2 \
+  --manifest=/tmp/spsc-proof/concurrent.json --expected=/tmp/spsc-proof/concurrent.rows
+/tmp/spsc-proof/benchmeta rows --selection=all --cpu=1 \
+  --manifest=/tmp/spsc-proof/sequential.json --expected=/tmp/spsc-proof/sequential.rows
+/tmp/spsc-proof/benchmeta finalize --snapshot=/tmp/spsc-proof/snapshot.json \
+  --artifacts=/tmp/spsc-proof/artifacts.json --output=/tmp/spsc-proof/provenance.json \
+  --report=/tmp/spsc-proof/finalize-report.json
+/tmp/spsc-proof/benchmeta finalize --snapshot=/tmp/spsc-proof/snapshot.json \
+  --artifacts=/tmp/spsc-proof/artifacts.json --output=/tmp/spsc-proof/provenance.json \
+  --report=/tmp/spsc-proof/check-report.json --check-only
+```
+
+After every invocation, require successful process status and exact equality between observed
+benchmark row names and the expected selection. Reject missing, extra, duplicate, or wrong-CPU
+rows. A `-test.benchtime=1x` run of each selected row checks wiring only. Preserve raw output and
+project a separate file before comparing canonical transfer metrics:
+
+```bash
+/tmp/spsc-proof/benchmeta project \
+  --input=/tmp/spsc-proof/raw.txt --output=/tmp/spsc-proof/primary.txt
+```
+
+Projection removes raw concurrent RingAPI and SPSCAPI `ns/op`, requires exactly one finite,
+nonnegative `ns/elem`, and preserves other metrics. It preserves concrete sequential and handoff
+`ns/op` and latency metrics. Benchstat may present the shared API implementation in `.name` with
+`/mode,/api,/batch,/elem` as rows. Concrete comparisons use `/impl` columns.
+
+The parent's protocol also measures unchanged Ring with the original quick corpus before and
+after this harness extension. Label this a harness/build control. Its compiled-test hashes differ.
+Do not overlay SPSC tests on the old baseline or attribute this control's differences to a Ring
+algorithm change. Existing quick and compare runners retain their selections and admission rules.

@@ -109,6 +109,13 @@ func validateManifestLog(logBytes []byte, manifest workloadManifest) error {
 }
 
 func checkRows(manifestPath, expectedPath string, cpu int) error {
+	return checkSelectedRows(manifestPath, expectedPath, cpu, "legacy")
+}
+
+func checkSelectedRows(manifestPath, expectedPath string, cpu int, selection string) error {
+	if selection != "legacy" && selection != "all" {
+		return inadmissibleError{"unknown row selection " + selection}
+	}
 	var manifest workloadManifest
 	if err := readJSON(manifestPath, &manifest); err != nil {
 		return err
@@ -131,10 +138,10 @@ func checkRows(manifestPath, expectedPath string, cpu int) error {
 			return err
 		}
 		// Quick manifests contain CPU-1 sequential and selected-CPU concurrent contracts.
-		if len(expected) == 1 && !strings.Contains(name, "/api=seq/") {
+		if selection == "legacy" && len(expected) == 1 && !strings.Contains(name, "/api=seq/") {
 			continue
 		}
-		if len(expected) > 1 && strings.Contains(name, "/api=seq/") {
+		if selection == "legacy" && len(expected) > 1 && strings.Contains(name, "/api=seq/") {
 			continue
 		}
 		if cpu != 1 {
@@ -167,7 +174,9 @@ func projectResults(input, output string) error {
 			continue
 		}
 		fields := strings.Fields(line)
-		if !strings.HasPrefix(fields[0], "BenchmarkRingAPI/mode=") {
+		sharedAPI := strings.HasPrefix(fields[0], "BenchmarkRingAPI/mode=") ||
+			strings.HasPrefix(fields[0], "BenchmarkSPSCAPI/mode=")
+		if !sharedAPI {
 			projected.WriteString(line + "\n")
 			continue
 		}
@@ -207,13 +216,14 @@ func runResultCommand(arguments []string) error {
 		manifest := flags.String("manifest", "", "workload manifest")
 		expected := flags.String("expected", "", "expected row names")
 		cpu := flags.Int("cpu", 0, "requested GOMAXPROCS")
+		selection := flags.String("selection", "legacy", "legacy or all manifest rows")
 		if err := flags.Parse(arguments[1:]); err != nil {
 			return err
 		}
 		if flags.NArg() != 0 {
 			return fmt.Errorf("unexpected arguments")
 		}
-		return checkRows(*manifest, *expected, *cpu)
+		return checkSelectedRows(*manifest, *expected, *cpu, *selection)
 	case "project":
 		input := flags.String("input", "", "raw benchmark result")
 		output := flags.String("output", "", "primary metrics")

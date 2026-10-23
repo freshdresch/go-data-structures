@@ -17,9 +17,17 @@ func checkSPSCLayout[T any](t *testing.T) {
 	producer := reflect.TypeOf(spscProducer[T]{})
 	consumer := reflect.TypeOf(spscConsumer[T]{})
 	outer := reflect.TypeOf(SPSC[T]{})
-	t.Logf("GOARCH=%s pointer=%d producer=%d/%d consumer=%d/%d outer=%d/%d",
-		runtime.GOARCH, unsafe.Sizeof(uintptr(0)), producer.Size(), producer.Align(),
-		consumer.Size(), consumer.Align(), outer.Size(), outer.Align())
+	t.Logf(
+		"GOARCH=%s pointer=%d producer=%d/%d consumer=%d/%d outer=%d/%d",
+		runtime.GOARCH,
+		unsafe.Sizeof(uintptr(0)),
+		producer.Size(),
+		producer.Align(),
+		consumer.Size(),
+		consumer.Align(),
+		outer.Size(),
+		outer.Align(),
+	)
 	for _, block := range []reflect.Type{producer, consumer, outer} {
 		for index := range block.NumField() {
 			field := block.Field(index)

@@ -300,7 +300,12 @@ func buildSPSCSequentialManifest() benchmarkManifest {
 			row.ProducerWait, row.ConsumerWait = nil, nil
 			row.WaitReason = "sequential enqueue/dequeue pairs do not wait"
 			row.TimingBoundary = "enqueue/dequeue pairs in one goroutine; excludes setup and GC"
-			manifest.Rows = append(manifest.Rows, spscElementContract(row, element))
+			row = spscElementContract(row, element)
+			if element == "ptr" {
+				row.Storage = "typed *item repeatedly pointing to the first item " +
+					"of an allocated 1024-item pool"
+			}
+			manifest.Rows = append(manifest.Rows, row)
 		}
 	}
 	return manifest

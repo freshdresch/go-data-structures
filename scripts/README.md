@@ -142,7 +142,8 @@ rows, and two `BenchmarkSPSCComparisonHandoff/impl={ring,spsc}` rows. The API ro
 SPSC ownership, `int64` and `ptr`, single calls, and bulk/burst batches of 1 and 32.
 `-spsc-manifest=sequential` exports four
 `BenchmarkSPSCConcrete/impl={ring,spsc}/api=seq/elem={int64,ptr}` rows. Every queue has
-capacity 1024 and default options. Pointer rows rotate through the existing 1024-item pool.
+capacity 1024 and default options. Concurrent API pointer rows rotate through the existing
+1024-item pool. Sequential pointer rows allocate the same pool and repeatedly use its first item.
 The default selector remains `legacy`, with the original 24-row contract.
 
 Shared API rows cross the same queue interface and report canonical `ns/elem` per verified

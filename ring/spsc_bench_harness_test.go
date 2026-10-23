@@ -158,3 +158,44 @@ func TestSPSCManifestRows(t *testing.T) {
 	_, err := selectedBenchmarkManifest("unknown")
 	require.Error(t, err)
 }
+
+func TestSPSCPointerStorageContracts(t *testing.T) {
+	for _, testCase := range []struct {
+		selection string
+		storage   string
+		perImpl   int
+	}{
+		{
+			selection: "concurrent",
+			storage:   "typed *item pointing into a rotating pool of 1024 items",
+			perImpl:   5,
+		},
+		{
+			selection: "sequential",
+			storage: "typed *item repeatedly pointing to the first item " +
+				"of an allocated 1024-item pool",
+			perImpl: 1,
+		},
+	} {
+		t.Run(testCase.selection, func(t *testing.T) {
+			manifest, err := selectedBenchmarkManifest(testCase.selection)
+			require.NoError(t, err)
+			pointerRows := make(map[string]int)
+			for _, row := range manifest.Rows {
+				if row.Element != "ptr" {
+					continue
+				}
+				pointerRows[row.Implementation]++
+				t.Run(row.Name, func(t *testing.T) {
+					require.NotNil(t, row.PointerPoolSize)
+					require.Equal(t, 1024, *row.PointerPoolSize)
+					require.Equal(t, testCase.storage, row.Storage)
+				})
+			}
+			require.Equal(t, map[string]int{
+				"ring": testCase.perImpl,
+				"spsc": testCase.perImpl,
+			}, pointerRows)
+		})
+	}
+}

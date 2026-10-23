@@ -11,17 +11,17 @@ import (
 )
 
 // exhaustedSpinBounds are the spin bounds BenchmarkExhaustedSpin compares.
-var exhaustedSpinBounds = []int{1024, 4096, 16384, 65536}
+var exhaustedSpinBounds = []int{1024, 4096, 8192, 16384, 65536}
 
 // BenchmarkExhaustedSpin measures the CPU one waiter wastes when the goroutine it waits for has
-// been descheduled, which is the cost a larger tailSpins adds. The tail never reaches want, so
-// every spin runs to its bound. Both cases use a ring from New, so the tail and the writer's
-// field sit on the producer tail's line. The contended writer stores into prodTailRTS, the other
-// field on that line. The quiet case is the lower bound, where every load hits the waiter's cache.
-// The contended case is the upper bound, where another core keeps writing the same line. Run it
-// at -cpu 2 or higher on a machine with at least two CPUs, because the contended case needs a
-// second CPU. The larger bounds give the truest ns/load, because the smallest includes a fixed
-// per-call overhead.
+// been descheduled, which is the cost a larger defaultSpinsBeforeYield or WithSpinsBeforeYield
+// bound adds. The tail never reaches want, so every spin runs to its bound. Both cases use a ring
+// from New, so the tail and the writer's field sit on the producer tail's line. The contended
+// writer stores into prodTailRTS, the other field on that line. The quiet case is the lower
+// bound, where every load hits the waiter's cache. The contended case is the upper bound, where
+// another core keeps writing the same line. Run it at -cpu 2 or higher on a machine with at least
+// two CPUs, because the contended case needs a second CPU. The larger bounds give the truest
+// ns/load, because the smallest includes a fixed per-call overhead.
 func BenchmarkExhaustedSpin(b *testing.B) {
 	b.Run("line=quiet", func(b *testing.B) {
 		for _, spins := range exhaustedSpinBounds {

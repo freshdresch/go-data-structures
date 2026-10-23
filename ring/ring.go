@@ -4,6 +4,7 @@ package ring
 import (
 	"errors"
 	"fmt"
+	"math"
 	"runtime"
 	"sync/atomic"
 	"unsafe"
@@ -30,6 +31,12 @@ var ErrExceedsCapacity = errors.New("ring: requested count exceeds the ring's ca
 // set with WithMaxBatch, WithMaxEnqueueBatch, or WithMaxDequeueBatch, is below 1 or above the
 // count.
 var ErrInvalidMaxBatch = errors.New("ring: max batch must be between 1 and the ring's count")
+
+// ErrInvalidSpinsBeforeYield is returned by New, wrapped, when the bound set with
+// WithSpinsBeforeYield is below 0 or above math.MaxInt32.
+var ErrInvalidSpinsBeforeYield = errors.New(
+	"ring: spins before yield must be between 0 and math.MaxInt32",
+)
 
 // ErrExceedsMaxBatch is returned wrapped by EnqueueBulk when len(items) exceeds the ring's maximum
 // enqueue batch size, and by DequeueBulk when len(dst) exceeds its maximum dequeue batch size,
@@ -85,7 +92,10 @@ func unpackCnt(word uint64) uint32 {
 }
 
 // readOnly holds the fields New sets and nothing writes afterward, so every core can keep the
-// line holding them in its cache.
+// line holding them in its cache. On 64-bit platforms its fields take 52 bytes, which the slice
+// header's alignment rounds up to 56. The allocator can place a ring 72 bytes past a cache line,
+// where readOnly then ends exactly at the line's end, so it has room for at most 4 more one-byte
+// fields before it crosses into the next line. TestRingAlignment checks this.
 type readOnly[T any] struct {
 	entries          []T
 	mask             uint32
@@ -93,6 +103,7 @@ type readOnly[T any] struct {
 	maxDequeueBatch  uint32
 	prodHTDMax       uint32
 	consHTDMax       uint32
+	spinsBeforeYield uint32
 	prodMode         syncMode
 	consMode         syncMode
 	clearOnDequeue   bool
@@ -177,7 +188,8 @@ type consTailLine struct {
 // WithRelaxedMultiConsDequeue do the same with relaxed tail sync, so the goroutines on a side do
 // not wait for each other to publish. WithMaxEnqueueBatch, WithMaxDequeueBatch, and WithMaxBatch
 // limit how many elements one batch call moves. WithoutDequeueClearing leaves dequeued slots
-// uncleared. WithExactBatchCounts makes the batch calls return exact counts.
+// uncleared. WithExactBatchCounts makes the batch calls return exact counts. WithSpinsBeforeYield
+// sets how long a waiting goroutine spins before it yields.
 //
 // The ring holds exactly count elements, where count is the count given to New.
 //
@@ -229,6 +241,7 @@ type config struct {
 	maxDequeueBatch  int
 	keepDequeued     bool
 	exactBatchCounts bool
+	spinsBeforeYield int
 }
 
 // Option configures a Ring at construction.
@@ -448,6 +461,36 @@ func WithExactBatchCounts() Option {
 	}
 }
 
+// WithSpinsBeforeYield returns an Option that sets how many times a waiting goroutine checks
+// before it starts yielding with runtime.Gosched. It affects only a side set with
+// WithMultiProdEnqueue, WithMultiConsDequeue, or a relaxed option, because a single side never
+// waits. When it is given more than once, the last one applies. The default is
+// defaultSpinsBeforeYield, 8192. New returns an error wrapping ErrInvalidSpinsBeforeYield when n
+// is below 0 or above math.MaxInt32.
+//
+// A goroutine on a multi side waits for every earlier goroutine on its side to publish, and one
+// on a relaxed side waits while too many reservations are in flight. A longer spin helps when the
+// goroutine being waited for is running but slow to publish, because the waiter skips the
+// scheduler. It wastes CPU when that goroutine has been preempted, which happens most when the
+// machine runs more threads than cores. Yielding does not give the thread back to the operating
+// system, so the process keeps the core either way.
+//
+// The best value depends on the machine and the load. On an Apple M3 Pro, a bound of 65536 was
+// up to 34% faster than 4096 at GOMAXPROCS 10 on an idle machine, and up to 49% slower at
+// GOMAXPROCS 8 when every core also ran a CPU-bound process. On an AMD Ryzen 7 5800X under WSL2,
+// longer bounds made no measurable difference on an idle machine, and 65536 was up to 25% faster
+// under the same load.
+//
+// With GOMAXPROCS=1, any spin is wasted, because the goroutine being waited for cannot run until
+// the waiter yields, so 0 suits that setting. A very large n effectively removes the yield. At
+// math.MaxInt32 a waiter can hold its P for up to about a second and a half, and with
+// GOMAXPROCS=1 it then relies on the Go runtime's asynchronous preemption.
+func WithSpinsBeforeYield(n int) Option {
+	return func(cfg *config) {
+		cfg.spinsBeforeYield = n
+	}
+}
+
 // maxCount is the largest count New accepts, the largest power of two DPDK accepts.
 const maxCount = 1 << 30
 
@@ -465,7 +508,8 @@ func relaxedHTDMax(mode syncMode, count int) uint32 {
 // the ring allows one producer and one consumer at a time, and a batch call may move up to the
 // whole capacity. It returns an error wrapping ErrInvalidCount when count is not a power of two
 // between 1 and 2^30, and one wrapping ErrInvalidMaxBatch when a maximum enqueue or dequeue batch
-// is below 1 or above count.
+// is below 1 or above count. It returns one wrapping ErrInvalidSpinsBeforeYield when the bound set
+// with WithSpinsBeforeYield is below 0 or above math.MaxInt32.
 func New[T any](count int, options ...Option) (*Ring[T], error) {
 	inRange := count >= 1 && count <= maxCount
 	isPowerOfTwo := count&(count-1) == 0
@@ -473,7 +517,11 @@ func New[T any](count int, options ...Option) (*Ring[T], error) {
 		return nil, fmt.Errorf("new ring with count %d: %w", count, ErrInvalidCount)
 	}
 
-	cfg := config{maxEnqueueBatch: count, maxDequeueBatch: count}
+	cfg := config{
+		maxEnqueueBatch:  count,
+		maxDequeueBatch:  count,
+		spinsBeforeYield: defaultSpinsBeforeYield,
+	}
 	for _, option := range options {
 		option(&cfg)
 	}
@@ -481,6 +529,9 @@ func New[T any](count int, options ...Option) (*Ring[T], error) {
 		return nil, err
 	}
 	if err := checkMaxBatch("dequeue", cfg.maxDequeueBatch, count); err != nil {
+		return nil, err
+	}
+	if err := checkSpinsBeforeYield(cfg.spinsBeforeYield, count); err != nil {
 		return nil, err
 	}
 
@@ -492,6 +543,7 @@ func New[T any](count int, options ...Option) (*Ring[T], error) {
 			maxDequeueBatch:  uint32(cfg.maxDequeueBatch),
 			prodHTDMax:       relaxedHTDMax(cfg.prodMode, count),
 			consHTDMax:       relaxedHTDMax(cfg.consMode, count),
+			spinsBeforeYield: uint32(cfg.spinsBeforeYield),
 			prodMode:         cfg.prodMode,
 			consMode:         cfg.consMode,
 			clearOnDequeue:   !cfg.keepDequeued,
@@ -510,6 +562,18 @@ func checkMaxBatch(op string, maxBatch, count int) error {
 	return fmt.Errorf(
 		"new ring with count %d and max %s batch %d: %w",
 		count, op, maxBatch, ErrInvalidMaxBatch,
+	)
+}
+
+// checkSpinsBeforeYield returns an error wrapping ErrInvalidSpinsBeforeYield when spins, the
+// bound set with WithSpinsBeforeYield, is below 0 or above math.MaxInt32.
+func checkSpinsBeforeYield(spins, count int) error {
+	if spins >= 0 && spins <= math.MaxInt32 {
+		return nil
+	}
+	return fmt.Errorf(
+		"new ring with count %d and spins before yield %d: %w",
+		count, spins, ErrInvalidSpinsBeforeYield,
 	)
 }
 
@@ -788,7 +852,7 @@ func (r *Ring[T]) doEnqueue(items []T, fixed bool, admit admission) (enqueued, f
 	r.writeSlots(base, end, items[:numEntries])
 
 	if r.prodMode == modeMulti {
-		waitForTail(&r.prodTail, head)
+		waitForTail(&r.prodTail, head, int(r.spinsBeforeYield))
 	}
 
 	// the tail store publishes the slots written above to consumers
@@ -857,7 +921,7 @@ func (r *Ring[T]) doDequeue(dst []T, fixed bool, admit admission) (dequeued, ava
 	}
 
 	if r.consMode == modeMulti {
-		waitForTail(&r.consTail, head)
+		waitForTail(&r.consTail, head, int(r.spinsBeforeYield))
 	}
 
 	// the tail store hands the slots read above back to producers
@@ -935,11 +999,12 @@ func (r *Ring[T]) clearSlots(base, end, count uint32) {
 	clear(r.entries[:count-end])
 }
 
-// tailSpins is how many times waitForTail checks the tail in a plain loop before it starts
-// yielding. On an Apple M3 Pro and an AMD Ryzen, 4096 beat 1024 by 6 to 23% in geometric mean over
-// the MPSC, SPMC, and MPMC rows, most of what 16384 gained, and cost nothing with one CPU. When the
-// goroutine being waited for is descheduled, one exhausted spin wastes 1 to 3 µs.
-const tailSpins = 4096
+// defaultSpinsBeforeYield is the bound a ring uses when WithSpinsBeforeYield is not given. Against
+// 4096, 8192 was faster on an idle Apple M3 Pro and on a loaded AMD Ryzen 7 5800X, tied on an
+// idle Ryzen, and 3% slower on a loaded M3 Pro, the smallest worst case of the longer bounds
+// measured. scripts/ring-spin-bound.sh rewrites this line to measure other bounds, so it must
+// stay a standalone untyped constant.
+const defaultSpinsBeforeYield = 8192
 
 // spinForTail checks the tail up to spins times, each with an atomic load, and reports whether
 // one of them saw want. A true result synchronizes with the store that wrote want. It returns
@@ -956,15 +1021,20 @@ func spinForTail(tail *atomic.Uint32, want uint32, spins int) bool {
 
 // waitForTail returns once the tail equals want. A producer or consumer that has finished copying
 // calls it to wait for every earlier one on its side to publish, so publication stays in order.
+// Whichever load sees want synchronizes with the earlier goroutine's tail store, so that
+// goroutine's slot writes are published along with the caller's own tail store that follows.
 //
-// It first calls spinForTail with tailSpins, since the earlier goroutine is usually nanoseconds
-// from publishing. The bound keeps it from burning a whole time slice when that goroutine has
-// been descheduled, and after it waitForTail yields with runtime.Gosched between checks, so the
-// goroutine it waits for gets to run and publish, even with GOMAXPROCS=1. Whichever load sees
-// want synchronizes with the earlier goroutine's tail store, so that goroutine's slot writes are
-// published along with the caller's own tail store that follows.
-func waitForTail(tail *atomic.Uint32, want uint32) {
-	if spinForTail(tail, want, tailSpins) {
+// It first calls spinForTail with spins, since the earlier goroutine is usually nanoseconds from
+// publishing, and then yields with runtime.Gosched between checks. This departs from DPDK, which
+// spins without a bound because each lcore is a pinned thread that is not expected to be
+// preempted. DPDK answers preemption on the tail update with its RTS and HTS modes, which still
+// spin. Goroutines are preempted and share threads, so a waiter that never yielded could hold
+// the thread the goroutine it waits for needs, and with GOMAXPROCS=1 stall until the runtime
+// preempts it. The relaxed options are the DPDK-style answer for callers who expect heavy
+// preemption. Gosched yields only to other goroutines and keeps the thread, so yielding is no
+// cheaper than spinning when nothing else is ready to run.
+func waitForTail(tail *atomic.Uint32, want uint32, spins int) {
+	if spinForTail(tail, want, spins) {
 		return
 	}
 	for tail.Load() != want {
@@ -975,22 +1045,33 @@ func waitForTail(tail *atomic.Uint32, want uint32) {
 // waitHeadTailDistance returns the head word once the side's head position is at most htdMax past
 // its tail position, which bounds how many slots are reserved but not yet published. Without the
 // bound, a steady stream of operations could keep one always in flight, and the tail would never
-// move. It spins like waitForTail, then yields between checks.
+// move. It checks up to spins times, then yields between checks, as waitForTail does, with the
+// same bound. The two phases keep a counter out of the yield loop, so no counter can wrap however
+// long the wait lasts.
+func waitHeadTailDistance(head, tail *atomic.Uint64, htdMax uint32, spins int) uint64 {
+	for range spins {
+		if word, ok := headWithinDistance(head, tail, htdMax); ok {
+			return word
+		}
+	}
+	for {
+		if word, ok := headWithinDistance(head, tail, htdMax); ok {
+			return word
+		}
+		runtime.Gosched()
+	}
+}
+
+// headWithinDistance loads the side's tail, then its head, and returns the head word and whether
+// its position is at most htdMax past the tail's.
 //
 // It loads the tail before the head, unlike DPDK, so the tail is never past the loaded head and
 // the distance cannot wrap into a spurious wait. The head is still loaded before the caller reads
 // the other side's tail.
-func waitHeadTailDistance(head, tail *atomic.Uint64, htdMax uint32) uint64 {
-	for spins := 0; ; spins++ {
-		tailPos := unpackPos(tail.Load())
-		word := head.Load()
-		if unpackPos(word)-tailPos <= htdMax {
-			return word
-		}
-		if spins >= tailSpins {
-			runtime.Gosched()
-		}
-	}
+func headWithinDistance(head, tail *atomic.Uint64, htdMax uint32) (uint64, bool) {
+	tailPos := unpackPos(tail.Load())
+	word := head.Load()
+	return word, unpackPos(word)-tailPos <= htdMax
 }
 
 // moveProdHeadRelaxed reserves up to n slots for a relaxed enqueue, as moveProdHead does for the
@@ -1005,7 +1086,12 @@ func (r *Ring[T]) moveProdHeadRelaxed(
 ) (oldPos, count, free uint32) {
 	capacity := r.capacity()
 	for {
-		head := waitHeadTailDistance(&r.prodHeadRTS, &r.prodTailRTS, r.prodHTDMax)
+		head := waitHeadTailDistance(
+			&r.prodHeadRTS,
+			&r.prodTailRTS,
+			r.prodHTDMax,
+			int(r.spinsBeforeYield),
+		)
 		oldPos = unpackPos(head)
 		free = capacity + r.admissionConsTail(oldPos, n, admit) - oldPos
 		count = n
@@ -1036,7 +1122,12 @@ func (r *Ring[T]) moveConsHeadRelaxed(
 	admit admission,
 ) (oldPos, count, available uint32) {
 	for {
-		head := waitHeadTailDistance(&r.consHeadRTS, &r.consTailRTS, r.consHTDMax)
+		head := waitHeadTailDistance(
+			&r.consHeadRTS,
+			&r.consTailRTS,
+			r.consHTDMax,
+			int(r.spinsBeforeYield),
+		)
 		oldPos = unpackPos(head)
 		available = r.admissionProdTail(oldPos, n, admit) - oldPos
 		count = n

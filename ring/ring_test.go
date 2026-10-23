@@ -1,11 +1,15 @@
 package ring
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
+	"os"
+	"os/exec"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1545,7 +1549,9 @@ func defaultAndRelaxed() []optionSet {
 
 // TestMaxBatchOptions checks that both batch limits default to the capacity, that each option
 // sets its own side, that WithMaxBatch sets both, that the last option given for a side applies,
-// and that New rejects a limit below 1 or above the count.
+// and that New rejects a limit below 1 or above the count. It also checks that the spin bound
+// defaults to defaultSpinsBeforeYield, that WithSpinsBeforeYield sets any bound from 0 to
+// math.MaxInt32, that the last one given applies, and that New rejects a bound outside that range.
 func TestMaxBatchOptions(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -1595,6 +1601,38 @@ func TestMaxBatchOptions(t *testing.T) {
 	ring, err := New[int](16, WithMaxEnqueueBatch(4), WithMaxBatch(17))
 	assert.ErrorIs(t, err, ErrInvalidMaxBatch)
 	assert.True(t, ring == nil)
+
+	for _, bad := range []int{-1, math.MinInt32} {
+		ring, err = New[int](16, WithSpinsBeforeYield(bad))
+		assert.ErrorIs(t, err, ErrInvalidSpinsBeforeYield, "spins %d", bad)
+		assert.True(t, ring == nil, "spins %d", bad)
+	}
+	for _, good := range []int{0, math.MaxInt32} {
+		ring, err = New[int](16, WithSpinsBeforeYield(good))
+		require.NoError(t, err, "spins %d", good)
+		assert.Equal(t, uint32(good), ring.spinsBeforeYield, "spins %d", good)
+	}
+
+	t.Run("spinsAboveMaxInt32", func(t *testing.T) {
+		if math.MaxInt < 1<<31 {
+			t.Skip("int cannot hold 2^31")
+		}
+		// The bound is computed at run time, because the constant 2^31 does not compile where
+		// int is 32 bits.
+		spins := math.MaxInt32
+		spins++
+		ring, err := New[int](16, WithSpinsBeforeYield(spins))
+		assert.ErrorIs(t, err, ErrInvalidSpinsBeforeYield)
+		assert.True(t, ring == nil)
+	})
+
+	ring, err = New[int](16)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(defaultSpinsBeforeYield), ring.spinsBeforeYield)
+
+	ring, err = New[int](16, WithSpinsBeforeYield(-1), WithSpinsBeforeYield(3))
+	require.NoError(t, err)
+	assert.Equal(t, uint32(3), ring.spinsBeforeYield)
 }
 
 // TestMaxEnqueueBatch checks that EnqueueBurst moves at most MaxEnqueueBatch, and that EnqueueBulk
@@ -2025,9 +2063,9 @@ func TestConcurrentWrap(t *testing.T) {
 }
 
 // TestGOMAXPROCSOne checks that every element arrives exactly once and in order in every stress
-// mode with only one CPU. Whether a waiter actually meets an unpublished predecessor depends on
-// preemption timing, so TestWaitForTail tests the wait itself. It does not call t.Parallel,
-// because GOMAXPROCS is process-wide.
+// mode with only one CPU, at the default spin bound and at bounds of 0 and 1. Whether a waiter
+// actually meets an unpublished predecessor depends on preemption timing, so TestWaitForTail tests
+// the wait itself. It does not call t.Parallel, because GOMAXPROCS is process-wide.
 func TestGOMAXPROCSOne(t *testing.T) {
 	const (
 		total = 100_000
@@ -2037,22 +2075,37 @@ func TestGOMAXPROCSOne(t *testing.T) {
 	t.Cleanup(func() { runtime.GOMAXPROCS(previous) })
 	for _, mode := range stressModes() {
 		t.Run(mode.name, func(t *testing.T) {
-			ring, err := New[uint64](64, mode.options...)
-			require.NoError(t, err)
-			enqueue, dequeue := burstCalls(ring)
+			spinBounds := []optionSet{
+				{name: "spins=default", options: mode.options},
+				{
+					name:    "spins=0",
+					options: slices.Concat(mode.options, []Option{WithSpinsBeforeYield(0)}),
+				},
+				{
+					name:    "spins=1",
+					options: slices.Concat(mode.options, []Option{WithSpinsBeforeYield(1)}),
+				},
+			}
+			for _, bound := range spinBounds {
+				t.Run(bound.name, func(t *testing.T) {
+					ring, err := New[uint64](64, bound.options...)
+					require.NoError(t, err)
+					enqueue, dequeue := burstCalls(ring)
 
-			perProducer := total / mode.producers
-			results := sendTagged(
-				t,
-				mode.producers,
-				mode.consumers,
-				perProducer,
-				batch,
-				batch,
-				enqueue,
-				dequeue,
-			)
-			assertTaggedDelivery(t, results, mode.producers, perProducer)
+					perProducer := total / mode.producers
+					results := sendTagged(
+						t,
+						mode.producers,
+						mode.consumers,
+						perProducer,
+						batch,
+						batch,
+						enqueue,
+						dequeue,
+					)
+					assertTaggedDelivery(t, results, mode.producers, perProducer)
+				})
+			}
 		})
 	}
 }
@@ -2060,8 +2113,9 @@ func TestGOMAXPROCSOne(t *testing.T) {
 // TestWaitForTail checks that waitForTail returns only once the tail equals want, not before and
 // not on some other change. With one CPU the waiter can run only when the test goroutine yields,
 // so each runtime.Gosched hands control to it, and a waiter that returns early is caught
-// reliably. The wrap case catches a wait that compares with < or > instead of equality. It does
-// not call t.Parallel, because GOMAXPROCS is process-wide.
+// reliably. The wrap case catches a wait that compares with < or > instead of equality. Every case
+// runs at spin bounds of 0, 1, and defaultSpinsBeforeYield. It does not call t.Parallel, because
+// GOMAXPROCS is process-wide.
 func TestWaitForTail(t *testing.T) {
 	const yields = 1000
 	previous := runtime.GOMAXPROCS(1)
@@ -2087,32 +2141,46 @@ func TestWaitForTail(t *testing.T) {
 			storesBefore: []uint32{math.MaxUint32},
 		},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			var tail atomic.Uint32
-			tail.Store(tc.start)
-			var returned atomic.Bool
-			var waiting sync.WaitGroup
-			waiting.Go(func() {
-				waitForTail(&tail, tc.want)
-				returned.Store(true)
-			})
+	for _, spins := range []int{0, 1, defaultSpinsBeforeYield} {
+		t.Run(fmt.Sprintf("spins=%d", spins), func(t *testing.T) {
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					var tail atomic.Uint32
+					tail.Store(tc.start)
+					var returned atomic.Bool
+					var waiting sync.WaitGroup
+					waiting.Go(func() {
+						waitForTail(&tail, tc.want, spins)
+						returned.Store(true)
+					})
 
-			for range yields {
-				runtime.Gosched()
+					for range yields {
+						runtime.Gosched()
+					}
+					require.False(
+						t,
+						returned.Load(),
+						"waitForTail returned with the tail at %d",
+						tc.start,
+					)
+
+					for _, value := range tc.storesBefore {
+						tail.Store(value)
+						for range yields {
+							runtime.Gosched()
+						}
+						require.False(
+							t,
+							returned.Load(),
+							"waitForTail returned with the tail at %d",
+							value,
+						)
+					}
+
+					tail.Store(tc.want)
+					stressDeadline(t, waiting.Wait)
+				})
 			}
-			require.False(t, returned.Load(), "waitForTail returned with the tail at %d", tc.start)
-
-			for _, value := range tc.storesBefore {
-				tail.Store(value)
-				for range yields {
-					runtime.Gosched()
-				}
-				require.False(t, returned.Load(), "waitForTail returned with the tail at %d", value)
-			}
-
-			tail.Store(tc.want)
-			stressDeadline(t, waiting.Wait)
 		})
 	}
 }
@@ -2122,20 +2190,12 @@ func TestWaitForTail(t *testing.T) {
 // before the release, so a wait that returned a head loaded before it waited would fail. It runs
 // with one CPU for the reason TestWaitForTail gives, and does not call t.Parallel, because
 // GOMAXPROCS is process-wide. The wrap case catches a distance computed without wrapping
-// arithmetic.
+// arithmetic. The ready check and every case run at spin bounds of 0, 1, and
+// defaultSpinsBeforeYield.
 func TestWaitHeadTailDistance(t *testing.T) {
 	const yields = 1000
 	previous := runtime.GOMAXPROCS(1)
 	t.Cleanup(func() { runtime.GOMAXPROCS(previous) })
-
-	var readyHead, readyTail atomic.Uint64
-	readyHead.Store(pack(10, 5))
-	readyTail.Store(pack(8, 5))
-	var got uint64
-	stressDeadline(t, func() {
-		got = waitHeadTailDistance(&readyHead, &readyTail, 2)
-	})
-	require.Equal(t, pack(10, 5), got)
 
 	cases := []struct {
 		name        string
@@ -2173,46 +2233,59 @@ func TestWaitHeadTailDistance(t *testing.T) {
 			release:     pack(math.MaxUint32, 8),
 		},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			var head, tail atomic.Uint64
-			head.Store(tc.head)
-			tail.Store(tc.tail)
-			var returnedWord atomic.Uint64
-			var returned atomic.Bool
-			var waiting sync.WaitGroup
-			waiting.Go(func() {
-				returnedWord.Store(waitHeadTailDistance(&head, &tail, tc.htdMax))
-				returned.Store(true)
+	for _, spins := range []int{0, 1, defaultSpinsBeforeYield} {
+		t.Run(fmt.Sprintf("spins=%d", spins), func(t *testing.T) {
+			var readyHead, readyTail atomic.Uint64
+			readyHead.Store(pack(10, 5))
+			readyTail.Store(pack(8, 5))
+			var got uint64
+			stressDeadline(t, func() {
+				got = waitHeadTailDistance(&readyHead, &readyTail, 2, spins)
 			})
+			require.Equal(t, pack(10, 5), got)
 
-			for range yields {
-				runtime.Gosched()
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					var head, tail atomic.Uint64
+					head.Store(tc.head)
+					tail.Store(tc.tail)
+					var returnedWord atomic.Uint64
+					var returned atomic.Bool
+					var waiting sync.WaitGroup
+					waiting.Go(func() {
+						returnedWord.Store(waitHeadTailDistance(&head, &tail, tc.htdMax, spins))
+						returned.Store(true)
+					})
+
+					for range yields {
+						runtime.Gosched()
+					}
+					require.False(
+						t,
+						returned.Load(),
+						"waitHeadTailDistance returned with the tail at %#x",
+						tc.tail,
+					)
+
+					for _, value := range tc.tailsBefore {
+						tail.Store(value)
+						for range yields {
+							runtime.Gosched()
+						}
+						require.False(
+							t,
+							returned.Load(),
+							"waitHeadTailDistance returned with the tail at %#x",
+							value,
+						)
+					}
+
+					head.Store(tc.newHead)
+					tail.Store(tc.release)
+					stressDeadline(t, waiting.Wait)
+					assert.Equal(t, tc.newHead, returnedWord.Load())
+				})
 			}
-			require.False(
-				t,
-				returned.Load(),
-				"waitHeadTailDistance returned with the tail at %#x",
-				tc.tail,
-			)
-
-			for _, value := range tc.tailsBefore {
-				tail.Store(value)
-				for range yields {
-					runtime.Gosched()
-				}
-				require.False(
-					t,
-					returned.Load(),
-					"waitHeadTailDistance returned with the tail at %#x",
-					value,
-				)
-			}
-
-			head.Store(tc.newHead)
-			tail.Store(tc.release)
-			stressDeadline(t, waiting.Wait)
-			assert.Equal(t, tc.newHead, returnedWord.Load())
 		})
 	}
 }
@@ -2226,6 +2299,84 @@ func TestSpinForTail(t *testing.T) {
 	require.True(t, spinForTail(&tail, 7, 1))
 	require.False(t, spinForTail(&tail, 8, 16))
 	require.False(t, spinForTail(&tail, 7, 0))
+	require.False(t, spinForTail(&tail, 8, defaultSpinsBeforeYield))
+}
+
+// TestWaitsYieldWithoutPreemption re-runs TestWaitForTail and TestWaitHeadTailDistance in a child
+// process with GOMAXPROCS=1 and asynchronous preemption off. In those tests the waiter runs in its
+// own goroutine, and the test goroutine stores the tail only after the waiter yields, so a wait
+// that never yields hangs the child every time. Without the child, the runtime's asynchronous
+// preemption would let such a wait finish. The parent checks that both tests passed in the child,
+// so a filter that selects neither cannot make it pass vacuously.
+func TestWaitsYieldWithoutPreemption(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping the child process in short mode")
+	}
+	if os.Getenv("RING_WAIT_CHILD") != "" {
+		t.Skip("already running in the child process")
+	}
+	switch runtime.GOOS {
+	case "js", "wasip1", "ios":
+		t.Skip("cannot start a child process on " + runtime.GOOS)
+	}
+
+	exe, err := os.Executable()
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(
+		ctx,
+		exe,
+		"-test.run=^(TestWaitForTail|TestWaitHeadTailDistance)$",
+		"-test.count=1",
+		"-test.v",
+	)
+	cmd.Env = append(
+		childTestEnv(),
+		"RING_WAIT_CHILD=1",
+		"GOMAXPROCS=1",
+		"GODEBUG=asyncpreemptoff=1",
+	)
+
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("the child did not finish within 30 seconds, so a wait never yielded:\n%s", output)
+	}
+	require.NoError(t, err, "child output:\n%s", output)
+	require.Contains(
+		t,
+		string(output),
+		"\n--- PASS: TestWaitForTail (",
+		"child output:\n%s",
+		output,
+	)
+	require.Contains(
+		t,
+		string(output),
+		"\n--- PASS: TestWaitHeadTailDistance (",
+		"child output:\n%s",
+		output,
+	)
+}
+
+// childTestEnv returns this process's environment without Bazel's test filter and sharding
+// variables. rules_go would turn TESTBRIDGE_TEST_ONLY, the parent's own test filter, into the
+// child's filter in place of its -test.run. TEST_SHARD_INDEX and TEST_TOTAL_SHARDS would make the
+// child run only its shard's share of the tests, which could leave out either wait test, and
+// TEST_SHARD_STATUS_FILE goes with them because it tells Bazel the test supports sharding.
+func childTestEnv() []string {
+	removed := []string{
+		"TESTBRIDGE_TEST_ONLY",
+		"TEST_SHARD_INDEX",
+		"TEST_TOTAL_SHARDS",
+		"TEST_SHARD_STATUS_FILE",
+	}
+	return slices.DeleteFunc(os.Environ(), func(entry string) bool {
+		return slices.ContainsFunc(removed, func(name string) bool {
+			return strings.HasPrefix(entry, name+"=")
+		})
+	})
 }
 
 // TestPack checks that unpackPos and unpackCnt return the fields pack put in, at the edges of
@@ -2717,7 +2868,8 @@ func TestCountBounds(t *testing.T) {
 }
 
 // TestErrorIdentity checks that every call returns ErrFull and ErrEmpty unwrapped, so they compare
-// equal with ==, and that each bulk call's ErrExceedsCapacity error matches with errors.Is.
+// equal with ==, and that each bulk call's ErrExceedsCapacity error and New's
+// ErrInvalidSpinsBeforeYield error match with errors.Is.
 func TestErrorIdentity(t *testing.T) {
 	ring, err := New[int](4)
 	require.NoError(t, err)
@@ -2737,6 +2889,9 @@ func TestErrorIdentity(t *testing.T) {
 	assert.ErrorIs(t, err, ErrExceedsCapacity)
 	_, err = ring.DequeueBulk(make([]int, 5))
 	assert.ErrorIs(t, err, ErrExceedsCapacity)
+
+	_, err = New[int](4, WithSpinsBeforeYield(-1))
+	assert.ErrorIs(t, err, ErrInvalidSpinsBeforeYield)
 }
 
 // cacheModes returns the option sets the cache tests run under: one goroutine per side, multi on

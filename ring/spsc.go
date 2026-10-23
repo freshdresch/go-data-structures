@@ -6,20 +6,26 @@ import (
 )
 
 type spscProducer[T any] struct {
-	entries          []T
-	mask             uint32
-	cursor           uint32
-	cachedConsumer   uint32
+	entries        []T
+	mask           uint32
+	cursor         uint32
+	cachedConsumer uint32
+	// The full gap separates private writes from remote-polled publication lines
+	// at every base phase for line widths up to cacheLine.
+	_                [cacheLine]byte
 	published        atomic.Uint32
 	maxBatch         uint32
 	exactBatchCounts bool
 }
 
 type spscConsumer[T any] struct {
-	entries          []T
-	mask             uint32
-	cursor           uint32
-	cachedProducer   uint32
+	entries        []T
+	mask           uint32
+	cursor         uint32
+	cachedProducer uint32
+	// The full gap separates private writes from remote-polled publication lines
+	// at every base phase for line widths up to cacheLine.
+	_                [cacheLine]byte
 	published        atomic.Uint32
 	clearOnDequeue   bool
 	maxBatch         uint32

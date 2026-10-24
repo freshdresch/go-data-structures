@@ -4,6 +4,7 @@ go_library(
     name = "ring",
     srcs = [
         "ring.go",
+        "spmc.go",
         "spsc.go",
     ],
     importpath = "github.com/freshdresch/go-data-structures/ring",
@@ -15,6 +16,10 @@ go_test(
     srcs = [
         "alignment_test.go",
         "ring_test.go",
+        "spmc_alloc_test.go",
+        "spmc_concurrency_test.go",
+        "spmc_layout_test.go",
+        "spmc_test.go",
         "spsc_alloc_test.go",
         "spsc_bulk_one_test.go",
         "spsc_burst_one_test.go",
@@ -43,6 +48,8 @@ go_test(
         "bench_test.go",
         "race_off_test.go",
         "race_on_test.go",
+        "spmc_bench_test.go",
+        "spmc_bench_harness_test.go",
         "spsc_bench_test.go",
         "spsc_concrete_bench_test.go",
         "spsc_bench_harness_test.go",

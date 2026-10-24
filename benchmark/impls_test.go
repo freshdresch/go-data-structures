@@ -92,11 +92,11 @@ func compareImpls[T any, S sink[T]]() map[string]compareImpl[T, S] {
 	return map[string]compareImpl[T, S]{
 		"ring": {
 			run: pollingRun[T, S](func(mode benchMode) (queue[T], *runState, error) {
-				created, err := newModeRing[T](mode)
+				created, err := newModeRing[T](mode, nil, false)
 				if err != nil {
 					return nil, nil, err
 				}
-				return &ringBurstQueue[T]{ring: created}, newRunState(nil), nil
+				return created, newRunState(nil), nil
 			}),
 			checkCapacity: func(t *testing.T, mode benchMode) int {
 				return checkCompareCapacity(t, "ring", mode)
@@ -104,11 +104,11 @@ func compareImpls[T any, S sink[T]]() map[string]compareImpl[T, S] {
 		},
 		"ring-exact": {
 			run: pollingRun[T, S](func(mode benchMode) (queue[T], *runState, error) {
-				created, err := newModeRing[T](mode, ring.WithExactBatchCounts())
+				created, err := newModeRing[T](mode, nil, false, ring.WithExactBatchCounts())
 				if err != nil {
 					return nil, nil, err
 				}
-				return &ringBurstQueue[T]{ring: created}, newRunState(nil), nil
+				return created, newRunState(nil), nil
 			}),
 			checkCapacity: func(t *testing.T, mode benchMode) int {
 				return checkCompareCapacity(t, "ring-exact", mode)
@@ -116,12 +116,12 @@ func compareImpls[T any, S sink[T]]() map[string]compareImpl[T, S] {
 		},
 		"ring-single": {
 			run: pollingRun[T, S](func(mode benchMode) (queue[T], *runState, error) {
-				created, err := newModeRing[T](mode)
+				state := newRunState(nil)
+				created, err := newModeRing[T](mode, state, true)
 				if err != nil {
 					return nil, nil, err
 				}
-				state := newRunState(nil)
-				return &ringSingleQueue[T]{ring: created, state: state}, state, nil
+				return created, state, nil
 			}),
 			checkCapacity: func(t *testing.T, mode benchMode) int {
 				return checkCompareCapacity(t, "ring-single", mode)
@@ -129,11 +129,11 @@ func compareImpls[T any, S sink[T]]() map[string]compareImpl[T, S] {
 		},
 		"ring-rts": {
 			run: pollingRun[T, S](func(mode benchMode) (queue[T], *runState, error) {
-				created, err := newModeRing[T](rtsMode(mode))
+				created, err := newModeRing[T](rtsMode(mode), nil, false)
 				if err != nil {
 					return nil, nil, err
 				}
-				return &ringBurstQueue[T]{ring: created}, newRunState(nil), nil
+				return created, newRunState(nil), nil
 			}),
 			checkCapacity: func(t *testing.T, mode benchMode) int {
 				return checkCompareCapacity(t, "ring-rts", mode)
@@ -177,9 +177,15 @@ func compareImpls[T any, S sink[T]]() map[string]compareImpl[T, S] {
 
 // newTestRing returns a ring built for mode with the extra options, failing the test if it cannot
 // be built.
-func newTestRing[T any](t *testing.T, mode benchMode, extra ...ring.Option) *ring.Ring[T] {
+func newTestRing[T any](
+	t *testing.T,
+	mode benchMode,
+	state *runState,
+	single bool,
+	extra ...ring.Option,
+) queue[T] {
 	t.Helper()
-	created, err := newModeRing[T](mode, extra...)
+	created, err := newModeRing[T](mode, state, single, extra...)
 	if err != nil {
 		t.Fatalf("build ring for %s: %v", mode.name, err)
 	}

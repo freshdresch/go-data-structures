@@ -8,6 +8,34 @@ import (
 	"unsafe"
 )
 
+// WithMultiProdEnqueue returns an Option that makes the enqueue methods safe for concurrent use by
+// multiple producers. When it and WithRelaxedMultiProdEnqueue are both given, the last one
+// applies. MPSCQueue and MPMCQueue accept this option. SPSCQueue and SPMCQueue reject it.
+//
+// A producer stalled between loading the producer head and its compare-and-swap, while a multiple
+// of 2^32 elements pass through, would reserve with a stale count and could overwrite unconsumed
+// elements. DPDK has the same exposure, and that many operations during one stall is far outside
+// practical use.
+func WithMultiProdEnqueue() Option {
+	return func(cfg *config) {
+		cfg.prodMode = modeMulti
+	}
+}
+
+// WithMultiConsDequeue returns an Option that makes the dequeue methods safe for concurrent use by
+// multiple consumers. When it and WithRelaxedMultiConsDequeue are both given, the last one
+// applies. SPMCQueue and MPMCQueue accept this option. SPSCQueue and MPSCQueue reject it.
+//
+// A consumer stalled between loading the consumer head and its compare-and-swap, while a multiple
+// of 2^32 elements pass through, would reserve with a stale count and could return elements
+// twice. DPDK has the same exposure, and that many operations during one stall is far outside
+// practical use.
+func WithMultiConsDequeue() Option {
+	return func(cfg *config) {
+		cfg.consMode = modeMulti
+	}
+}
+
 // admission is how a head move decides whether a request fits: by the cached copy of the other
 // side's tail, or by a fresh load of it. The cache saves reading the other side's line, but a
 // count computed from it can be stale. A batch call admits by a fresh load when it must return a

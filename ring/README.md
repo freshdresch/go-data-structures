@@ -3,7 +3,10 @@
 The `ring` package provides four fixed-capacity FIFO queue topologies modeled on DPDK's
 `rte_ring`. Its documentation is in the package's doc comments.
 
-[`benchmark/README.md`](../benchmark/README.md) compares the ring with other Go queues.
+Third-party comparison reports cover [SPSCQueue](../benchmark/ring/spsc.md),
+[SPMCQueue](../benchmark/ring/spmc.md), [MPSCQueue](../benchmark/ring/mpsc.md), and
+[MPMCQueue](../benchmark/ring/mpmc.md). See [benchmark methodology](../benchmark/README.md)
+for run instructions and measurement limits.
 
 Each single side permits one operation at a time across all its methods, including failed and
 zero-length calls. Owners may change goroutines, but callers must synchronize every handoff
@@ -20,14 +23,12 @@ expresses its topology and ownership. Performance depends on the workload.
 
 `Ring` and `New` were retired without compatibility aliases. The generalized implementation
 remains in `reference_test.go` as an internal benchmark and parity reference. It compiles only
-during tests and is unavailable to ordinary package imports. Historical performance findings
-below compare the queues with that generalized reference.
+during tests and is unavailable to ordinary package imports.
 
 All constructors accept the shared `Option` family. This directly replaces the old
 `SPSC`, `MPSC`, and `SPMC` names, their constructors, and their prefixed option families.
 Migrate calls to the `Queue` names and common options, such as `WithMaxBatch` and
-`WithoutDequeueClearing`. There are no compatibility aliases. Historical results retain
-the API names used when they were captured.
+`WithoutDequeueClearing`. There are no compatibility aliases.
 
 ```go
 queue, err := ring.NewMPSCQueue[int](1024,
@@ -94,24 +95,3 @@ numeric check precedes its applicability check.
 `MPMCQueue` uses five groups separated by four full 128-byte gaps. Its Go object size
 is 632 bytes on the native 64-bit ABI and 616 bytes on 386, with 8-byte alignment on both.
 These sizes exclude backing storage and allocator overhead.
-
-## MPSC performance
-
-The specialized `MPSCQueue` is retained with a known pointer batch-32 throughput regression against
-the generalized internal `Ring` reference configured with `WithMultiProdEnqueue`. The initial
-four-producer, one-consumer comparison measured 4.6–6.3% longer times for pointer bulk and burst
-batches of 32. Follow-up experiments
-reproduced the burst penalty, while bulk comparisons varied across binaries. The cause remains
-unresolved, and further investigation is deferred.
-
-The [matched comparison](../benchmark/results/2026-10-24-mpsc-ring/README.md) and
-[diagnostic results](../benchmark/results/2026-10-24-mpsc-pointer32-alignment/README.md) preserve
-the measurements and their limits.
-
-## MPMC performance
-
-The [matched ordered 4P/4C comparison](../benchmark/results/2026-10-24-mpmc-ring/README.md)
-measured 9.5–14.7% lower time per element for `MPMCQueue` than the generalized internal `Ring`
-reference across single, bulk-1/32 and burst-1/32 for int64 and pointers in both interleaved seeds.
-All 20 individual comparison intervals excluded zero. These results apply to the recorded
-machine and workload. RTS performance was not measured.

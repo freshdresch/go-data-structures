@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -92,6 +93,29 @@ func TestCompareCapacity(t *testing.T) {
 				}
 				t.Logf("capacity: impl=%s mode=%s slots=%d reuse=true", row.name, mode.name, slots)
 			})
+		}
+	}
+}
+
+func TestModeRingTopology(t *testing.T) {
+	for _, mode := range benchModes {
+		for _, single := range []bool{false, true} {
+			for _, relaxed := range []bool{false, true} {
+				testMode := mode
+				testMode.relaxed = relaxed
+				target := newTestRing[int64](t, testMode, newRunState(nil), single)
+				api := "Burst"
+				if single {
+					api = "Single"
+				}
+				want := fmt.Sprintf("*benchmark.%s%sQueue[int64]", strings.ToLower(mode.name), api)
+				if got := fmt.Sprintf("%T", target); got != want {
+					t.Errorf(
+						"mode=%s single=%v relaxed=%v: got %s, want %s",
+						mode.name, single, relaxed, got, want,
+					)
+				}
+			}
 		}
 	}
 }
@@ -232,7 +256,7 @@ func TestRingAdapterOutcomes(t *testing.T) {
 		for _, original := range []error{nil, expected, opposite, errors.New("unexpected"),
 			fmt.Errorf("wrapped: %w", expected)} {
 			state := newRunState(nil)
-			target := &ringSingleQueue[int64]{state: state}
+			target := &ringSingleQueue{state: state}
 			want := 0
 			if original == nil {
 				want = 1
@@ -273,9 +297,9 @@ func checkCompareCapacity(t *testing.T, name string, mode benchMode) int {
 		if name == "ring-rts" {
 			mode = rtsMode(mode)
 		}
-		target = &ringBurstQueue[int64]{ring: newTestRing[int64](t, mode, options...)}
+		target = newTestRing[int64](t, mode, state, false, options...)
 	case "ring-single":
-		target = &ringSingleQueue[int64]{ring: newTestRing[int64](t, mode), state: state}
+		target = newTestRing[int64](t, mode, state, true)
 	case "mutex":
 		target = newMutexQueue[int64]()
 	case "xsync":

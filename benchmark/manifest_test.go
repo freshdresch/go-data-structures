@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -29,6 +30,7 @@ type benchmarkManifestRow struct {
 	Callers           int      `json:"callers"`
 	Participants      int      `json:"participants"`
 	QueueCount        int      `json:"queue_count"`
+	RingType          *string  `json:"ring_type"`
 	RingOptions       []string `json:"ring_options"`
 	RingOptionsReason string   `json:"ring_options_reason"`
 	ProducerWait      *string  `json:"producer_wait"`
@@ -43,21 +45,29 @@ type benchmarkManifestRow struct {
 
 func manifestPointer[T any](value T) *T { return &value }
 
+func manifestRingType(mode benchMode) string {
+	switch {
+	case mode.producers > 1 && mode.consumers > 1:
+		return "MPMCQueue"
+	case mode.producers > 1:
+		return "MPSCQueue"
+	case mode.consumers > 1:
+		return "SPMCQueue"
+	default:
+		return "SPSCQueue"
+	}
+}
+
 func manifestRingOptions(mode benchMode) []string {
 	options := []string{}
+	if !mode.relaxed {
+		return options
+	}
 	if mode.producers > 1 {
-		option := "WithMultiProdEnqueue"
-		if mode.relaxed {
-			option = "WithRelaxedMultiProdEnqueue"
-		}
-		options = append(options, option)
+		options = append(options, "WithRelaxedMultiProdEnqueue")
 	}
 	if mode.consumers > 1 {
-		option := "WithMultiConsDequeue"
-		if mode.relaxed {
-			option = "WithRelaxedMultiConsDequeue"
-		}
-		options = append(options, option)
+		options = append(options, "WithRelaxedMultiConsDequeue")
 	}
 	return options
 }
@@ -68,6 +78,7 @@ func manifestRow(name, implementation string, mode benchMode, batch int) benchma
 		APIReason: "implementation adapter", Element: "int64", Batch: batch,
 		UsableCapacity: ringCapacity, Producers: manifestPointer(mode.producers),
 		Consumers: manifestPointer(mode.consumers), QueueCount: 1,
+		RingType:      manifestPointer(manifestRingType(mode)),
 		RingOptions:   manifestRingOptions(mode),
 		ProducerWait:  manifestPointer("runtime.Gosched after each unsuccessful enqueue attempt"),
 		ConsumerWait:  manifestPointer("runtime.Gosched after each unsuccessful dequeue attempt"),
@@ -134,6 +145,37 @@ func TestBenchmarkManifestRows(t *testing.T) {
 	checkManifestExamples(t, first.Rows)
 }
 
+func TestBenchmarkManifestRingConfiguration(t *testing.T) {
+	for _, row := range buildBenchmarkManifest().Rows {
+		if !strings.HasPrefix(row.Implementation, "ring") {
+			if row.RingType != nil {
+				t.Errorf("%s has ring type %q", row.Name, *row.RingType)
+			}
+			continue
+		}
+		mode := strings.Split(strings.Split(row.Name, "mode=")[1], "/")[0]
+		wantType := mode + "Queue"
+		if row.RingType == nil || *row.RingType != wantType {
+			t.Errorf("%s: ring type = %v, want %s", row.Name, row.RingType, wantType)
+		}
+		wantOptions := []string{}
+		if row.Implementation == "ring-rts" {
+			if mode == "MPSC" || mode == "MPMC" {
+				wantOptions = append(wantOptions, "WithRelaxedMultiProdEnqueue")
+			}
+			if mode == "SPMC" || mode == "MPMC" {
+				wantOptions = append(wantOptions, "WithRelaxedMultiConsDequeue")
+			}
+		}
+		if row.Implementation == "ring-exact" {
+			wantOptions = append(wantOptions, "WithExactBatchCounts")
+		}
+		if !slices.Equal(row.RingOptions, wantOptions) {
+			t.Errorf("%s: options = %v, want %v", row.Name, row.RingOptions, wantOptions)
+		}
+	}
+}
+
 func buildBenchmarkManifest() benchmarkManifest {
 	manifest := benchmarkManifest{Schema: 1, GOMAXPROCS: runtime.GOMAXPROCS(0)}
 	for _, implementation := range compareRows {
@@ -160,6 +202,7 @@ func buildBenchmarkManifest() benchmarkManifest {
 							row.RingOptions = append(row.RingOptions, "WithExactBatchCounts")
 						}
 					} else {
+						row.RingType = nil
 						row.RingOptions = nil
 						row.RingOptionsReason = "implementation is not a ring"
 					}

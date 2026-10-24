@@ -36,45 +36,16 @@ type config struct {
 // capacity. Options never change a queue's fixed producer/consumer topology.
 // Incompatible modes, serialized-side distances, and explicit SPSCQueue spins wrap
 // ErrUnsupportedOption. A distance on an ordered side wraps ErrHeadTailDistanceRequiresRelaxed.
-// Numeric distance errors precede applicability.
+// Numeric distance errors precede applicability. Concurrent sides use ordered publication by
+// default. WithRelaxedMultiProdEnqueue and WithRelaxedMultiConsDequeue select RTS at construction.
 type Option func(*config)
 
-// WithMultiProdEnqueue returns an Option that makes the enqueue methods safe for concurrent use by
-// multiple producers. When it and WithRelaxedMultiProdEnqueue are both given, the last one
-// applies. MPSCQueue and MPMCQueue accept this option. SPSCQueue and SPMCQueue reject it.
+// WithRelaxedMultiProdEnqueue returns an Option that selects relaxed tail sync, DPDK's RTS mode,
+// for producers at construction. MPSCQueue and MPMCQueue accept this option. SPSCQueue and
+// SPMCQueue reject it.
 //
-// A producer stalled between loading the producer head and its compare-and-swap, while a multiple
-// of 2^32 elements pass through, would reserve with a stale count and could overwrite unconsumed
-// elements. DPDK has the same exposure, and that many operations during one stall is far outside
-// practical use.
-func WithMultiProdEnqueue() Option {
-	return func(cfg *config) {
-		cfg.prodMode = modeMulti
-	}
-}
-
-// WithMultiConsDequeue returns an Option that makes the dequeue methods safe for concurrent use by
-// multiple consumers. When it and WithRelaxedMultiConsDequeue are both given, the last one
-// applies. SPMCQueue and MPMCQueue accept this option. SPSCQueue and MPSCQueue reject it.
-//
-// A consumer stalled between loading the consumer head and its compare-and-swap, while a multiple
-// of 2^32 elements pass through, would reserve with a stale count and could return elements
-// twice. DPDK has the same exposure, and that many operations during one stall is far outside
-// practical use.
-func WithMultiConsDequeue() Option {
-	return func(cfg *config) {
-		cfg.consMode = modeMulti
-	}
-}
-
-// WithRelaxedMultiProdEnqueue returns an Option that makes the enqueue methods safe for concurrent
-// use by multiple producers, with relaxed tail sync, DPDK's RTS mode. When it and
-// WithMultiProdEnqueue are both given, the last one applies. MPSCQueue and MPMCQueue
-// accept this option.
-// SPSCQueue and SPMCQueue reject it.
-//
-// With WithMultiProdEnqueue, a producer publishes only after every producer that reserved before
-// it has published. With this option a producer finishes without waiting for the others, and
+// By default, a producer on a concurrent side publishes only after every producer that reserved
+// before it has published. With this option a producer finishes without waiting for the others, and
 // consumers see the producers' elements once every reservation made so far has finished. A
 // producer descheduled at any point from its reservation to the end of its call still holds back
 // every element reserved after it, and an enqueue can return before consumers can see its
@@ -86,7 +57,7 @@ func WithMultiConsDequeue() Option {
 // and zero-length calls can wait. Bulk length errors return before this wait.
 //
 // Whether this mode is faster depends on the machine and the batch size. Each call does two more
-// atomic read-modify-writes than WithMultiProdEnqueue, one to publish and one to update the tail
+// atomic read-modify-writes than ordered publication, one to publish and one to update the tail
 // that consumers read, in exchange for not waiting for the producers that reserved before it. In
 // the ring's MPSC, SPMC, and MPMC throughput benchmarks, it made batches of 32 or 64 elements 14 to
 // 36% faster per element on an Apple M3 Pro, and batches of 1 or 8 elements 3 to 12% slower. On an
@@ -95,8 +66,8 @@ func WithMultiConsDequeue() Option {
 // A producer stalled between loading the producer head and its compare-and-swap, while a multiple
 // of 2^32 reservations pass through, would succeed with a stale view. The head holds both a
 // position and a count of reservations, and both must match. The publish and the update of the
-// tail that consumers read are compare-and-swaps with the same exposure. As with
-// WithMultiProdEnqueue, that many operations during one stall is far outside practical use.
+// tail that consumers read are compare-and-swaps with the same exposure. As with ordered
+// publication, that many operations during one stall is far outside practical use.
 //
 // On platforms that implement 64-bit atomics with a lock, such as mips, this mode is correct but
 // not lock-free.
@@ -106,15 +77,13 @@ func WithRelaxedMultiProdEnqueue() Option {
 	}
 }
 
-// WithRelaxedMultiConsDequeue returns an Option that makes the dequeue methods safe for concurrent
-// use by multiple consumers, with relaxed tail sync, DPDK's RTS mode. When it and
-// WithMultiConsDequeue are both given, the last one applies. SPMCQueue and MPMCQueue
-// accept this option.
-// SPSCQueue and MPSCQueue reject it.
+// WithRelaxedMultiConsDequeue returns an Option that selects relaxed tail sync, DPDK's RTS mode,
+// for consumers at construction. SPMCQueue and MPMCQueue accept this option. SPSCQueue and
+// MPSCQueue reject it.
 //
-// With WithMultiConsDequeue, a consumer releases its slots only after every consumer that reserved
-// before it has released theirs. With this option a consumer finishes without waiting for the
-// others, and producers can reuse the consumers' slots once every reservation made so far has
+// By default, a consumer on a concurrent side releases its slots only after every consumer that
+// reserved before it has released theirs. With this option a consumer finishes without waiting for
+// the others, and producers can reuse the consumers' slots once every reservation made so far has
 // finished. A consumer descheduled at any point from its reservation to the end of its call still
 // holds back the release of every slot reserved after it, and Count can include elements a
 // dequeue has already returned. Before every reservation attempt, consumers wait while head
@@ -126,7 +95,7 @@ func WithRelaxedMultiProdEnqueue() Option {
 // before this wait.
 //
 // Whether this mode is faster depends on the machine and the batch size. Each call does two more
-// atomic read-modify-writes than WithMultiConsDequeue, one to release its slots and one to update
+// atomic read-modify-writes than ordered publication, one to release its slots and one to update
 // the tail that producers read, in exchange for not waiting for the consumers that reserved before
 // it. In the ring's MPSC, SPMC, and MPMC throughput benchmarks, it made batches of 32 or 64
 // elements 14 to 36% faster per element on an Apple M3 Pro, and batches of 1 or 8 elements 3 to 12%
@@ -135,8 +104,8 @@ func WithRelaxedMultiProdEnqueue() Option {
 // A consumer stalled between loading the consumer head and its compare-and-swap, while a multiple
 // of 2^32 reservations pass through, would succeed with a stale view. The head holds both a
 // position and a count of reservations, and both must match. The release and the update of the
-// tail that producers read are compare-and-swaps with the same exposure. As with
-// WithMultiConsDequeue, that many operations during one stall is far outside practical use.
+// tail that producers read are compare-and-swaps with the same exposure. As with ordered
+// publication, that many operations during one stall is far outside practical use.
 //
 // On platforms that implement 64-bit atomics with a lock, such as mips, this mode is correct but
 // not lock-free.
@@ -152,8 +121,8 @@ func WithRelaxedMultiConsDequeue() Option {
 // the enqueue batch may be as large as the capacity. Constructors return an error wrapping
 // ErrInvalidMaxBatch when the limit is below 1 or above the count.
 //
-// The limit bounds how long one enqueue can make others wait. With WithMultiProdEnqueue, a
-// producer publishes only after every producer that reserved before it has published, so a long
+// The limit bounds how long one enqueue can make others wait. With default ordered publication,
+// a producer publishes only after every producer that reserved before it has published, so a long
 // batch delays every producer that reserved after it until its copy finishes. With
 // WithRelaxedMultiProdEnqueue, it delays consumers' view of every element reserved after it
 // instead. With one producer or many, a batch is published all at once, so consumers see none of
@@ -174,8 +143,8 @@ func WithMaxEnqueueBatch(n int) Option {
 // the dequeue batch may be as large as the capacity. Constructors return an error wrapping
 // ErrInvalidMaxBatch when the limit is below 1 or above the count.
 //
-// The limit bounds how long one dequeue can make others wait. With WithMultiConsDequeue, a
-// consumer releases its slots only after every consumer that reserved before it has released
+// The limit bounds how long one dequeue can make others wait. With default ordered publication,
+// a consumer releases its slots only after every consumer that reserved before it has released
 // theirs, so a long batch delays every consumer that reserved after it until its copy finishes.
 // With WithRelaxedMultiConsDequeue, it delays the release of every slot reserved after it
 // instead. With one consumer or many, a batch's slots are released all at once, so producers
@@ -228,10 +197,9 @@ func WithoutDequeueClearing() Option {
 // fresh load reports 1023 free, while a cache that still holds the consumer at 0 reports 23.
 //
 // With one goroutine on the caller's side, a stale count is never more than the real value at the
-// time of the call. With WithMultiProdEnqueue, WithMultiConsDequeue, or a relaxed option on the
-// caller's side, the count is a snapshot, as an exact one is, because the side's other goroutines
-// reserve at the same time, so it can be higher or lower than the real value by the time the
-// caller reads it.
+// time of the call. With concurrent callers on the same side, under ordered publication or RTS,
+// the count is a snapshot, as an exact one is, because the side's other goroutines reserve at the
+// same time, so it can be higher or lower than the real value by the time the caller reads it.
 //
 // So by default the counts can under-report, and must not drive blocking or wakeup decisions, or
 // size the next request. Two examples:
@@ -259,10 +227,10 @@ func WithExactBatchCounts() Option {
 }
 
 // WithSpinsBeforeYield returns an Option that sets how many times a waiting goroutine checks
-// before it starts yielding with runtime.Gosched. It affects only a side set with
-// WithMultiProdEnqueue, WithMultiConsDequeue, or a relaxed option, because a single side never
-// waits. When it is given more than once, the last one applies. The default is
-// defaultSpinsBeforeYield, 8192. Constructors wrap ErrInvalidSpinsBeforeYield when n is below 0
+// before it starts yielding with runtime.Gosched. It affects only concurrent sides, under default
+// ordered publication or RTS, because a single side never waits. When it is given more than once,
+// the last one applies. The default is defaultSpinsBeforeYield, 8192. Constructors wrap
+// ErrInvalidSpinsBeforeYield when n is below 0
 // or above math.MaxInt32. SPSCQueue rejects every explicit spin option with ErrUnsupportedOption
 // after numeric and topology validation.
 //

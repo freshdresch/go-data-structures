@@ -1,7 +1,7 @@
 # ring
 
-The `ring` package is a fixed-size, lock-free ring buffer modeled on DPDK's `rte_ring`. Its
-documentation is in the package's doc comments.
+The `ring` package provides four fixed-capacity FIFO queue topologies modeled on DPDK's
+`rte_ring`. Its documentation is in the package's doc comments.
 
 [`benchmark/README.md`](../benchmark/README.md) compares the ring with other Go queues.
 
@@ -14,10 +14,14 @@ with a happens-before edge, such as a mutex or channel. Opposite-side operations
 publication of the reset ring to future users. Reset clears every slot, including when
 `WithoutDequeueClearing` is set, and zeroes all positions and caches.
 
-The specialized types are `SPSCQueue`, `MPSCQueue`, `SPMCQueue`, and `MPMCQueue`, constructed
-with `NewSPSCQueue`, `NewMPSCQueue`, `NewSPMCQueue`, and `NewMPMCQueue`. Prefer a specialized
-queue for a known topology because its API expresses ownership. Performance depends on the
-workload. `Ring` remains the generalized comparison reference.
+The public types are `SPSCQueue`, `MPSCQueue`, `SPMCQueue`, and `MPMCQueue`, constructed
+with `NewSPSCQueue`, `NewMPSCQueue`, `NewSPMCQueue`, and `NewMPMCQueue`. Each queue API
+expresses its topology and ownership. Performance depends on the workload.
+
+`Ring` and `New` were retired without compatibility aliases. The generalized implementation
+remains in `reference_test.go` as an internal benchmark and parity reference. It compiles only
+during tests and is unavailable to ordinary package imports. Historical performance findings
+below compare the queues with that generalized reference.
 
 All constructors accept the shared `Option` family. This directly replaces the old
 `SPSC`, `MPSC`, and `SPMC` names, their constructors, and their prefixed option families.
@@ -50,8 +54,8 @@ and exact batch counts apply to every queue. Options apply in order, and constru
 validate only final values. A distance option never selects RTS.
 
 `WithMaxProducerHeadTailDistance` and `WithMaxConsumerHeadTailDistance` configure their
-corresponding RTS sides on `Ring` and specialized queues. Distances count element
-positions, not reservations, bytes, or goroutines. Valid values are
+corresponding RTS sides on the queues. Distances count element positions, not reservations,
+bytes, or goroutines. Valid values are
 `[0, math.MaxUint32]`, limited to values representable as `int` on the target platform.
 Omission uses `count / 8`, rounded down, which is zero below capacity eight. Explicit
 zero allows the next reservation only after earlier reservations finish publication.
@@ -81,8 +85,8 @@ before options run. Invalid batches wrap `ErrInvalidMaxBatch`, and invalid spin 
 wrap `ErrInvalidSpinsBeforeYield`. Incompatible final topology options and explicit
 SPSC spins wrap `ErrUnsupportedOption`. Invalid distance numbers wrap
 `ErrInvalidMaxHeadTailDistance`. Valid distances on serialized specialized sides wrap
-`ErrUnsupportedOption`. Distances on ordered specialized sides or any non-RTS `Ring`
-side wrap `ErrHeadTailDistanceRequiresRelaxed`. Use `errors.Is` to inspect these errors.
+`ErrUnsupportedOption`. Distances on ordered sides wrap
+`ErrHeadTailDistanceRequiresRelaxed`. Use `errors.Is` to inspect these errors.
 Validation checks enqueue batch, dequeue batch, spin number, producer mode, consumer
 mode, explicit SPSC spin, producer distance, then consumer distance. Each distance's
 numeric check precedes its applicability check.
@@ -94,8 +98,9 @@ These sizes exclude backing storage and allocator overhead.
 ## MPSC performance
 
 The specialized `MPSCQueue` is retained with a known pointer batch-32 throughput regression against
-`Ring` configured with `WithMultiProdEnqueue`. The initial four-producer, one-consumer comparison
-measured 4.6–6.3% longer times for pointer bulk and burst batches of 32. Follow-up experiments
+the generalized internal `Ring` reference configured with `WithMultiProdEnqueue`. The initial
+four-producer, one-consumer comparison measured 4.6–6.3% longer times for pointer bulk and burst
+batches of 32. Follow-up experiments
 reproduced the burst penalty, while bulk comparisons varied across binaries. The cause remains
 unresolved, and further investigation is deferred.
 
@@ -106,7 +111,7 @@ the measurements and their limits.
 ## MPMC performance
 
 The [matched ordered 4P/4C comparison](../benchmark/results/2026-10-24-mpmc-ring/README.md)
-measured 9.5–14.7% lower time per element for `MPMCQueue` than generalized `Ring` across
-single, bulk-1/32 and burst-1/32 for int64 and pointers in both interleaved seeds.
+measured 9.5–14.7% lower time per element for `MPMCQueue` than the generalized internal `Ring`
+reference across single, bulk-1/32 and burst-1/32 for int64 and pointers in both interleaved seeds.
 All 20 individual comparison intervals excluded zero. These results apply to the recorded
 machine and workload. RTS performance was not measured.

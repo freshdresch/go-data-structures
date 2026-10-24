@@ -8,7 +8,7 @@ import (
 )
 
 type spscQueue[T any] struct {
-	ring *ring.SPSC[T]
+	ring *ring.SPSCQueue[T]
 }
 
 func (q *spscQueue[T]) enqueue(items []T) int {
@@ -22,7 +22,7 @@ func (q *spscQueue[T]) dequeue(dst []T) int {
 }
 
 func newSPSCAPIQueue[T any](api ringAPI) (queue[T], error) {
-	created, err := ring.NewSPSC[T](ringCapacity)
+	created, err := ring.NewSPSCQueue[T](ringCapacity)
 	if err != nil {
 		return nil, err
 	}
@@ -41,7 +41,7 @@ func newSPSCAPIQueue[T any](api ringAPI) (queue[T], error) {
 // spscSingleQueue drives the SPSC ring through Enqueue and Dequeue, moving at most one element per
 // call. It is rewritten when the SPSC ring API changes.
 type spscSingleQueue[T any] struct {
-	ring *ring.SPSC[T]
+	ring *ring.SPSCQueue[T]
 }
 
 // enqueue moves only items[0], so it returns 0 or 1.
@@ -62,7 +62,7 @@ func (q *spscSingleQueue[T]) dequeue(dst []T) int {
 // spscBulkQueue drives the SPSC ring through EnqueueBulk and DequeueBulk, which move all of the
 // elements or none, so each call returns 0 or the full length.
 type spscBulkQueue[T any] struct {
-	ring *ring.SPSC[T]
+	ring *ring.SPSCQueue[T]
 }
 
 func (q *spscBulkQueue[T]) enqueue(items []T) int {

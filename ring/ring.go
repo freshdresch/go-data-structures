@@ -10,7 +10,7 @@ import (
 	"unsafe"
 )
 
-// ErrInvalidCount is returned by New, wrapped, when the count is not a power of two, is less
+// ErrInvalidCount is returned by constructors, wrapped, when count is not a power of two, is less
 // than 1, or exceeds 2^30.
 var ErrInvalidCount = errors.New("ring: count must be a power of two between 1 and 2^30")
 
@@ -27,12 +27,12 @@ var ErrEmpty = errors.New("ring: not enough occupied entries")
 // it is pointless.
 var ErrExceedsCapacity = errors.New("ring: requested count exceeds the ring's capacity")
 
-// ErrInvalidMaxBatch is returned by New, wrapped, when a maximum enqueue or dequeue batch size,
+// ErrInvalidMaxBatch is returned by constructors, wrapped, when an enqueue or dequeue batch size,
 // set with WithMaxBatch, WithMaxEnqueueBatch, or WithMaxDequeueBatch, is below 1 or above the
 // count.
 var ErrInvalidMaxBatch = errors.New("ring: max batch must be between 1 and the ring's count")
 
-// ErrInvalidSpinsBeforeYield is returned by New, wrapped, when the bound set with
+// ErrInvalidSpinsBeforeYield is returned by constructors, wrapped, when the bound set with
 // WithSpinsBeforeYield is below 0 or above math.MaxInt32.
 var ErrInvalidSpinsBeforeYield = errors.New(
 	"ring: spins before yield must be between 0 and math.MaxInt32",
@@ -43,6 +43,18 @@ var ErrInvalidSpinsBeforeYield = errors.New(
 // while still fitting the capacity. Such a request can never succeed, so retrying it is
 // pointless.
 var ErrExceedsMaxBatch = errors.New("ring: requested count exceeds the ring's maximum batch size")
+
+// ErrInvalidMaxHeadTailDistance is wrapped when an explicit distance is negative or exceeds
+// math.MaxUint32. Inputs must also be representable as int on the target platform.
+var ErrInvalidMaxHeadTailDistance = errors.New("ring: invalid maximum head-to-tail distance")
+
+// ErrHeadTailDistanceRequiresRelaxed is wrapped when an explicit distance targets a side
+// whose final mode is not relaxed tail sync.
+var ErrHeadTailDistanceRequiresRelaxed = errors.New("ring: head-to-tail distance requires RTS")
+
+// ErrUnsupportedOption is wrapped when a final option conflicts with a queue's fixed topology,
+// or when SPSCQueue receives an explicit spin option.
+var ErrUnsupportedOption = errors.New("ring: option unsupported by queue topology")
 
 // cacheLine is the size each part of a Ring is padded to. It is 128 bytes because that is a full
 // cache line on Apple silicon, and on x86 it covers a 64-byte line plus the neighbor that an
@@ -242,21 +254,31 @@ var (
 )
 
 type config struct {
-	prodMode         syncMode
-	consMode         syncMode
-	maxEnqueueBatch  int
-	maxDequeueBatch  int
-	keepDequeued     bool
-	exactBatchCounts bool
-	spinsBeforeYield int
+	prodMode                    syncMode
+	consMode                    syncMode
+	maxEnqueueBatch             int
+	maxDequeueBatch             int
+	keepDequeued                bool
+	exactBatchCounts            bool
+	spinsBeforeYield            int
+	spinsBeforeYieldSet         bool
+	maxProducerHeadTailDistance int
+	maxConsumerHeadTailDistance int
+	producerHeadTailDistanceSet bool
+	consumerHeadTailDistanceSet bool
 }
 
-// Option configures a Ring at construction.
+// Option configures a Ring, SPSCQueue, MPSCQueue, SPMCQueue, or MPMCQueue at construction.
+// Options apply in argument order. Constructors validate only the final values, after checking
+// capacity. Options never change a specialized queue's fixed producer/consumer topology.
+// Incompatible specialized modes, serialized specialized-side distances, and explicit SPSCQueue
+// spins wrap ErrUnsupportedOption. A distance on an ordered specialized side or any non-RTS Ring
+// side wraps ErrHeadTailDistanceRequiresRelaxed. Numeric distance errors precede applicability.
 type Option func(*config)
 
 // WithMultiProdEnqueue returns an Option that makes the enqueue methods safe for concurrent use by
 // multiple producers. When it and WithRelaxedMultiProdEnqueue are both given, the last one
-// applies.
+// applies. MPSCQueue and MPMCQueue accept this option. SPSCQueue and SPMCQueue reject it.
 //
 // A producer stalled between loading the producer head and its compare-and-swap, while a multiple
 // of 2^32 elements pass through, would reserve with a stale count and could overwrite unconsumed
@@ -270,7 +292,7 @@ func WithMultiProdEnqueue() Option {
 
 // WithMultiConsDequeue returns an Option that makes the dequeue methods safe for concurrent use by
 // multiple consumers. When it and WithRelaxedMultiConsDequeue are both given, the last one
-// applies.
+// applies. SPMCQueue and MPMCQueue accept this option. SPSCQueue and MPSCQueue reject it.
 //
 // A consumer stalled between loading the consumer head and its compare-and-swap, while a multiple
 // of 2^32 elements pass through, would reserve with a stale count and could return elements
@@ -284,19 +306,21 @@ func WithMultiConsDequeue() Option {
 
 // WithRelaxedMultiProdEnqueue returns an Option that makes the enqueue methods safe for concurrent
 // use by multiple producers, with relaxed tail sync, DPDK's RTS mode. When it and
-// WithMultiProdEnqueue are both given, the last one applies.
+// WithMultiProdEnqueue are both given, the last one applies. MPSCQueue and MPMCQueue
+// accept this option.
+// SPSCQueue and SPMCQueue reject it.
 //
 // With WithMultiProdEnqueue, a producer publishes only after every producer that reserved before
 // it has published. With this option a producer finishes without waiting for the others, and
 // consumers see the producers' elements once every reservation made so far has finished. A
 // producer descheduled at any point from its reservation to the end of its call still holds back
 // every element reserved after it, and an enqueue can return before consumers can see its
-// elements. Other producers keep enqueuing until the producer head is an eighth of the ring,
-// rounded down, past the producer tail, and then wait. That distance includes finished enqueues
-// still held back by an unfinished one, and a call checks it before reserving, so its own batch
-// can take the head further. On a ring of fewer than 8 slots that bound is 0, so producers take
-// turns. The wait comes before the check for free slots, so a call that finds the ring full, or a
-// zero-length call, can wait before it returns.
+// elements. Before every reservation attempt, producers wait while head minus tail exceeds the
+// configured limit. The default is count / 8, rounded down. WithMaxProducerHeadTailDistance
+// overrides it. That distance includes finished enqueues held back by an unfinished one.
+// Equality admits an attempt, and its own batch can take the head further. Below 8 slots the
+// default is zero, so reservations take turns. The wait precedes the free-slot check, so full
+// and zero-length calls can wait. Bulk length errors return before this wait.
 //
 // Whether this mode is faster depends on the machine and the batch size. Each call does two more
 // atomic read-modify-writes than WithMultiProdEnqueue, one to publish and one to update the tail
@@ -321,19 +345,22 @@ func WithRelaxedMultiProdEnqueue() Option {
 
 // WithRelaxedMultiConsDequeue returns an Option that makes the dequeue methods safe for concurrent
 // use by multiple consumers, with relaxed tail sync, DPDK's RTS mode. When it and
-// WithMultiConsDequeue are both given, the last one applies.
+// WithMultiConsDequeue are both given, the last one applies. SPMCQueue and MPMCQueue
+// accept this option.
+// SPSCQueue and MPSCQueue reject it.
 //
 // With WithMultiConsDequeue, a consumer releases its slots only after every consumer that reserved
 // before it has released theirs. With this option a consumer finishes without waiting for the
 // others, and producers can reuse the consumers' slots once every reservation made so far has
 // finished. A consumer descheduled at any point from its reservation to the end of its call still
 // holds back the release of every slot reserved after it, and Count can include elements a
-// dequeue has already returned. Other consumers keep dequeuing until the consumer head is an
-// eighth of the ring, rounded down, past the consumer tail, and then wait. That distance includes
-// finished dequeues still held back by an unfinished one, and a call checks it before reserving,
-// so its own batch can take the head further. On a ring of fewer than 8 slots that bound is 0, so
-// consumers take turns. The wait comes before the check for occupied entries, so a call that finds
-// the ring empty, or a zero-length call, can wait before it returns.
+// dequeue has already returned. Before every reservation attempt, consumers wait while head
+// minus tail exceeds the configured limit. The default is count / 8, rounded down.
+// WithMaxConsumerHeadTailDistance overrides it. That distance includes finished dequeues held
+// back by an unfinished one. Equality admits an attempt, and its own batch can take the head
+// further. Below 8 slots the default is zero, so reservations take turns. The wait precedes the
+// occupied-entry check, so empty and zero-length calls can wait. Bulk length errors return
+// before this wait.
 //
 // Whether this mode is faster depends on the machine and the batch size. Each call does two more
 // atomic read-modify-writes than WithMultiConsDequeue, one to release its slots and one to update
@@ -359,7 +386,7 @@ func WithRelaxedMultiConsDequeue() Option {
 // WithMaxEnqueueBatch returns an Option that limits every enqueue batch call to at most n
 // elements. EnqueueBurst moves at most n, and EnqueueBulk rejects a request for more than n with
 // ErrExceedsMaxBatch. Enqueue moves one element, so the limit never affects it. Without a limit
-// the enqueue batch may be as large as the capacity. New returns an error wrapping
+// the enqueue batch may be as large as the capacity. Constructors return an error wrapping
 // ErrInvalidMaxBatch when the limit is below 1 or above the count.
 //
 // The limit bounds how long one enqueue can make others wait. With WithMultiProdEnqueue, a
@@ -370,8 +397,8 @@ func WithRelaxedMultiConsDequeue() Option {
 // it until its whole copy is done. Choose n from the element size and the delay the ring's users
 // can tolerate.
 //
-// When options set the same limit more than once, the last one given applies. New checks only the
-// limit that applies.
+// When options set the same limit more than once, the last one given applies. Constructors check
+// only the final limit.
 func WithMaxEnqueueBatch(n int) Option {
 	return func(cfg *config) {
 		cfg.maxEnqueueBatch = n
@@ -381,7 +408,7 @@ func WithMaxEnqueueBatch(n int) Option {
 // WithMaxDequeueBatch returns an Option that limits every dequeue batch call to at most n
 // elements. DequeueBurst moves at most n, and DequeueBulk rejects a request for more than n with
 // ErrExceedsMaxBatch. Dequeue moves one element, so the limit never affects it. Without a limit
-// the dequeue batch may be as large as the capacity. New returns an error wrapping
+// the dequeue batch may be as large as the capacity. Constructors return an error wrapping
 // ErrInvalidMaxBatch when the limit is below 1 or above the count.
 //
 // The limit bounds how long one dequeue can make others wait. With WithMultiConsDequeue, a
@@ -392,8 +419,8 @@ func WithMaxEnqueueBatch(n int) Option {
 // cannot reuse any of them until its whole copy is done. Choose n from the element size and the
 // delay the ring's users can tolerate.
 //
-// When options set the same limit more than once, the last one given applies. New checks only the
-// limit that applies.
+// When options set the same limit more than once, the last one given applies. Constructors check
+// only the final limit.
 func WithMaxDequeueBatch(n int) Option {
 	return func(cfg *config) {
 		cfg.maxDequeueBatch = n
@@ -472,8 +499,9 @@ func WithExactBatchCounts() Option {
 // before it starts yielding with runtime.Gosched. It affects only a side set with
 // WithMultiProdEnqueue, WithMultiConsDequeue, or a relaxed option, because a single side never
 // waits. When it is given more than once, the last one applies. The default is
-// defaultSpinsBeforeYield, 8192. New returns an error wrapping ErrInvalidSpinsBeforeYield when n
-// is below 0 or above math.MaxInt32.
+// defaultSpinsBeforeYield, 8192. Constructors wrap ErrInvalidSpinsBeforeYield when n is below 0
+// or above math.MaxInt32. SPSCQueue rejects every explicit spin option with ErrUnsupportedOption
+// after numeric and topology validation. Ring accepts it even when both sides are single.
 //
 // A goroutine on a multi side waits for every earlier goroutine on its side to publish, and one
 // on a relaxed side waits while too many reservations are in flight. A longer spin helps when the
@@ -495,18 +523,211 @@ func WithExactBatchCounts() Option {
 func WithSpinsBeforeYield(n int) Option {
 	return func(cfg *config) {
 		cfg.spinsBeforeYield = n
+		cfg.spinsBeforeYieldSet = true
 	}
 }
 
 // maxCount is the largest count New accepts, the largest power of two DPDK accepts.
 const maxCount = 1 << 30
 
-// relaxedHTDMax returns the head-to-tail bound for a side in mode on a ring of count slots: an
-// eighth of the ring, DPDK's default, for a relaxed side, and 0 for any other, which never reads
-// it.
-func relaxedHTDMax(mode syncMode, count int) uint32 {
+// WithMaxProducerHeadTailDistance sets the producer RTS pre-admission distance limit.
+// The final producer mode must be relaxed and support concurrent producers. Omission uses
+// count / 8. Distances count element positions, not reservations, bytes, or goroutines.
+// Explicit zero permits admission only when earlier reservations have published.
+// Values in [0, math.MaxUint32] are accepted when representable as int. A limit at or above
+// capacity removes distance throttling, but capacity admission still applies. Each attempt
+// waits while head minus tail exceeds the limit, so its own batch can cross the limit.
+// Full and zero-length calls can wait. Bulk length errors return before this wait.
+// This option never selects RTS. Use WithRelaxedMultiProdEnqueue on Ring, MPSCQueue, or MPMCQueue.
+// Numeric errors wrap ErrInvalidMaxHeadTailDistance. A serialized specialized side wraps
+// ErrUnsupportedOption. An ordered specialized side or any non-RTS Ring side wraps
+// ErrHeadTailDistanceRequiresRelaxed.
+func WithMaxProducerHeadTailDistance(n int) Option {
+	return func(cfg *config) {
+		cfg.maxProducerHeadTailDistance = n
+		cfg.producerHeadTailDistanceSet = true
+	}
+}
+
+// WithMaxConsumerHeadTailDistance sets the consumer RTS pre-admission distance limit.
+// It has the same numeric and waiting contract as WithMaxProducerHeadTailDistance, but
+// requires a final relaxed consumer mode that supports concurrent consumers. Empty and
+// zero-length calls can wait. Use WithRelaxedMultiConsDequeue on Ring, SPMCQueue, or MPMCQueue.
+// Distances never select relaxed mode implicitly. The producer option documents distance errors.
+func WithMaxConsumerHeadTailDistance(n int) Option {
+	return func(cfg *config) {
+		cfg.maxConsumerHeadTailDistance = n
+		cfg.consumerHeadTailDistanceSet = true
+	}
+}
+
+func checkCapacity(count int) error {
+	inRange := count >= 1 && count <= maxCount
+	isPowerOfTwo := count&(count-1) == 0
+	if !inRange || !isPowerOfTwo {
+		return fmt.Errorf("new ring with count %d: %w", count, ErrInvalidCount)
+	}
+	return nil
+}
+
+func defaultConfig(count int, producerMode, consumerMode syncMode) config {
+	return config{
+		prodMode:         producerMode,
+		consMode:         consumerMode,
+		maxEnqueueBatch:  count,
+		maxDequeueBatch:  count,
+		spinsBeforeYield: defaultSpinsBeforeYield,
+	}
+}
+
+// resolveConfig validates before allocation. Initial modes describe constructor topology,
+// not mutable runtime state. Ring skips fixed-topology restrictions.
+func resolveConfig(
+	constructor string,
+	count int,
+	producerMode, consumerMode syncMode,
+	fixedTopology bool,
+	options []Option,
+) (config, error) {
+	if err := checkCapacity(count); err != nil {
+		return config{}, fmt.Errorf("%s: %w", constructor, err)
+	}
+	cfg := defaultConfig(count, producerMode, consumerMode)
+	for _, option := range options {
+		option(&cfg)
+	}
+	if err := checkMaxBatch("enqueue", cfg.maxEnqueueBatch, count); err != nil {
+		return config{}, fmt.Errorf("%s: %w", constructor, err)
+	}
+	if err := checkMaxBatch("dequeue", cfg.maxDequeueBatch, count); err != nil {
+		return config{}, fmt.Errorf("%s: %w", constructor, err)
+	}
+	if err := checkSpinsBeforeYield(cfg.spinsBeforeYield, count); err != nil {
+		return config{}, fmt.Errorf("%s: %w", constructor, err)
+	}
+	if fixedTopology {
+		if err := checkTopologyMode(
+			constructor,
+			count,
+			"producer",
+			cfg.prodMode,
+			producerMode,
+		); err != nil {
+			return config{}, err
+		}
+		if err := checkTopologyMode(
+			constructor,
+			count,
+			"consumer",
+			cfg.consMode,
+			consumerMode,
+		); err != nil {
+			return config{}, err
+		}
+		serialized := producerMode == modeSingle && consumerMode == modeSingle
+		if serialized && cfg.spinsBeforeYieldSet {
+			return config{}, fmt.Errorf(
+				"%s with count %d and WithSpinsBeforeYield(%d): %w",
+				constructor, count, cfg.spinsBeforeYield, ErrUnsupportedOption,
+			)
+		}
+	}
+	if err := checkHeadTailDistance(
+		constructor,
+		count,
+		"producer",
+		cfg.maxProducerHeadTailDistance,
+		cfg.producerHeadTailDistanceSet,
+		cfg.prodMode,
+		fixedTopology && producerMode == modeSingle,
+		"WithRelaxedMultiProdEnqueue",
+	); err != nil {
+		return config{}, err
+	}
+	if err := checkHeadTailDistance(
+		constructor,
+		count,
+		"consumer",
+		cfg.maxConsumerHeadTailDistance,
+		cfg.consumerHeadTailDistanceSet,
+		cfg.consMode,
+		fixedTopology && consumerMode == modeSingle,
+		"WithRelaxedMultiConsDequeue",
+	); err != nil {
+		return config{}, err
+	}
+	return cfg, nil
+}
+
+func checkTopologyMode(
+	constructor string,
+	count int,
+	side string,
+	mode, initialMode syncMode,
+) error {
+	compatible := mode == modeSingle
+	if initialMode != modeSingle {
+		compatible = mode == modeMulti || mode == modeRelaxed
+	}
+	if compatible {
+		return nil
+	}
+	return fmt.Errorf(
+		"%s with count %d and %s mode %d: %w",
+		constructor, count, side, mode, ErrUnsupportedOption,
+	)
+}
+
+func checkHeadTailDistance(
+	constructor string,
+	count int,
+	side string,
+	distance int,
+	explicit bool,
+	mode syncMode,
+	serialized bool,
+	relaxedSelector string,
+) error {
+	if !explicit {
+		return nil
+	}
+	if err := checkHeadTailDistanceNumber(distance); err != nil {
+		return fmt.Errorf(
+			"%s with count %d and %s head-to-tail distance %d: %w",
+			constructor, count, side, distance, err,
+		)
+	}
+	if serialized {
+		return fmt.Errorf(
+			"%s with count %d and %s head-to-tail distance %d: %w",
+			constructor, count, side, distance, ErrUnsupportedOption,
+		)
+	}
+	if mode != modeRelaxed {
+		return fmt.Errorf(
+			"%s with count %d and %s head-to-tail distance %d requires %s: %w",
+			constructor, count, side, distance, relaxedSelector, ErrHeadTailDistanceRequiresRelaxed,
+		)
+	}
+	return nil
+}
+
+func checkHeadTailDistanceNumber(distance int) error {
+	if distance < 0 {
+		return ErrInvalidMaxHeadTailDistance
+	}
+	if uint64(distance) > math.MaxUint32 {
+		return ErrInvalidMaxHeadTailDistance
+	}
+	return nil
+}
+
+func resolveHeadTailDistance(mode syncMode, count, distance int, explicit bool) uint32 {
 	if mode != modeRelaxed {
 		return 0
+	}
+	if explicit {
+		return uint32(distance)
 	}
 	return uint32(count / 8)
 }
@@ -516,44 +737,38 @@ func relaxedHTDMax(mode syncMode, count int) uint32 {
 // whole capacity. It returns an error wrapping ErrInvalidCount when count is not a power of two
 // between 1 and 2^30, and one wrapping ErrInvalidMaxBatch when a maximum enqueue or dequeue batch
 // is below 1 or above count. It returns one wrapping ErrInvalidSpinsBeforeYield when the bound set
-// with WithSpinsBeforeYield is below 0 or above math.MaxInt32.
+// with WithSpinsBeforeYield is below 0 or above math.MaxInt32. Options apply in order and only
+// final values are validated. Each RTS side defaults to count / 8 element positions. An explicit
+// distance requires that side's relaxed selector or wraps ErrHeadTailDistanceRequiresRelaxed.
+// Numeric distance errors wrap ErrInvalidMaxHeadTailDistance.
 // Each single side permits one operation at a time across all its methods, including failed
 // and zero-length calls. Owners may change goroutines, but callers must synchronize every
 // handoff with a happens-before edge, such as a mutex or channel. Opposite-side operations and
 // Count, Free, Full, and Empty may run concurrently.
 func New[T any](count int, options ...Option) (*Ring[T], error) {
-	inRange := count >= 1 && count <= maxCount
-	isPowerOfTwo := count&(count-1) == 0
-	if !inRange || !isPowerOfTwo {
-		return nil, fmt.Errorf("new ring with count %d: %w", count, ErrInvalidCount)
-	}
-
-	cfg := config{
-		maxEnqueueBatch:  count,
-		maxDequeueBatch:  count,
-		spinsBeforeYield: defaultSpinsBeforeYield,
-	}
-	for _, option := range options {
-		option(&cfg)
-	}
-	if err := checkMaxBatch("enqueue", cfg.maxEnqueueBatch, count); err != nil {
-		return nil, err
-	}
-	if err := checkMaxBatch("dequeue", cfg.maxDequeueBatch, count); err != nil {
-		return nil, err
-	}
-	if err := checkSpinsBeforeYield(cfg.spinsBeforeYield, count); err != nil {
+	cfg, err := resolveConfig("New", count, modeSingle, modeSingle, false, options)
+	if err != nil {
 		return nil, err
 	}
 
 	ring := &Ring[T]{
 		readOnly: readOnly[T]{
-			entries:          make([]T, count),
-			mask:             uint32(count - 1),
-			maxEnqueueBatch:  uint32(cfg.maxEnqueueBatch),
-			maxDequeueBatch:  uint32(cfg.maxDequeueBatch),
-			prodHTDMax:       relaxedHTDMax(cfg.prodMode, count),
-			consHTDMax:       relaxedHTDMax(cfg.consMode, count),
+			entries:         make([]T, count),
+			mask:            uint32(count - 1),
+			maxEnqueueBatch: uint32(cfg.maxEnqueueBatch),
+			maxDequeueBatch: uint32(cfg.maxDequeueBatch),
+			prodHTDMax: resolveHeadTailDistance(
+				cfg.prodMode,
+				count,
+				cfg.maxProducerHeadTailDistance,
+				cfg.producerHeadTailDistanceSet,
+			),
+			consHTDMax: resolveHeadTailDistance(
+				cfg.consMode,
+				count,
+				cfg.maxConsumerHeadTailDistance,
+				cfg.consumerHeadTailDistanceSet,
+			),
 			spinsBeforeYield: uint32(cfg.spinsBeforeYield),
 			prodMode:         cfg.prodMode,
 			consMode:         cfg.consMode,

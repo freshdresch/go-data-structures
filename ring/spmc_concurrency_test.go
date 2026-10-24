@@ -27,7 +27,7 @@ func awaitSPMCSignal(t *testing.T, signal <-chan struct{}) {
 }
 
 func spmcReleaseForTest[T any](
-	queue *SPMC[T],
+	queue *SPMCQueue[T],
 	start, count uint32,
 	entering, done chan struct{},
 ) {
@@ -86,9 +86,9 @@ func checkSPMCSlotLifetime[T comparable](
 	position uint32,
 ) {
 	t.Helper()
-	options := []SPMCOption{WithSPMCSpinsBeforeYield(0)}
+	options := []Option{WithSpinsBeforeYield(0)}
 	if keep {
-		options = append(options, WithoutSPMCDequeueClearing())
+		options = append(options, WithoutDequeueClearing())
 	}
 	queue := newSPMCForTest[T](t, 4, options...)
 	seedSPMC(queue, position)
@@ -120,9 +120,9 @@ func checkSPMCSlotLifetime[T comparable](
 		}
 		if !releasedA {
 			// CAS unblocks B without waiting for A's old start or reversing B's publication.
-			queue.consumerPublished.CompareAndSwap(startA, startB)
+			queue.consumerPublication.published.CompareAndSwap(startA, startB)
 		}
-		publication := queue.consumerPublished.Load()
+		publication := queue.consumerPublication.published.Load()
 		if publication != startB && publication != startB+countB {
 			completed := false
 			select {
@@ -139,7 +139,7 @@ func checkSPMCSlotLifetime[T comparable](
 		case <-timer.C:
 			t.Errorf(
 				"cleanup B join timed out: publication=%d, B complete=false",
-				queue.consumerPublished.Load(),
+				queue.consumerPublication.published.Load(),
 			)
 		}
 	}()
@@ -166,7 +166,7 @@ func checkSPMCSlotLifetime[T comparable](
 	go spmcReleaseForTest(queue, startB, countB, entering, releaseDone)
 	awaitSPMCSignal(t, entering)
 	awaitSPMCReleaseWait(t, releaseDone)
-	if queue.consumerPublished.Load() != position || queue.Count() != 4 {
+	if queue.consumerPublication.published.Load() != position || queue.Count() != 4 {
 		t.Fatal("later release changed publication or excluded live intervals from Count")
 	}
 	if err := queue.Enqueue(items[0]); err != ErrFull {
@@ -196,7 +196,7 @@ func checkSPMCSlotLifetime[T comparable](
 func TestSPMCReleaseWaitYields(t *testing.T) {
 	previous := runtime.GOMAXPROCS(1)
 	defer runtime.GOMAXPROCS(previous)
-	queue := newSPMCForTest[int](t, 2, WithSPMCSpinsBeforeYield(0))
+	queue := newSPMCForTest[int](t, 2, WithSpinsBeforeYield(0))
 	if _, err := queue.EnqueueBulk([]int{1, 2}); err != nil {
 		t.Fatal(err)
 	}
@@ -215,9 +215,9 @@ func TestSPMCReleaseWaitYields(t *testing.T) {
 		}
 		if !releasedA {
 			// CAS unblocks B without waiting for A's old start or reversing B's publication.
-			queue.consumerPublished.CompareAndSwap(startA, startB)
+			queue.consumerPublication.published.CompareAndSwap(startA, startB)
 		}
-		publication := queue.consumerPublished.Load()
+		publication := queue.consumerPublication.published.Load()
 		if publication != startB && publication != startB+countB {
 			completed := false
 			select {
@@ -234,7 +234,7 @@ func TestSPMCReleaseWaitYields(t *testing.T) {
 		case <-timer.C:
 			t.Errorf(
 				"cleanup B join timed out: publication=%d, B complete=false",
-				queue.consumerPublished.Load(),
+				queue.consumerPublication.published.Load(),
 			)
 		}
 	}()
@@ -244,7 +244,7 @@ func TestSPMCReleaseWaitYields(t *testing.T) {
 	progress := make(chan struct{})
 	go func() { close(progress) }()
 	awaitSPMCSignal(t, progress)
-	if queue.consumerPublished.Load() != startA {
+	if queue.consumerPublication.published.Load() != startA {
 		t.Fatal("publication advanced while earlier release remained paused")
 	}
 	select {
@@ -268,7 +268,7 @@ func TestSPMCFailedAttemptRecomputesAdmission(t *testing.T) {
 					if _, err := queue.EnqueueBulk([]int{10, 11, 12, 13}); err != nil {
 						t.Fatal(err)
 					}
-					head := queue.consumerReservation.head.Load()
+					head := queue.spmcConsumerHeadPosition()
 					startA, countA, _, retry := queue.spmcAttemptConsumer(head, consumeA, true, exact)
 					if retry || countA != consumeA || startA != head {
 						t.Fatal("first whole attempt did not reserve A")
@@ -326,38 +326,43 @@ func TestSPMCFailedAttemptRecomputesAdmission(t *testing.T) {
 }
 
 func TestSPMCConcurrentTransfersAndObservers(t *testing.T) {
-	for _, capacity := range []int{1, 2, 8, 64} {
-		for _, exact := range []bool{false, true} {
-			for _, keep := range []bool{false, true} {
-				for _, method := range []string{"single", "bulk", "burst"} {
-					name := fmt.Sprintf(
-						"capacity=%d/exact=%t/keep=%t/%s",
-						capacity, exact, keep, method,
-					)
-					t.Run(name, func(t *testing.T) {
-						options := []SPMCOption{WithSPMCSpinsBeforeYield(0)}
-						if exact {
-							options = append(options, WithSPMCExactBatchCounts())
+	for _, relaxed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("RTS=%t", relaxed), func(t *testing.T) {
+			for _, capacity := range []int{1, 2, 8, 64} {
+				for _, exact := range []bool{false, true} {
+					for _, keep := range []bool{false, true} {
+						for _, method := range []string{"single", "bulk", "burst"} {
+							name := fmt.Sprintf(
+								"capacity=%d/exact=%t/keep=%t/%s",
+								capacity, exact, keep, method,
+							)
+							t.Run(name, func(t *testing.T) {
+								options := []Option{WithSpinsBeforeYield(0)}
+								if exact {
+									options = append(options, WithExactBatchCounts())
+								}
+								if keep {
+									options = append(options, WithoutDequeueClearing())
+								}
+								queue := newSPMCForTest[int](t, capacity, spmcProtocolOptions(relaxed, options)...)
+								seedSPMC(queue, math.MaxUint32-3)
+								ownership := make(chan *SPMCQueue[int], 1)
+								ownership <- queue
+								checkSPMCConcurrentTransfers(t, queue, ownership, method, 1, 1, 384)
+							})
 						}
-						if keep {
-							options = append(options, WithoutSPMCDequeueClearing())
-						}
-						queue := newSPMCForTest[int](t, capacity, options...)
-						seedSPMC(queue, math.MaxUint32-3)
-						ownership := make(chan *SPMC[int], 1)
-						ownership <- queue
-						checkSPMCConcurrentTransfers(t, queue, ownership, method, 1, 1, 384)
-					})
+					}
 				}
 			}
-		}
+
+		})
 	}
 }
 
 func checkSPMCConcurrentTransfers(
 	t *testing.T,
-	queue *SPMC[int],
-	ownership <-chan *SPMC[int],
+	queue *SPMCQueue[int],
+	ownership <-chan *SPMCQueue[int],
 	method string,
 	firstProduced, firstExpected, lastTag int,
 ) {
@@ -377,7 +382,7 @@ func checkSPMCConcurrentTransfers(
 	workers.Add(1)
 	go func() {
 		defer workers.Done()
-		var producer *SPMC[int]
+		var producer *SPMCQueue[int]
 		select {
 		case producer = <-ownership:
 		case <-ctx.Done():
@@ -587,45 +592,50 @@ func checkSPMCConcurrentTransfers(
 }
 
 func TestSPMCProducerOwnershipHandoffs(t *testing.T) {
-	for _, exact := range []bool{false, true} {
-		for _, outgoing := range []string{"successful", "failed", "zero"} {
-			t.Run(fmt.Sprintf("exact=%t/%s", exact, outgoing), func(t *testing.T) {
-				options := []SPMCOption{WithSPMCSpinsBeforeYield(0)}
-				if exact {
-					options = append(options, WithSPMCExactBatchCounts())
-				}
-				queue := newSPMCForTest[int](t, 4, options...)
-				firstProduced, firstExpected := 2, 1
-				if outgoing == "successful" {
-					if err := queue.Enqueue(1); err != nil {
-						t.Fatal(err)
-					}
-				} else {
-					if _, err := queue.EnqueueBulk([]int{1, 2, 3, 4}); err != nil {
-						t.Fatal(err)
-					}
-					if value, err := queue.Dequeue(); err != nil || value != 1 {
-						t.Fatalf("prepare handoff dequeue=%d error=%v", value, err)
-					}
-					before := queue.producer.cachedConsumer
-					if outgoing == "failed" {
-						if _, err := queue.EnqueueBulk([]int{5, 6}); err != ErrFull {
-							t.Fatalf("failed outgoing admission: %v", err)
+	for _, relaxed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("RTS=%t", relaxed), func(t *testing.T) {
+			for _, exact := range []bool{false, true} {
+				for _, outgoing := range []string{"successful", "failed", "zero"} {
+					t.Run(fmt.Sprintf("exact=%t/%s", exact, outgoing), func(t *testing.T) {
+						options := []Option{WithSpinsBeforeYield(0)}
+						if exact {
+							options = append(options, WithExactBatchCounts())
 						}
-					} else if _, err := queue.EnqueueBulk(nil); err != nil {
-						t.Fatal(err)
-					}
-					if queue.producer.cachedConsumer == before {
-						t.Fatal("outgoing operation did not change producer cache")
-					}
-					firstProduced, firstExpected = 5, 2
+						queue := newSPMCForTest[int](t, 4, spmcProtocolOptions(relaxed, options)...)
+						firstProduced, firstExpected := 2, 1
+						if outgoing == "successful" {
+							if err := queue.Enqueue(1); err != nil {
+								t.Fatal(err)
+							}
+						} else {
+							if _, err := queue.EnqueueBulk([]int{1, 2, 3, 4}); err != nil {
+								t.Fatal(err)
+							}
+							if value, err := queue.Dequeue(); err != nil || value != 1 {
+								t.Fatalf("prepare handoff dequeue=%d error=%v", value, err)
+							}
+							before := queue.producer.cachedConsumer
+							if outgoing == "failed" {
+								if _, err := queue.EnqueueBulk([]int{5, 6}); err != ErrFull {
+									t.Fatalf("failed outgoing admission: %v", err)
+								}
+							} else if _, err := queue.EnqueueBulk(nil); err != nil {
+								t.Fatal(err)
+							}
+							if queue.producer.cachedConsumer == before {
+								t.Fatal("outgoing operation did not change producer cache")
+							}
+							firstProduced, firstExpected = 5, 2
+						}
+						ownership := make(chan *SPMCQueue[int], 1)
+						ownership <- queue
+						checkSPMCConcurrentTransfers(
+							t, queue, ownership, "single", firstProduced, firstExpected, 128,
+						)
+					})
 				}
-				ownership := make(chan *SPMC[int], 1)
-				ownership <- queue
-				checkSPMCConcurrentTransfers(
-					t, queue, ownership, "single", firstProduced, firstExpected, 128,
-				)
-			})
-		}
+			}
+
+		})
 	}
 }

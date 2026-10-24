@@ -350,10 +350,10 @@ func checkSPMCComparisonLayout(
 		}
 	}
 	inspect(concrete, layout.Fields)
-	if reflect.TypeFor[uintptr]().Size() != 8 {
-		return
-	}
 	if implementation == "ring" {
+		if reflect.TypeFor[uintptr]().Size() != 8 {
+			return
+		}
 		require.Equal(t, uintptr(640), layout.Size)
 		for index, name := range []string{
 			"readOnly", "prodHeadLine", "prodTailLine", "consHeadLine", "consTailLine",
@@ -364,8 +364,19 @@ func checkSPMCComparisonLayout(
 		}
 		return
 	}
-	require.Equal(t, uintptr(624), layout.Size)
-	for index, offset := range []uintptr{0, 176, 312, 480, 616} {
+	size := uintptr(648)
+	offsets := []uintptr{0, 176, 312, 488, 632}
+	entries := concrete.Field(0).Type.Field(0).Type
+	switch {
+	case reflect.TypeFor[uintptr]().Size() == 8 && entries.Size() == 24 && entries.Align() == 8:
+	case reflect.TypeFor[uintptr]().Size() == 4 && entries.Size() == 12 && entries.Align() == 4:
+		size = 616
+		offsets = []uintptr{0, 160, 292, 456, 600}
+	default:
+		return
+	}
+	require.Equal(t, size, layout.Size)
+	for index, offset := range offsets {
 		require.Equal(t, offset, concrete.Field(2*index).Offset)
 	}
 }
@@ -585,10 +596,10 @@ func TestSPMCComparisonAdapterContracts(t *testing.T) {
 				require.NoError(t, err)
 				target = &ringBulkQueue[int64]{ring: created}
 			} else {
-				created, err := ring.NewSPMC[int64](
+				created, err := ring.NewSPMCQueue[int64](
 					1024,
-					ring.WithSPMCMaxEnqueueBatch(2),
-					ring.WithSPMCMaxDequeueBatch(2),
+					ring.WithMaxEnqueueBatch(2),
+					ring.WithMaxDequeueBatch(2),
 				)
 				require.NoError(t, err)
 				target = &spmcBulkQueue[int64]{ring: created}

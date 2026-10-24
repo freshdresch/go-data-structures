@@ -1,9 +1,6 @@
 package ring
 
-import (
-	"fmt"
-	"sync/atomic"
-)
+import "sync/atomic"
 
 type spscProducer[T any] struct {
 	entries          []T
@@ -32,84 +29,36 @@ type spscConsumer[T any] struct {
 	published atomic.Uint32
 }
 
-// SPSC is a fixed-capacity FIFO with one serialized producer and one serialized consumer.
-// Construct it with NewSPSC. Its zero value is unusable, and it must not be copied after use.
+// SPSCQueue is a fixed-capacity FIFO with one serialized producer and one serialized consumer.
+// Construct it with NewSPSCQueue. Its zero value is unusable, and it must not be copied after use.
 // Each side serializes all its methods, including failed and zero-length calls that can refresh
 // private caches. Ownership changes require caller synchronization, such as a channel or mutex.
 // The opposite side and Count, Free, Full, and Empty may run concurrently. Construction must
 // complete before synchronized publication to callers. Reset requires exclusive synchronized use.
 // Capacity and batch-limit queries read immutable configuration and may also run concurrently.
-type SPSC[T any] struct {
+type SPSCQueue[T any] struct {
 	producer spscProducer[T]
 	_        [128]byte
 	consumer spscConsumer[T]
 }
 
-type spscConfig struct {
-	maxEnqueueBatch  int
-	maxDequeueBatch  int
-	keepDequeued     bool
-	exactBatchCounts bool
-}
-
-// SPSCOption configures an SPSC during construction. Options apply in argument order.
-type SPSCOption func(*spscConfig)
-
-// WithSPSCMaxBatch limits both batch directions to n. Later directional options override it.
-// NewSPSC wraps ErrInvalidMaxBatch if a final limit is outside [1, capacity].
-func WithSPSCMaxBatch(n int) SPSCOption {
-	return func(cfg *spscConfig) {
-		cfg.maxEnqueueBatch = n
-		cfg.maxDequeueBatch = n
-	}
-}
-
-// WithSPSCMaxEnqueueBatch limits enqueue batches to n. Bulk rejects longer requests and burst
-// clamps them. Single enqueue is unaffected. The last setting for this direction applies.
-func WithSPSCMaxEnqueueBatch(n int) SPSCOption {
-	return func(cfg *spscConfig) { cfg.maxEnqueueBatch = n }
-}
-
-// WithSPSCMaxDequeueBatch limits dequeue batches to n. Bulk rejects longer requests and burst
-// clamps them. Single dequeue is unaffected. The last setting for this direction applies.
-func WithSPSCMaxDequeueBatch(n int) SPSCOption {
-	return func(cfg *spscConfig) { cfg.maxDequeueBatch = n }
-}
-
-// WithoutSPSCDequeueClearing retains consumed slot values until overwritten or Reset clears them.
-func WithoutSPSCDequeueClearing() SPSCOption {
-	return func(cfg *spscConfig) { cfg.keepDequeued = true }
-}
-
-// WithSPSCExactBatchCounts makes every batch load the opposite publication for its count.
-// Counts describe the admission snapshot minus progress, not a global snapshot at return.
-// Without it successful cached admissions can return stale lower counts. Zero-length calls
-// always refresh. Counts must not determine blocking, wakeups, or the next request size.
-func WithSPSCExactBatchCounts() SPSCOption {
-	return func(cfg *spscConfig) { cfg.exactBatchCounts = true }
-}
-
-// NewSPSC returns an empty queue using all count slots, with clearing enabled and cached counts.
+// NewSPSCQueue returns an empty queue using all count slots.
+// Clearing is enabled and batch counts use cached admission by default.
 // Count must be a power of two in [1, 2^30], otherwise it wraps ErrInvalidCount. Batch limits
-// default to count. A final limit outside [1, count] wraps ErrInvalidMaxBatch.
-func NewSPSC[T any](count int, options ...SPSCOption) (*SPSC[T], error) {
-	inRange := count >= 1 && count <= maxCount
-	isPowerOfTwo := count&(count-1) == 0
-	if !inRange || !isPowerOfTwo {
-		return nil, fmt.Errorf("new ring with count %d: %w", count, ErrInvalidCount)
-	}
-	cfg := spscConfig{maxEnqueueBatch: count, maxDequeueBatch: count}
-	for _, option := range options {
-		option(&cfg)
-	}
-	if err := checkMaxBatch("enqueue", cfg.maxEnqueueBatch, count); err != nil {
-		return nil, err
-	}
-	if err := checkMaxBatch("dequeue", cfg.maxDequeueBatch, count); err != nil {
+// default to count. A final limit outside [1, count] wraps ErrInvalidMaxBatch. Shared options
+// apply in order. Multi-side modes, explicit spins, and explicit distances are unsupported.
+// Incompatible modes, explicit spins, and valid distances wrap ErrUnsupportedOption.
+// Numeric spin errors wrap ErrInvalidSpinsBeforeYield, and numeric distance errors wrap
+// ErrInvalidMaxHeadTailDistance. Validation checks batch limits and spin numbers before topology,
+// then explicit spins and
+// producer/consumer distances. Numeric distance errors precede distance applicability errors.
+func NewSPSCQueue[T any](count int, options ...Option) (*SPSCQueue[T], error) {
+	cfg, err := resolveConfig("NewSPSCQueue", count, modeSingle, modeSingle, true, options)
+	if err != nil {
 		return nil, err
 	}
 	entries := make([]T, count)
-	queue := &SPSC[T]{
+	queue := &SPSCQueue[T]{
 		producer: spscProducer[T]{
 			entries:          entries,
 			mask:             uint32(count - 1),
@@ -128,34 +77,34 @@ func NewSPSC[T any](count int, options ...SPSCOption) (*SPSC[T], error) {
 }
 
 // Capacity returns the number of usable slots.
-func (r *SPSC[T]) Capacity() int { return int(r.producer.mask + 1) }
+func (r *SPSCQueue[T]) Capacity() int { return int(r.producer.mask + 1) }
 
 // MaxEnqueueBatch returns the configured enqueue batch limit.
-func (r *SPSC[T]) MaxEnqueueBatch() int { return int(r.producer.maxBatch) }
+func (r *SPSCQueue[T]) MaxEnqueueBatch() int { return int(r.producer.maxBatch) }
 
 // MaxDequeueBatch returns the configured dequeue batch limit.
-func (r *SPSC[T]) MaxDequeueBatch() int { return int(r.consumer.maxBatch) }
+func (r *SPSCQueue[T]) MaxDequeueBatch() int { return int(r.consumer.maxBatch) }
 
 // Count returns a bounded two-publication snapshot. It is not a linearizable count query.
-func (r *SPSC[T]) Count() int {
+func (r *SPSCQueue[T]) Count() int {
 	consumer := r.consumer.published.Load()
 	producer := r.producer.published.Load()
 	return int(min(producer-consumer, r.producer.mask+1))
 }
 
 // Free returns Capacity minus a Count snapshot.
-func (r *SPSC[T]) Free() int { return r.Capacity() - r.Count() }
+func (r *SPSCQueue[T]) Free() int { return r.Capacity() - r.Count() }
 
 // Full reports whether a Count snapshot equals Capacity.
-func (r *SPSC[T]) Full() bool { return r.Count() == r.Capacity() }
+func (r *SPSCQueue[T]) Full() bool { return r.Count() == r.Capacity() }
 
 // Empty reports whether a Count snapshot is zero.
-func (r *SPSC[T]) Empty() bool { return r.Count() == 0 }
+func (r *SPSCQueue[T]) Empty() bool { return r.Count() == 0 }
 
 // Reset clears every slot and all positions and caches while preserving configuration.
 // Callers must exclude operations and observers, synchronize completion of prior use, and
 // synchronize publication to future users, even when dequeue clearing is disabled.
-func (r *SPSC[T]) Reset() {
+func (r *SPSCQueue[T]) Reset() {
 	clear(r.producer.entries)
 	r.producer.cursor = 0
 	r.producer.cachedConsumer = 0
@@ -166,7 +115,7 @@ func (r *SPSC[T]) Reset() {
 }
 
 // Enqueue appends item or returns ErrFull unwrapped. It belongs to the serialized producer side.
-func (r *SPSC[T]) Enqueue(item T) error {
+func (r *SPSCQueue[T]) Enqueue(item T) error {
 	producer := &r.producer
 	capacity := producer.mask + 1
 	free := capacity + producer.cachedConsumer - producer.cursor
@@ -185,7 +134,7 @@ func (r *SPSC[T]) Enqueue(item T) error {
 
 // Dequeue removes the oldest value or returns the zero value and ErrEmpty unwrapped.
 // It belongs to the serialized consumer side and clears the slot before release when enabled.
-func (r *SPSC[T]) Dequeue() (T, error) {
+func (r *SPSCQueue[T]) Dequeue() (T, error) {
 	consumer := &r.consumer
 	capacity := consumer.mask + 1
 	available := consumer.cachedProducer - consumer.cursor
@@ -210,9 +159,9 @@ func (r *SPSC[T]) Dequeue() (T, error) {
 
 // EnqueueBulk appends all items or none. It checks capacity, batch limit, then room, returning
 // wrapped ErrExceedsCapacity, wrapped ErrExceedsMaxBatch, or unwrapped ErrFull respectively.
-// It returns post-call free slots on every path. Counts follow WithSPSCExactBatchCounts.
+// It returns post-call free slots on every path. Counts follow WithExactBatchCounts.
 // A zero-length call refreshes its count without publication. This is a producer operation.
-func (r *SPSC[T]) EnqueueBulk(items []T) (free int, err error) {
+func (r *SPSCQueue[T]) EnqueueBulk(items []T) (free int, err error) {
 	producer := &r.producer
 	if len(items) > int(producer.maxBatch) {
 		fresh := producer.mask + 1 + r.consumer.published.Load() - producer.cursor
@@ -246,9 +195,9 @@ func (r *SPSC[T]) EnqueueBulk(items []T) (free int, err error) {
 }
 
 // EnqueueBurst appends the available prefix, limited to MaxEnqueueBatch, and returns moved and
-// post-call free counts. Counts follow WithSPSCExactBatchCounts. A zero-length call refreshes
+// post-call free counts. Counts follow WithExactBatchCounts. A zero-length call refreshes
 // its count without publication. This is a producer operation.
-func (r *SPSC[T]) EnqueueBurst(items []T) (enqueued, free int) {
+func (r *SPSCQueue[T]) EnqueueBurst(items []T) (enqueued, free int) {
 	length := min(len(items), int(r.producer.maxBatch))
 	if length == 1 {
 		producer := &r.producer
@@ -275,9 +224,9 @@ func (r *SPSC[T]) EnqueueBurst(items []T) (enqueued, free int) {
 // DequeueBulk fills dst in FIFO order or leaves it entirely unchanged. It checks capacity,
 // batch limit, then data, returning wrapped ErrExceedsCapacity, wrapped ErrExceedsMaxBatch, or
 // unwrapped ErrEmpty respectively. It returns post-call available entries on every path.
-// Counts follow WithSPSCExactBatchCounts. Zero length refreshes without publication.
+// Counts follow WithExactBatchCounts. Zero length refreshes without publication.
 // This is a consumer operation, including failures and zero-length calls.
-func (r *SPSC[T]) DequeueBulk(dst []T) (available int, err error) {
+func (r *SPSCQueue[T]) DequeueBulk(dst []T) (available int, err error) {
 	consumer := &r.consumer
 	if len(dst) > int(consumer.maxBatch) {
 		fresh := r.producer.published.Load() - consumer.cursor
@@ -317,8 +266,8 @@ func (r *SPSC[T]) DequeueBulk(dst []T) (available int, err error) {
 
 // DequeueBurst fills only the available prefix of dst, limited to MaxDequeueBatch, and leaves
 // the suffix unchanged. It returns moved and post-call available counts, following
-// WithSPSCExactBatchCounts. Zero length refreshes without publication. This is a consumer call.
-func (r *SPSC[T]) DequeueBurst(dst []T) (dequeued, available int) {
+// WithExactBatchCounts. Zero length refreshes without publication. This is a consumer call.
+func (r *SPSCQueue[T]) DequeueBurst(dst []T) (dequeued, available int) {
 	length := min(len(dst), int(r.consumer.maxBatch))
 	if length == 1 {
 		consumer := &r.consumer
@@ -347,7 +296,7 @@ func (r *SPSC[T]) DequeueBurst(dst []T) (dequeued, available int) {
 	return r.dequeueBatch(dst[:length], false)
 }
 
-func (r *SPSC[T]) enqueueBatch(items []T, fixed bool) (int, int) {
+func (r *SPSCQueue[T]) enqueueBatch(items []T, fixed bool) (int, int) {
 	producer := &r.producer
 	capacity := producer.mask + 1
 	length := uint32(len(items))
@@ -375,7 +324,7 @@ func (r *SPSC[T]) enqueueBatch(items []T, fixed bool) (int, int) {
 	return int(length), int(free - length)
 }
 
-func (r *SPSC[T]) dequeueBatch(dst []T, fixed bool) (int, int) {
+func (r *SPSCQueue[T]) dequeueBatch(dst []T, fixed bool) (int, int) {
 	consumer := &r.consumer
 	capacity := consumer.mask + 1
 	length := uint32(len(dst))

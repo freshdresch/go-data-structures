@@ -1,38 +1,42 @@
 package ring
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 var (
-	mpscIntAllocationSink     *MPSC[int64]
-	mpscPointerAllocationSink *MPSC[*int64]
+	mpscIntAllocationSink     *MPSCQueue[int64]
+	mpscPointerAllocationSink *MPSCQueue[*int64]
 )
 
 func TestMPSCConstructorAllocations(t *testing.T) {
-	configured := []MPSCOption{
-		WithMPSCMaxBatch(8),
-		WithMPSCMaxEnqueueBatch(4),
-		WithMPSCMaxDequeueBatch(2),
-		WithoutMPSCDequeueClearing(),
-		WithMPSCExactBatchCounts(),
-		WithMPSCSpinsBeforeYield(0),
+	configured := []Option{
+		WithMaxBatch(8),
+		WithMaxEnqueueBatch(4),
+		WithMaxDequeueBatch(2),
+		WithoutDequeueClearing(),
+		WithExactBatchCounts(),
+		WithSpinsBeforeYield(0),
 	}
 	for _, test := range []struct {
 		name    string
-		options []MPSCOption
+		options []Option
 	}{
 		{"default", nil},
 		{"configured", configured},
+		{"relaxed", []Option{WithRelaxedMultiProdEnqueue()}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			integers := testing.AllocsPerRun(100, func() {
-				queue, err := NewMPSC[int64](8, test.options...)
+				queue, err := NewMPSCQueue[int64](8, test.options...)
 				if err != nil {
 					t.Fatal(err)
 				}
 				mpscIntAllocationSink = queue
 			})
 			pointers := testing.AllocsPerRun(100, func() {
-				queue, err := NewMPSC[*int64](8, test.options...)
+				queue, err := NewMPSCQueue[*int64](8, test.options...)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -54,92 +58,96 @@ func TestMPSCSteadyStateAllocations(t *testing.T) {
 
 func checkMPSCSteadyStateAllocations[T any](t *testing.T, value T) {
 	t.Helper()
-	for _, exact := range []bool{false, true} {
-		for _, clearing := range []bool{false, true} {
-			var options []MPSCOption
-			if exact {
-				options = append(options, WithMPSCExactBatchCounts())
-			}
-			if !clearing {
-				options = append(options, WithoutMPSCDequeueClearing())
-			}
-			queue := newMPSCForTest[T](t, 8, options...)
-			clampedOptions := append(options, WithMPSCMaxBatch(1))
-			clamped := newMPSCForTest[T](t, 8, clampedOptions...)
-			items := []T{value, value, value}
-			dst := make([]T, 3)
-			full := []T{value, value, value, value, value, value, value, value}
-			fullDst := make([]T, 8)
-			for _, method := range []string{
-				"single", "bulk-one", "burst-one", "burst-clamped-one", "bulk-wrapped",
-				"burst-wrapped",
-				"admission-and-observers",
-			} {
-				allocations := testing.AllocsPerRun(100, func() {
-					switch method {
-					case "single":
-						if err := queue.Enqueue(value); err != nil {
-							t.Fatal(err)
-						}
-						if _, err := queue.Dequeue(); err != nil {
-							t.Fatal(err)
-						}
-					case "bulk-one":
-						if _, err := queue.EnqueueBulk(items[:1]); err != nil {
-							t.Fatal(err)
-						}
-						if _, err := queue.DequeueBulk(dst[:1]); err != nil {
-							t.Fatal(err)
-						}
-					case "burst-one":
-						if count, _ := queue.EnqueueBurst(items[:1]); count != 1 {
-							t.Fatal("burst-one enqueue count", count)
-						}
-						if count, _ := queue.DequeueBurst(dst[:1]); count != 1 {
-							t.Fatal("burst-one dequeue count", count)
-						}
-					case "burst-clamped-one":
-						if count, _ := clamped.EnqueueBurst(items); count != 1 {
-							t.Fatal("clamped enqueue count", count)
-						}
-						if count, _ := clamped.DequeueBurst(dst); count != 1 {
-							t.Fatal("clamped dequeue count", count)
-						}
-					case "bulk-wrapped":
-						for i := 0; i < 8; i++ {
-							if _, err := queue.EnqueueBulk(items); err != nil {
-								t.Fatal(err)
-							}
-							if _, err := queue.DequeueBulk(dst); err != nil {
-								t.Fatal(err)
-							}
-						}
-					case "burst-wrapped":
-						for i := 0; i < 8; i++ {
-							if count, _ := queue.EnqueueBurst(items); count != 3 {
-								t.Fatal("burst enqueue count", count)
-							}
-							if count, _ := queue.DequeueBurst(dst); count != 3 {
-								t.Fatal("burst dequeue count", count)
-							}
-						}
-					case "admission-and-observers":
-						checkMPSCAdmissionAllocations(t, queue, full, fullDst)
+	for _, relaxed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("relaxed=%t", relaxed), func(t *testing.T) {
+			for _, exact := range []bool{false, true} {
+				for _, clearing := range []bool{false, true} {
+					var options []Option
+					if exact {
+						options = append(options, WithExactBatchCounts())
 					}
-				})
-				t.Logf(
-					"payload=%T exact=%t clearing=%t method=%s allocations=%g",
-					value, exact, clearing, method, allocations,
-				)
-				if allocations != 0 {
-					t.Fatal("steady-state allocation")
+					if !clearing {
+						options = append(options, WithoutDequeueClearing())
+					}
+					queue := newMPSCProtocolForTest[T](t, relaxed, 8, options...)
+					clampedOptions := append(options, WithMaxBatch(1))
+					clamped := newMPSCProtocolForTest[T](t, relaxed, 8, clampedOptions...)
+					items := []T{value, value, value}
+					dst := make([]T, 3)
+					full := []T{value, value, value, value, value, value, value, value}
+					fullDst := make([]T, 8)
+					for _, method := range []string{
+						"single", "bulk-one", "burst-one", "burst-clamped-one", "bulk-wrapped",
+						"burst-wrapped",
+						"admission-and-observers",
+					} {
+						allocations := testing.AllocsPerRun(100, func() {
+							switch method {
+							case "single":
+								if err := queue.Enqueue(value); err != nil {
+									t.Fatal(err)
+								}
+								if _, err := queue.Dequeue(); err != nil {
+									t.Fatal(err)
+								}
+							case "bulk-one":
+								if _, err := queue.EnqueueBulk(items[:1]); err != nil {
+									t.Fatal(err)
+								}
+								if _, err := queue.DequeueBulk(dst[:1]); err != nil {
+									t.Fatal(err)
+								}
+							case "burst-one":
+								if count, _ := queue.EnqueueBurst(items[:1]); count != 1 {
+									t.Fatal("burst-one enqueue count", count)
+								}
+								if count, _ := queue.DequeueBurst(dst[:1]); count != 1 {
+									t.Fatal("burst-one dequeue count", count)
+								}
+							case "burst-clamped-one":
+								if count, _ := clamped.EnqueueBurst(items); count != 1 {
+									t.Fatal("clamped enqueue count", count)
+								}
+								if count, _ := clamped.DequeueBurst(dst); count != 1 {
+									t.Fatal("clamped dequeue count", count)
+								}
+							case "bulk-wrapped":
+								for i := 0; i < 8; i++ {
+									if _, err := queue.EnqueueBulk(items); err != nil {
+										t.Fatal(err)
+									}
+									if _, err := queue.DequeueBulk(dst); err != nil {
+										t.Fatal(err)
+									}
+								}
+							case "burst-wrapped":
+								for i := 0; i < 8; i++ {
+									if count, _ := queue.EnqueueBurst(items); count != 3 {
+										t.Fatal("burst enqueue count", count)
+									}
+									if count, _ := queue.DequeueBurst(dst); count != 3 {
+										t.Fatal("burst dequeue count", count)
+									}
+								}
+							case "admission-and-observers":
+								checkMPSCAdmissionAllocations(t, queue, full, fullDst)
+							}
+						})
+						t.Logf(
+							"payload=%T exact=%t clearing=%t method=%s allocations=%g",
+							value, exact, clearing, method, allocations,
+						)
+						if allocations != 0 {
+							t.Fatal("steady-state allocation")
+						}
+					}
 				}
 			}
-		}
+		})
 	}
 }
 
-func checkMPSCAdmissionAllocations[T any](t *testing.T, queue *MPSC[T], items, dst []T) {
+func checkMPSCAdmissionAllocations[T any](t *testing.T, queue *MPSCQueue[T], items, dst []T) {
 	t.Helper()
 	if _, err := queue.Dequeue(); err != ErrEmpty {
 		t.Fatal("empty single", err)

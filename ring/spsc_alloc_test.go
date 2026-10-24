@@ -3,31 +3,31 @@ package ring
 import "testing"
 
 var (
-	spscIntAllocationSink     *SPSC[int64]
-	spscPointerAllocationSink *SPSC[*int64]
+	spscIntAllocationSink     *SPSCQueue[int64]
+	spscPointerAllocationSink *SPSCQueue[*int64]
 )
 
 func TestSPSCConstructorAllocations(t *testing.T) {
-	configured := []SPSCOption{
-		WithSPSCMaxBatch(4), WithoutSPSCDequeueClearing(), WithSPSCExactBatchCounts(),
+	configured := []Option{
+		WithMaxBatch(4), WithoutDequeueClearing(), WithExactBatchCounts(),
 	}
 	for _, test := range []struct {
 		name    string
-		options []SPSCOption
+		options []Option
 	}{
 		{"default", nil},
 		{"configured", configured},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			integers := testing.AllocsPerRun(100, func() {
-				queue, err := NewSPSC[int64](8, test.options...)
+				queue, err := NewSPSCQueue[int64](8, test.options...)
 				if err != nil {
 					t.Fatal(err)
 				}
 				spscIntAllocationSink = queue
 			})
 			pointers := testing.AllocsPerRun(100, func() {
-				queue, err := NewSPSC[*int64](8, test.options...)
+				queue, err := NewSPSCQueue[*int64](8, test.options...)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -50,9 +50,9 @@ func TestSPSCSteadyStateAllocations(t *testing.T) {
 func checkSPSCSteadyStateAllocations[T any](t *testing.T, value T) {
 	t.Helper()
 	for _, exact := range []bool{false, true} {
-		var options []SPSCOption
+		var options []Option
 		if exact {
-			options = append(options, WithSPSCExactBatchCounts())
+			options = append(options, WithExactBatchCounts())
 		}
 		queue := newSPSCForTest[T](t, 8, options...)
 		items := []T{value, value, value}

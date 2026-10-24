@@ -36,7 +36,7 @@ func testSPSCEnqueueBulkOneSnapshots[T comparable](t *testing.T, value, sentinel
 	} {
 		for _, clearing := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/clear=%t", test.name, clearing), func(t *testing.T) {
-				var queues [2]*SPSC[T]
+				var queues [2]*SPSCQueue[T]
 				for index := range queues {
 					queue := newSPSCForTest[T](t, 8)
 					queue.consumer.clearOnDequeue = clearing
@@ -112,7 +112,7 @@ func testSPSCDequeueBulkOneSnapshots[T comparable](t *testing.T, sentinel, tail 
 	} {
 		for _, clearing := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/clear=%t", test.name, clearing), func(t *testing.T) {
-				var queues [2]*SPSC[T]
+				var queues [2]*SPSCQueue[T]
 				for index := range queues {
 					queue := newSPSCForTest[T](t, 8)
 					queue.consumer.clearOnDequeue = clearing
@@ -183,7 +183,7 @@ func testSPSCBulkOneWrap[T comparable](t *testing.T, value, sentinel T) {
 			for _, clearing := range []bool{false, true} {
 				name := fmt.Sprintf("capacity=%d/exact=%t/clear=%t", capacity, exact, clearing)
 				t.Run(name, func(t *testing.T) {
-					var queues [2]*SPSC[T]
+					var queues [2]*SPSCQueue[T]
 					for index := range queues {
 						queue := newSPSCForTest[T](t, capacity)
 						queue.producer.cursor = math.MaxUint32

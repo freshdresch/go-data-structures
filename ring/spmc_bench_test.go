@@ -9,7 +9,7 @@ import (
 	"github.com/freshdresch/go-data-structures/ring"
 )
 
-type spmcSingleQueue[T any] struct{ ring *ring.SPMC[T] }
+type spmcSingleQueue[T any] struct{ ring *ring.SPMCQueue[T] }
 
 func (q *spmcSingleQueue[T]) enqueue(items []T) int {
 	return movedOrPanic(q.ring.Enqueue(items[0]), ring.ErrFull, 1)
@@ -24,7 +24,7 @@ func (q *spmcSingleQueue[T]) dequeue(dst []T) int {
 	return 1
 }
 
-type spmcBulkQueue[T any] struct{ ring *ring.SPMC[T] }
+type spmcBulkQueue[T any] struct{ ring *ring.SPMCQueue[T] }
 
 func (q *spmcBulkQueue[T]) enqueue(items []T) int {
 	_, err := q.ring.EnqueueBulk(items)
@@ -36,7 +36,7 @@ func (q *spmcBulkQueue[T]) dequeue(dst []T) int {
 	return movedOrPanic(err, ring.ErrEmpty, len(dst))
 }
 
-type spmcBurstQueue[T any] struct{ ring *ring.SPMC[T] }
+type spmcBurstQueue[T any] struct{ ring *ring.SPMCQueue[T] }
 
 func (q *spmcBurstQueue[T]) enqueue(items []T) int {
 	moved, _ := q.ring.EnqueueBurst(items)
@@ -49,7 +49,7 @@ func (q *spmcBurstQueue[T]) dequeue(dst []T) int {
 }
 
 func newSPMCAPIQueue[T any](api ringAPI) (queue[T], error) {
-	created, err := ring.NewSPMC[T](ringCapacity)
+	created, err := ring.NewSPMCQueue[T](ringCapacity)
 	if err != nil {
 		return nil, err
 	}

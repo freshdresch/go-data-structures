@@ -9,7 +9,7 @@ import (
 	"github.com/freshdresch/go-data-structures/ring"
 )
 
-type mpscSingleQueue[T any] struct{ ring *ring.MPSC[T] }
+type mpscSingleQueue[T any] struct{ ring *ring.MPSCQueue[T] }
 
 func (q *mpscSingleQueue[T]) enqueue(items []T) int {
 	return movedOrPanic(q.ring.Enqueue(items[0]), ring.ErrFull, 1)
@@ -24,7 +24,7 @@ func (q *mpscSingleQueue[T]) dequeue(dst []T) int {
 	return 1
 }
 
-type mpscBulkQueue[T any] struct{ ring *ring.MPSC[T] }
+type mpscBulkQueue[T any] struct{ ring *ring.MPSCQueue[T] }
 
 func (q *mpscBulkQueue[T]) enqueue(items []T) int {
 	_, err := q.ring.EnqueueBulk(items)
@@ -36,7 +36,7 @@ func (q *mpscBulkQueue[T]) dequeue(dst []T) int {
 	return movedOrPanic(err, ring.ErrEmpty, len(dst))
 }
 
-type mpscBurstQueue[T any] struct{ ring *ring.MPSC[T] }
+type mpscBurstQueue[T any] struct{ ring *ring.MPSCQueue[T] }
 
 func (q *mpscBurstQueue[T]) enqueue(items []T) int {
 	moved, _ := q.ring.EnqueueBurst(items)
@@ -49,7 +49,7 @@ func (q *mpscBurstQueue[T]) dequeue(dst []T) int {
 }
 
 func newMPSCAPIQueue[T any](api ringAPI) (queue[T], error) {
-	created, err := ring.NewMPSC[T](ringCapacity)
+	created, err := ring.NewMPSCQueue[T](ringCapacity)
 	if err != nil {
 		return nil, err
 	}

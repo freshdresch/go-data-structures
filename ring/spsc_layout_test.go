@@ -17,7 +17,7 @@ func checkSPSCLayout[T any](t *testing.T) {
 	t.Helper()
 	producer := reflect.TypeOf(spscProducer[T]{})
 	consumer := reflect.TypeOf(spscConsumer[T]{})
-	outer := reflect.TypeOf(SPSC[T]{})
+	outer := reflect.TypeOf(SPSCQueue[T]{})
 	t.Logf(
 		"GOARCH=%s pointer=%d producer=%d/%d consumer=%d/%d outer=%d/%d",
 		runtime.GOARCH,

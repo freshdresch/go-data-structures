@@ -18,11 +18,13 @@ func checkSPMCLayout[T any](t *testing.T) {
 	producer := reflect.TypeOf(spmcProducer[T]{})
 	consumer := reflect.TypeOf(spmcConsumerConfig[T]{})
 	reservation := reflect.TypeOf(spmcConsumerReservation{})
-	outer := reflect.TypeOf(SPMC[T]{})
+	publication := reflect.TypeOf(spmcConsumerPublication{})
+	outer := reflect.TypeOf(SPMCQueue[T]{})
 	entriesType := reflect.TypeOf([]T(nil))
 	uint32Type := reflect.TypeOf(uint32(0))
 	boolType := reflect.TypeOf(false)
 	atomicType := reflect.TypeOf(atomic.Uint32{})
+	packedType := reflect.TypeOf(atomic.Uint64{})
 	gapType := reflect.TypeOf([cacheLine]byte{})
 	if cacheLine != 128 || gapType.Size() != 128 {
 		t.Fatal("cacheLine must preserve all four full 128-byte gaps")
@@ -37,23 +39,34 @@ func checkSPMCLayout[T any](t *testing.T) {
 		t,
 		consumer,
 		[]string{"entries", "mask", "maxBatch", "spinsBeforeYield",
-			"clearOnDequeue", "exactBatchCounts"},
-		[]reflect.Type{entriesType, uint32Type, uint32Type, uint32Type, boolType, boolType},
+			"htdMax", "clearOnDequeue", "exactBatchCounts", "relaxed"},
+		[]reflect.Type{entriesType, uint32Type, uint32Type, uint32Type,
+			uint32Type, boolType, boolType, boolType},
 	)
 	checkSPMCBlockLayout(
 		t,
 		reservation,
-		[]string{"head", "cachedProducer"},
-		[]reflect.Type{atomicType, atomicType},
+		[]string{"headRTS", "head", "cachedProducer"},
+		[]reflect.Type{packedType, atomicType, atomicType},
 	)
 	checkSPMCBlockLayout(
 		t,
 		outer,
 		[]string{"producer", "_", "producerPublished", "_", "consumerConfig", "_",
-			"consumerReservation", "_", "consumerPublished"},
+			"consumerReservation", "_", "consumerPublication"},
 		[]reflect.Type{producer, gapType, atomicType, gapType, consumer, gapType,
-			reservation, gapType, atomicType},
+			reservation, gapType, publication},
 	)
+	checkSPMCBlockLayout(t, publication,
+		[]string{"tailRTS", "published"}, []reflect.Type{packedType, atomicType})
+	for _, offset := range []uintptr{
+		unsafe.Offsetof(SPMCQueue[T]{}.consumerReservation),
+		unsafe.Offsetof(SPMCQueue[T]{}.consumerPublication),
+	} {
+		if offset%8 != 0 {
+			t.Fatal("packed offset is not aligned", offset)
+		}
+	}
 	t.Logf(
 		"GOARCH=%s pointer=%d slice=%d/%d atomic=%d/%d",
 		runtime.GOARCH, unsafe.Sizeof(uintptr(0)), entriesType.Size(), entriesType.Align(),
@@ -76,21 +89,38 @@ func checkSPMCLayout[T any](t *testing.T) {
 	if queue.producer.mask != 7 || queue.consumerConfig.mask != 7 {
 		t.Fatal("entry headers must have matching capacity masks")
 	}
-	if unsafe.Sizeof(uintptr(0)) != 8 || entriesType.Size() != 24 || entriesType.Align() != 8 ||
-		atomicType.Size() != 4 || atomicType.Align() != 4 {
-		t.Log("numeric 64-bit layout expectations do not apply to this target")
+	if uintptr(unsafe.Pointer(&queue.consumerReservation.headRTS))%8 != 0 ||
+		uintptr(unsafe.Pointer(&queue.consumerPublication.tailRTS))%8 != 0 {
+		t.Fatal("allocated packed words are not aligned")
+	}
+	native := unsafe.Sizeof(uintptr(0)) == 8 && entriesType.Size() == 24 && entriesType.Align() == 8
+	x86 := unsafe.Sizeof(uintptr(0)) == 4 && entriesType.Size() == 12 && entriesType.Align() == 4
+	if (!native && !x86) || atomicType.Size() != 4 || atomicType.Align() != 4 ||
+		packedType.Size() != 8 || packedType.Align() != 8 {
 		return
 	}
+	producerOffsets := []uintptr{0, 24, 28, 32, 36, 40}
+	consumerOffsets := []uintptr{0, 24, 28, 32, 36, 40, 41, 42}
+	outerOffsets := []uintptr{0, 48, 176, 180, 312, 360, 488, 504, 632}
+	producerSize, consumerSize, outerSize := uintptr(48), uintptr(48), uintptr(648)
+	if x86 {
+		producerOffsets = []uintptr{0, 12, 16, 20, 24, 28}
+		consumerOffsets = []uintptr{0, 12, 16, 20, 24, 28, 29, 30}
+		outerOffsets = []uintptr{0, 32, 160, 164, 292, 324, 456, 472, 600}
+		producerSize, consumerSize, outerSize = 32, 32, 616
+	}
+	blockAlignment := producer.Align()
 	for _, expected := range []struct {
 		block     reflect.Type
 		offsets   []uintptr
 		size      uintptr
 		alignment int
 	}{
-		{producer, []uintptr{0, 24, 28, 32, 36, 40}, 48, 8},
-		{consumer, []uintptr{0, 24, 28, 32, 36, 37}, 40, 8},
-		{reservation, []uintptr{0, 4}, 8, 4},
-		{outer, []uintptr{0, 48, 176, 180, 312, 352, 480, 488, 616}, 624, 8},
+		{producer, producerOffsets, producerSize, blockAlignment},
+		{consumer, consumerOffsets, consumerSize, blockAlignment},
+		{reservation, []uintptr{0, 8, 12}, 16, 8},
+		{publication, []uintptr{0, 8}, 16, 8},
+		{outer, outerOffsets, outerSize, 8},
 	} {
 		if expected.block.Size() != expected.size ||
 			expected.block.Align() != expected.alignment {

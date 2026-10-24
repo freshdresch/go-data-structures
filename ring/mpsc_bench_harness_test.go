@@ -316,8 +316,8 @@ func checkMPSCComparisonLayout(
 		}
 		return
 	}
-	require.Equal(t, uintptr(624), layout.Size)
-	for index, offset := range []uintptr{0, 168, 304, 440, 616} {
+	require.Equal(t, uintptr(648), layout.Size)
+	for index, offset := range []uintptr{0, 176, 320, 464, 640} {
 		require.Equal(t, offset, concrete.Field(2*index).Offset)
 	}
 }
@@ -518,10 +518,10 @@ func TestMPSCComparisonAdapterContracts(t *testing.T) {
 				require.NoError(t, err)
 				target = &ringBulkQueue[int64]{ring: created}
 			} else {
-				created, err := ring.NewMPSC[int64](
+				created, err := ring.NewMPSCQueue[int64](
 					1024,
-					ring.WithMPSCMaxEnqueueBatch(2),
-					ring.WithMPSCMaxDequeueBatch(2),
+					ring.WithMaxEnqueueBatch(2),
+					ring.WithMaxDequeueBatch(2),
 				)
 				require.NoError(t, err)
 				target = &mpscBulkQueue[int64]{ring: created}

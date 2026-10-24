@@ -28,7 +28,7 @@ func BenchmarkSPSCConcrete(b *testing.B) {
 
 func benchmarkSPSCConcreteSeq[T any](b *testing.B, fill fillFunc[T]) {
 	setElemBytes[T](b)
-	created, err := ring.NewSPSC[T](ringCapacity)
+	created, err := ring.NewSPSCQueue[T](ringCapacity)
 	if err != nil {
 		b.Fatal(err)
 	}

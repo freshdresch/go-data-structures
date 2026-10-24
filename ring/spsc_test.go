@@ -12,9 +12,9 @@ import (
 	"time"
 )
 
-func newSPSCForTest[T any](t *testing.T, capacity int, options ...SPSCOption) *SPSC[T] {
+func newSPSCForTest[T any](t *testing.T, capacity int, options ...Option) *SPSCQueue[T] {
 	t.Helper()
-	queue, err := NewSPSC[T](capacity, options...)
+	queue, err := NewSPSCQueue[T](capacity, options...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -23,16 +23,16 @@ func newSPSCForTest[T any](t *testing.T, capacity int, options ...SPSCOption) *S
 
 func TestSPSCConstruction(t *testing.T) {
 	for _, count := range []int{-1, 0, 3, 5, maxCount + 1, math.MaxInt} {
-		queue, err := NewSPSC[int](count)
+		queue, err := NewSPSCQueue[int](count)
 		if queue != nil || !errors.Is(err, ErrInvalidCount) || err == ErrInvalidCount {
 			t.Fatalf("count %d: queue=%p error=%v", count, queue, err)
 		}
 	}
-	for _, option := range []func(int) SPSCOption{
-		WithSPSCMaxBatch, WithSPSCMaxEnqueueBatch, WithSPSCMaxDequeueBatch,
+	for _, option := range []func(int) Option{
+		WithMaxBatch, WithMaxEnqueueBatch, WithMaxDequeueBatch,
 	} {
 		for _, limit := range []int{-1, 0, 5, math.MaxInt} {
-			queue, err := NewSPSC[int](4, option(limit))
+			queue, err := NewSPSCQueue[int](4, option(limit))
 			if queue != nil || !errors.Is(err, ErrInvalidMaxBatch) {
 				t.Fatalf("limit %d: queue=%p error=%v", limit, queue, err)
 			}
@@ -40,18 +40,18 @@ func TestSPSCConstruction(t *testing.T) {
 	}
 	cases := []struct {
 		name             string
-		options          []SPSCOption
+		options          []Option
 		enqueue, dequeue int
 	}{
 		{"defaults", nil, 8, 8},
-		{"both", []SPSCOption{WithSPSCMaxBatch(4)}, 4, 4},
-		{"directional-last", []SPSCOption{
-			WithSPSCMaxBatch(4), WithSPSCMaxEnqueueBatch(2), WithSPSCMaxDequeueBatch(3),
+		{"both", []Option{WithMaxBatch(4)}, 4, 4},
+		{"directional-last", []Option{
+			WithMaxBatch(4), WithMaxEnqueueBatch(2), WithMaxDequeueBatch(3),
 		}, 2, 3},
-		{"both-last", []SPSCOption{
-			WithSPSCMaxEnqueueBatch(2), WithSPSCMaxDequeueBatch(3), WithSPSCMaxBatch(4),
+		{"both-last", []Option{
+			WithMaxEnqueueBatch(2), WithMaxDequeueBatch(3), WithMaxBatch(4),
 		}, 4, 4},
-		{"invalid-overridden", []SPSCOption{WithSPSCMaxBatch(0), WithSPSCMaxBatch(4)}, 4, 4},
+		{"invalid-overridden", []Option{WithMaxBatch(0), WithMaxBatch(4)}, 4, 4},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
@@ -79,9 +79,9 @@ func TestSPSCFullCapacityAndFIFO(t *testing.T) {
 	for _, capacity := range []int{1, 2, 4, 8} {
 		for _, exact := range []bool{false, true} {
 			t.Run(fmt.Sprintf("capacity=%d/exact=%t", capacity, exact), func(t *testing.T) {
-				var options []SPSCOption
+				var options []Option
 				if exact {
-					options = append(options, WithSPSCExactBatchCounts())
+					options = append(options, WithExactBatchCounts())
 				}
 				queue := newSPSCForTest[int](t, capacity, options...)
 				for round := 0; round < 6; round++ {
@@ -142,7 +142,7 @@ func TestSPSCFullCapacityAndFIFO(t *testing.T) {
 	}
 }
 
-func seedSPSC[T any](queue *SPSC[T], position uint32) {
+func seedSPSC[T any](queue *SPSCQueue[T], position uint32) {
 	queue.producer.cursor = position
 	queue.producer.cachedConsumer = position
 	queue.producer.published.Store(position)
@@ -190,7 +190,7 @@ func TestSPSCPositionAndPhysicalWrap(t *testing.T) {
 }
 
 func TestSPSCBulkErrorsAndBurstLimits(t *testing.T) {
-	queue := newSPSCForTest[int](t, 4, WithSPSCMaxBatch(2))
+	queue := newSPSCForTest[int](t, 4, WithMaxBatch(2))
 	for _, length := range []int{5, 3, 2} {
 		want := ErrEmpty
 		switch length {
@@ -247,9 +247,9 @@ func TestSPSCBatchCounts(t *testing.T) {
 	for _, exact := range []bool{false, true} {
 		for _, burst := range []bool{false, true} {
 			t.Run(fmt.Sprintf("exact=%t/burst=%t", exact, burst), func(t *testing.T) {
-				options := []SPSCOption{WithSPSCMaxBatch(2)}
+				options := []Option{WithMaxBatch(2)}
 				if exact {
-					options = append(options, WithSPSCExactBatchCounts())
+					options = append(options, WithExactBatchCounts())
 				}
 				queue := newSPSCForTest[int](t, 8, options...)
 				enqueue := func(items []int) (int, error) {
@@ -326,9 +326,9 @@ func TestSPSCBatchCounts(t *testing.T) {
 
 func TestSPSCReloadBeforePartial(t *testing.T) {
 	for _, exact := range []bool{false, true} {
-		var options []SPSCOption
+		var options []Option
 		if exact {
-			options = append(options, WithSPSCExactBatchCounts())
+			options = append(options, WithExactBatchCounts())
 		}
 		queue := newSPSCForTest[int](t, 4, options...)
 		if _, err := queue.EnqueueBulk([]int{1, 2, 3, 4}); err != nil {
@@ -386,9 +386,9 @@ func TestSPSCReloadBeforePartial(t *testing.T) {
 
 func TestSPSCPointerClearingAndReset(t *testing.T) {
 	for _, keep := range []bool{false, true} {
-		options := []SPSCOption{WithSPSCMaxBatch(3), WithSPSCExactBatchCounts()}
+		options := []Option{WithMaxBatch(3), WithExactBatchCounts()}
 		if keep {
-			options = append(options, WithoutSPSCDequeueClearing())
+			options = append(options, WithoutDequeueClearing())
 		}
 		queue := newSPSCForTest[*int](t, 4, options...)
 		seedSPSC(queue, math.MaxUint32-1)
@@ -460,9 +460,9 @@ func TestSPSCConcurrentTransfersAndHandoffs(t *testing.T) {
 
 func runSPSCTransfers(t *testing.T, capacity int, exact bool) {
 	t.Helper()
-	var options []SPSCOption
+	var options []Option
 	if exact {
-		options = append(options, WithSPSCExactBatchCounts())
+		options = append(options, WithExactBatchCounts())
 	}
 	queue := newSPSCForTest[int](t, capacity, options...)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -627,7 +627,7 @@ func TestSPSCLengthClampingBeforeNarrowing(t *testing.T) {
 	}
 	length := uint64(math.MaxUint32) + 2
 	items := make([]struct{}, int(length))
-	queue := newSPSCForTest[struct{}](t, 4, WithSPSCMaxBatch(2))
+	queue := newSPSCForTest[struct{}](t, 4, WithMaxBatch(2))
 	if free, err := queue.EnqueueBulk(items); free != 4 || !errors.Is(err, ErrExceedsCapacity) {
 		t.Fatalf("large bulk free=%d error=%v", free, err)
 	}
@@ -643,7 +643,7 @@ func TestSPSCLengthClampingBeforeNarrowing(t *testing.T) {
 }
 
 func TestSPSCFullClampedBurstCachedCounts(t *testing.T) {
-	queue := newSPSCForTest[int](t, 8, WithSPSCMaxBatch(2))
+	queue := newSPSCForTest[int](t, 8, WithMaxBatch(2))
 	for value := range 4 {
 		if err := queue.Enqueue(value); err != nil {
 			t.Fatal(err)

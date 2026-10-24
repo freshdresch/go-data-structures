@@ -18,11 +18,13 @@ func checkMPSCLayout[T any](t *testing.T) {
 	producer := reflect.TypeOf(mpscProducerConfig[T]{})
 	consumer := reflect.TypeOf(mpscConsumer[T]{})
 	reservation := reflect.TypeOf(mpscProducerReservation{})
-	outer := reflect.TypeOf(MPSC[T]{})
+	publication := reflect.TypeOf(mpscProducerPublication{})
+	outer := reflect.TypeOf(MPSCQueue[T]{})
 	entriesType := reflect.TypeOf([]T(nil))
 	uint32Type := reflect.TypeOf(uint32(0))
 	boolType := reflect.TypeOf(false)
 	atomicType := reflect.TypeOf(atomic.Uint32{})
+	packedType := reflect.TypeOf(atomic.Uint64{})
 	gapType := reflect.TypeOf([cacheLine]byte{})
 	if cacheLine != 128 || gapType.Size() != 128 {
 		t.Fatal("cacheLine must preserve all four full 128-byte gaps")
@@ -30,8 +32,10 @@ func checkMPSCLayout[T any](t *testing.T) {
 	checkMPSCBlockLayout(
 		t,
 		producer,
-		[]string{"entries", "mask", "maxBatch", "spinsBeforeYield", "exactBatchCounts"},
-		[]reflect.Type{entriesType, uint32Type, uint32Type, uint32Type, boolType},
+		[]string{"entries", "mask", "maxBatch", "spinsBeforeYield", "htdMax",
+			"relaxed", "exactBatchCounts"},
+		[]reflect.Type{entriesType, uint32Type, uint32Type, uint32Type, uint32Type,
+			boolType, boolType},
 	)
 	checkMPSCBlockLayout(
 		t,
@@ -44,15 +48,21 @@ func checkMPSCLayout[T any](t *testing.T) {
 	checkMPSCBlockLayout(
 		t,
 		reservation,
-		[]string{"head", "cachedConsumer"},
-		[]reflect.Type{atomicType, atomicType},
+		[]string{"headRTS", "head", "cachedConsumer"},
+		[]reflect.Type{packedType, atomicType, atomicType},
+	)
+	checkMPSCBlockLayout(
+		t,
+		publication,
+		[]string{"tailRTS", "published"},
+		[]reflect.Type{packedType, atomicType},
 	)
 	checkMPSCBlockLayout(
 		t,
 		outer,
-		[]string{"producerConfig", "_", "producerReservation", "_", "producerPublished", "_",
+		[]string{"producerConfig", "_", "producerReservation", "_", "producerPublication", "_",
 			"consumer", "_", "consumerPublished"},
-		[]reflect.Type{producer, gapType, reservation, gapType, atomicType, gapType,
+		[]reflect.Type{producer, gapType, reservation, gapType, publication, gapType,
 			consumer, gapType, atomicType},
 	)
 	t.Logf(
@@ -77,22 +87,46 @@ func checkMPSCLayout[T any](t *testing.T) {
 	if queue.producerConfig.mask != 7 || queue.consumer.mask != 7 {
 		t.Fatal("entry headers must have matching capacity masks")
 	}
-	if unsafe.Sizeof(uintptr(0)) != 8 || entriesType.Size() != 24 || entriesType.Align() != 8 ||
-		atomicType.Size() != 4 || atomicType.Align() != 4 {
-		t.Log("numeric 64-bit layout expectations do not apply to this target")
+	for _, offset := range []uintptr{
+		unsafe.Offsetof(queue.producerReservation) + unsafe.Offsetof(queue.producerReservation.headRTS),
+		unsafe.Offsetof(queue.producerPublication) + unsafe.Offsetof(queue.producerPublication.tailRTS),
+	} {
+		if offset%8 != 0 || (uintptr(unsafe.Pointer(queue))+offset)%8 != 0 {
+			t.Fatal("packed words must have aligned offsets and allocated addresses")
+		}
+	}
+	if atomicType.Size() != 4 || atomicType.Align() != 4 ||
+		packedType.Size() != 8 || packedType.Align() != 8 {
 		return
 	}
-	for _, expected := range []struct {
+	type expectation struct {
 		block     reflect.Type
 		offsets   []uintptr
 		size      uintptr
 		alignment int
-	}{
-		{producer, []uintptr{0, 24, 28, 32, 36}, 40, 8},
-		{consumer, []uintptr{0, 24, 28, 32, 36, 40, 44}, 48, 8},
-		{reservation, []uintptr{0, 4}, 8, 4},
-		{outer, []uintptr{0, 40, 168, 176, 304, 308, 440, 488, 616}, 624, 8},
-	} {
+	}
+	var expectations []expectation
+	switch {
+	case entriesType.Size() == 24 && entriesType.Align() == 8:
+		expectations = []expectation{
+			{producer, []uintptr{0, 24, 28, 32, 36, 40, 41}, 48, 8},
+			{consumer, []uintptr{0, 24, 28, 32, 36, 40, 44}, 48, 8},
+			{outer, []uintptr{0, 48, 176, 192, 320, 336, 464, 512, 640}, 648, 8},
+		}
+	case entriesType.Size() == 12 && entriesType.Align() == 4:
+		expectations = []expectation{
+			{producer, []uintptr{0, 12, 16, 20, 24, 28, 29}, 32, 4},
+			{consumer, []uintptr{0, 12, 16, 20, 24, 28, 32}, 36, 4},
+			{outer, []uintptr{0, 32, 160, 176, 304, 320, 448, 484, 612}, 616, 8},
+		}
+	default:
+		return
+	}
+	expectations = append(expectations,
+		expectation{reservation, []uintptr{0, 8, 12}, 16, 8},
+		expectation{publication, []uintptr{0, 8}, 16, 8},
+	)
+	for _, expected := range expectations {
 		if expected.block.Size() != expected.size ||
 			expected.block.Align() != expected.alignment {
 			t.Fatalf("%s numeric size/alignment mismatch", expected.block)

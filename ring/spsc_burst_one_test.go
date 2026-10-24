@@ -13,7 +13,7 @@ type spscBurstOneState[T comparable] struct {
 	entries   []T
 }
 
-func snapshotSPSCBurstOne[T comparable](queue *SPSC[T]) spscBurstOneState[T] {
+func snapshotSPSCBurstOne[T comparable](queue *SPSCQueue[T]) spscBurstOneState[T] {
 	return spscBurstOneState[T]{
 		positions: [6]uint32{
 			queue.producer.cursor, queue.producer.cachedConsumer, queue.producer.published.Load(),
@@ -40,7 +40,7 @@ func TestSPSCEnqueueBurstOneSnapshots(t *testing.T) {
 		{"exact-invalid-fresh", true, 4, 0, 5, 0, 8, 5},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			var queues [2]*SPSC[int]
+			var queues [2]*SPSCQueue[int]
 			for index := range queues {
 				queue := newSPSCForTest[int](t, 8)
 				queue.producer.exactBatchCounts = test.exact
@@ -95,7 +95,7 @@ func TestSPSCDequeueBurstOneSnapshots(t *testing.T) {
 		{"exact-invalid-fresh", true, 2, 4, 11, 0, 8, 11},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			var queues [2]*SPSC[int]
+			var queues [2]*SPSCQueue[int]
 			for index := range queues {
 				queue := newSPSCForTest[int](t, 8)
 				queue.consumer.exactBatchCounts = test.exact
@@ -156,9 +156,9 @@ func TestSPSCBurstOneClampAndFallback(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			for _, enqueue := range []bool{false, true} {
-				var queues [2]*SPSC[int]
+				var queues [2]*SPSCQueue[int]
 				for index := range queues {
-					queue := newSPSCForTest[int](t, 8, WithSPSCMaxBatch(test.limit))
+					queue := newSPSCForTest[int](t, 8, WithMaxBatch(test.limit))
 					for value := range test.occupancy {
 						if err := queue.Enqueue(10 + value); err != nil {
 							t.Fatal(err)
@@ -216,11 +216,11 @@ func TestSPSCBurstOnePointersAndWrap(t *testing.T) {
 	for _, clearSlots := range []bool{false, true} {
 		for _, capacity := range []int{1, 8} {
 			t.Run(fmt.Sprintf("clear=%t/capacity=%d", clearSlots, capacity), func(t *testing.T) {
-				var options []SPSCOption
+				var options []Option
 				if !clearSlots {
-					options = append(options, WithoutSPSCDequeueClearing())
+					options = append(options, WithoutDequeueClearing())
 				}
-				var queues [2]*SPSC[*int]
+				var queues [2]*SPSCQueue[*int]
 				for index := range queues {
 					queue := newSPSCForTest[*int](t, capacity, options...)
 					queue.producer.cursor = math.MaxUint32

@@ -216,7 +216,7 @@ func (r *SPSC[T]) EnqueueBulk(items []T) (free int, err error) {
 	producer := &r.producer
 	if len(items) > int(producer.maxBatch) {
 		fresh := producer.mask + 1 + r.consumer.published.Load() - producer.cursor
-		return int(min(fresh, producer.mask+1)), spscLengthError(
+		return int(min(fresh, producer.mask+1)), batchLengthError(
 			"enqueue", len(items), producer.maxBatch, producer.mask+1,
 		)
 	}
@@ -281,7 +281,7 @@ func (r *SPSC[T]) DequeueBulk(dst []T) (available int, err error) {
 	consumer := &r.consumer
 	if len(dst) > int(consumer.maxBatch) {
 		fresh := r.producer.published.Load() - consumer.cursor
-		return int(min(fresh, consumer.mask+1)), spscLengthError(
+		return int(min(fresh, consumer.mask+1)), batchLengthError(
 			"dequeue", len(dst), consumer.maxBatch, consumer.mask+1,
 		)
 	}
@@ -345,19 +345,6 @@ func (r *SPSC[T]) DequeueBurst(dst []T) (dequeued, available int) {
 		return 1, int(available - 1)
 	}
 	return r.dequeueBatch(dst[:length], false)
-}
-
-func spscLengthError(op string, length int, maxBatch, capacity uint32) error {
-	if length > int(capacity) {
-		return fmt.Errorf(
-			"%s %d elements, capacity %d: %w",
-			op, length, capacity, ErrExceedsCapacity,
-		)
-	}
-	return fmt.Errorf(
-		"%s %d elements, max %s batch %d: %w",
-		op, length, op, maxBatch, ErrExceedsMaxBatch,
-	)
 }
 
 func (r *SPSC[T]) enqueueBatch(items []T, fixed bool) (int, int) {

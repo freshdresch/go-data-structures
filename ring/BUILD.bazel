@@ -3,6 +3,8 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "ring",
     srcs = [
+        "batch_errors.go",
+        "mpsc.go",
         "ring.go",
         "spmc.go",
         "spsc.go",
@@ -15,6 +17,10 @@ go_test(
     name = "ring_test",
     srcs = [
         "alignment_test.go",
+        "mpsc_alloc_test.go",
+        "mpsc_concurrency_test.go",
+        "mpsc_layout_test.go",
+        "mpsc_test.go",
         "ring_test.go",
         "spmc_alloc_test.go",
         "spmc_concurrency_test.go",
@@ -46,6 +52,8 @@ go_test(
         "bench_latency_test.go",
         "bench_manifest_test.go",
         "bench_test.go",
+        "mpsc_bench_test.go",
+        "mpsc_bench_harness_test.go",
         "race_off_test.go",
         "race_on_test.go",
         "spmc_bench_test.go",

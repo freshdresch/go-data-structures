@@ -242,7 +242,7 @@ func (r *SPMC[T]) EnqueueBulk(items []T) (free int, err error) {
 	if len(items) > int(capacity) || len(items) > int(producer.maxBatch) {
 		cursor := producer.cursor
 		fresh := capacity + r.consumerPublished.Load() - cursor
-		return int(min(fresh, capacity)), spmcLengthError(
+		return int(min(fresh, capacity)), batchLengthError(
 			"enqueue", len(items), producer.maxBatch, capacity,
 		)
 	}
@@ -271,7 +271,7 @@ func (r *SPMC[T]) DequeueBulk(dst []T) (available int, err error) {
 	if len(dst) > int(capacity) || len(dst) > int(consumer.maxBatch) {
 		head := r.consumerReservation.head.Load()
 		fresh := r.producerPublished.Load() - head
-		return int(min(fresh, capacity)), spmcLengthError(
+		return int(min(fresh, capacity)), batchLengthError(
 			"dequeue", len(dst), consumer.maxBatch, capacity,
 		)
 	}
@@ -304,19 +304,6 @@ func (r *SPMC[T]) DequeueBurst(dst []T) (dequeued, available int) {
 	r.spmcReadConsumer(start, dst[:count])
 	r.spmcReleaseConsumer(start, count)
 	return int(count), int(remaining)
-}
-
-func spmcLengthError(op string, length int, maxBatch, capacity uint32) error {
-	if length > int(capacity) {
-		return fmt.Errorf(
-			"%s %d elements, capacity %d: %w",
-			op, length, capacity, ErrExceedsCapacity,
-		)
-	}
-	return fmt.Errorf(
-		"%s %d elements, max %s batch %d: %w",
-		op, length, op, maxBatch, ErrExceedsMaxBatch,
-	)
 }
 
 func (r *SPMC[T]) spmcEnqueueBatch(items []T, fixed bool) (int, int) {

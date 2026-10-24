@@ -164,7 +164,10 @@ func projectResults(input, output string) error {
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func() {
+		// The input is read-only, so a close error cannot mean lost written data.
+		_ = file.Close()
+	}()
 	scanner := bufio.NewScanner(file)
 	var projected strings.Builder
 	for scanner.Scan() {

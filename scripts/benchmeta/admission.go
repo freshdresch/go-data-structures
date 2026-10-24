@@ -1,3 +1,5 @@
+// Command benchmeta captures and verifies benchmark provenance, checks workload rows,
+// decides comparison admission, and projects benchmark results.
 package main
 
 import (

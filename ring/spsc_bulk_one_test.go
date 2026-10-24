@@ -10,13 +10,13 @@ import (
 
 func TestSPSCEnqueueBulkOneSnapshots(t *testing.T) {
 	t.Run("int64", func(t *testing.T) {
-		testSPSCEnqueueBulkOneSnapshots(t, int64(77), int64(-10), int64(-1))
+		testSPSCEnqueueBulkOneSnapshots(t, int64(77), int64(-10))
 	})
-	value, sentinel, tail := int64(77), int64(-10), int64(-1)
-	t.Run("ptr", func(t *testing.T) { testSPSCEnqueueBulkOneSnapshots(t, &value, &sentinel, &tail) })
+	value, sentinel := int64(77), int64(-10)
+	t.Run("ptr", func(t *testing.T) { testSPSCEnqueueBulkOneSnapshots(t, &value, &sentinel) })
 }
 
-func testSPSCEnqueueBulkOneSnapshots[T comparable](t *testing.T, value, sentinel, tail T) {
+func testSPSCEnqueueBulkOneSnapshots[T comparable](t *testing.T, value, sentinel T) {
 	t.Helper()
 	for _, test := range []struct {
 		name                  string
@@ -86,13 +86,13 @@ func testSPSCEnqueueBulkOneSnapshots[T comparable](t *testing.T, value, sentinel
 
 func TestSPSCDequeueBulkOneSnapshots(t *testing.T) {
 	t.Run("int64", func(t *testing.T) {
-		testSPSCDequeueBulkOneSnapshots(t, int64(77), int64(-10), int64(-1))
+		testSPSCDequeueBulkOneSnapshots(t, int64(-10), int64(-1))
 	})
-	value, sentinel, tail := int64(77), int64(-10), int64(-1)
-	t.Run("ptr", func(t *testing.T) { testSPSCDequeueBulkOneSnapshots(t, &value, &sentinel, &tail) })
+	sentinel, tail := int64(-10), int64(-1)
+	t.Run("ptr", func(t *testing.T) { testSPSCDequeueBulkOneSnapshots(t, &sentinel, &tail) })
 }
 
-func testSPSCDequeueBulkOneSnapshots[T comparable](t *testing.T, value, sentinel, tail T) {
+func testSPSCDequeueBulkOneSnapshots[T comparable](t *testing.T, sentinel, tail T) {
 	t.Helper()
 	for _, test := range []struct {
 		name                  string

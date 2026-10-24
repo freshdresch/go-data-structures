@@ -2,8 +2,9 @@ package ring_test
 
 import (
 	"fmt"
-	"github.com/freshdresch/go-data-structures/ring"
 	"testing"
+
+	"github.com/freshdresch/go-data-structures/ring"
 )
 
 type spscQueue[T any] struct {

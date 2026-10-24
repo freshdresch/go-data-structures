@@ -1,8 +1,9 @@
 package ring_test
 
 import (
-	"github.com/freshdresch/go-data-structures/ring"
 	"testing"
+
+	"github.com/freshdresch/go-data-structures/ring"
 )
 
 // BenchmarkSPSCConcrete measures direct concrete enqueue/dequeue pairs in one goroutine.

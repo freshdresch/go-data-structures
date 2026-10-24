@@ -3,8 +3,6 @@ package ring_test
 import (
 	"errors"
 	"fmt"
-
-	"github.com/freshdresch/go-data-structures/ring"
 	"math"
 	"runtime"
 	"slices"
@@ -15,6 +13,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/freshdresch/go-data-structures/ring"
 )
 
 // stopOrderQueue is a stub queue that is empty on every dequeue call except one. During call

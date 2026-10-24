@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -193,8 +194,9 @@ func buildBenchmarkManifest() benchmarkManifest {
 	handoff.Participants, handoff.QueueCount = 2, 2
 	handoff.ProducerWait = manifestPointer("runtime.Gosched after each unsuccessful enqueue attempt")
 	handoff.ConsumerWait = manifestPointer("64 unsuccessful dequeue attempts before runtime.Gosched")
-	handoff.TimingBoundary = "round trips between two participants over two SPSC queues; " +
-		"excludes setup, pre-run GC and warm-up; half-round-trip percentiles are estimates"
+	handoff.TimingBoundary = "ns/op is the sampled mean full round trip from immediately before " +
+		"enqueue to immediately after the reply; excludes setup, pre-run GC, warm-up, sender " +
+		"bookkeeping and histogram recording; half-round-trip percentiles are estimates"
 	manifest.Rows = append(manifest.Rows, handoff)
 	for _, mode := range ringAPIModes {
 		if mode != spscMode && mode != mpmcMode {
@@ -280,8 +282,9 @@ func buildSPSCConcurrentManifest() benchmarkManifest {
 		row.Family, row.API, row.APIReason = "SPSCSharedHandoff", manifestPointer("burst"), ""
 		row.Participants, row.QueueCount = 2, 2
 		row.ConsumerWait = manifestPointer("64 unsuccessful dequeue attempts before runtime.Gosched")
-		row.TimingBoundary = "round trips between two participants over two SPSC queues; " +
-			"excludes setup, pre-run GC and warm-up; half-round-trip percentiles are estimates"
+		row.TimingBoundary = "ns/op is the sampled mean full round trip from immediately before " +
+			"enqueue to immediately after the reply; excludes setup, pre-run GC, warm-up, sender " +
+			"bookkeeping and histogram recording; half-round-trip percentiles are estimates"
 		manifest.Rows = append(manifest.Rows, row)
 	}
 	return manifest
@@ -309,4 +312,32 @@ func buildSPSCSequentialManifest() benchmarkManifest {
 		}
 	}
 	return manifest
+}
+
+func TestHandoffManifestTimingBoundary(t *testing.T) {
+	const expected = "ns/op is the sampled mean full round trip from immediately before " +
+		"enqueue to immediately after the reply; excludes setup, pre-run GC, warm-up, sender " +
+		"bookkeeping and histogram recording; half-round-trip percentiles are estimates"
+	rows := append(buildBenchmarkManifest().Rows, buildSPSCConcurrentManifest().Rows...)
+	var handoffRows []string
+	for _, row := range rows {
+		if row.Family != "Handoff" && row.Family != "SPSCSharedHandoff" {
+			continue
+		}
+		handoffRows = append(handoffRows, row.Name)
+		if row.TimingBoundary != expected {
+			t.Errorf("%s timing boundary = %q, want %q", row.Name, row.TimingBoundary, expected)
+		}
+		if row.PrimaryMetric != "ns/op" {
+			t.Errorf("%s primary metric = %q, want ns/op", row.Name, row.PrimaryMetric)
+		}
+	}
+	expectedRows := []string{
+		"BenchmarkHandoff/impl=ring",
+		"BenchmarkSPSCComparisonHandoff/impl=ring",
+		"BenchmarkSPSCComparisonHandoff/impl=spsc",
+	}
+	if !slices.Equal(handoffRows, expectedRows) {
+		t.Errorf("handoff rows = %v, want %v", handoffRows, expectedRows)
+	}
 }

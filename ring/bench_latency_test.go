@@ -167,11 +167,28 @@ func reportLatency(b *testing.B, prefix string, h *histogram) {
 	b.ReportMetric(float64(h.max().Nanoseconds()), prefix+"-max")
 }
 
-// handoffResult is what one handoff run measured. latency holds one handoff, half a round trip,
-// for each round trip the pinger recorded.
+// handoffResult keeps the exact full-round-trip total for the sampled ns/op mean. latency holds
+// half-round-trip estimates for the handoff percentiles. Both exclude the warm-up round trip.
 type handoffResult struct {
-	latency  *histogram
-	recorded int
+	latency        *histogram
+	roundTripTotal time.Duration
+	recorded       int
+}
+
+func (r *handoffResult) record(roundTrip time.Duration) {
+	r.roundTripTotal += roundTrip
+	r.latency.record(handoffLatency(roundTrip))
+	r.recorded++
+}
+
+func reportHandoff(b *testing.B, result handoffResult) {
+	b.Helper()
+	mean := 0.0
+	if result.recorded > 0 {
+		mean = float64(result.roundTripTotal) / float64(result.recorded)
+	}
+	b.ReportMetric(mean, "ns/op")
+	reportLatency(b, "handoff", result.latency)
 }
 
 // handoffLatency returns one handoff's latency, half of roundTrip, since a round trip is two
@@ -184,6 +201,13 @@ func handoffLatency(roundTrip time.Duration) time.Duration {
 // recorded round trips send 0, 1, 2, and so on, so the warm-up reply can never pass for one of
 // theirs.
 const warmUpPing int64 = -1
+
+// Padding isolates the polled flag from neighboring buffer writes at any base alignment.
+type handoffCompletion struct {
+	_     [64]byte
+	value atomic.Bool
+	_     [64]byte
+}
 
 // runHandoff sends roundTrips elements one at a time from a pinger to a ponger on pings, a queue
 // newQueue builds, and back on pongs, a second one. The pinger waits for each reply before it
@@ -205,17 +229,16 @@ func runHandoff(
 	sent := make([]int64, 1)
 	reply := make([]int64, 1)
 	forwarded := make([]int64, 1)
-	latency := &histogram{}
-	recorded := 0
+	result := handoffResult{latency: &histogram{}}
 	base := time.Now()
 
 	// The pinger sets pingerDone after its last round trip. The ponger, through consume,
 	// returns once it saw the flag set before a poll that found pings empty, so it never
 	// leaves an element unanswered.
-	var pingerDone atomic.Bool
+	var pingerDone handoffCompletion
 	var ponger sync.WaitGroup
 	ponger.Go(func() {
-		consume(pings, &pingerDone, forwarded, forwardSink{target: pongs}, newWaiter(spinThenYield))
+		consume(pings, &pingerDone.value, forwarded, forwardSink{target: pongs}, newWaiter(spinThenYield))
 	})
 	wait := newWaiter(spinThenYield)
 	roundTrip := func(k int64) time.Duration {
@@ -225,8 +248,9 @@ func runHandoff(
 		for pongs.dequeue(reply) == 0 {
 			wait.afterEmptyPoll()
 		}
+		end := time.Since(base)
 		wait.restart()
-		return time.Since(base) - start
+		return end - start
 	}
 	// The warm-up round trip is not recorded. It runs before the timer starts, so the
 	// ponger's start-up stays out of the measurement.
@@ -234,13 +258,12 @@ func runHandoff(
 
 	runTimed(timer, func() {
 		for k := range roundTrips {
-			latency.record(handoffLatency(roundTrip(int64(k))))
-			recorded++
+			result.record(roundTrip(int64(k)))
 		}
 	})
-	pingerDone.Store(true)
+	pingerDone.value.Store(true)
 	ponger.Wait()
-	return handoffResult{latency: latency, recorded: recorded}, nil
+	return result, nil
 }
 
 // runChanHandoff is runHandoff over two channels of ringCapacity slots, with blocking sends and
@@ -249,8 +272,7 @@ func runHandoff(
 func runChanHandoff(timer benchTimer, roundTrips int) handoffResult {
 	pings := make(chan int64, ringCapacity)
 	pongs := make(chan int64, ringCapacity)
-	latency := &histogram{}
-	recorded := 0
+	result := handoffResult{latency: &histogram{}}
 	base := time.Now()
 
 	var ponger sync.WaitGroup
@@ -271,13 +293,12 @@ func runChanHandoff(timer benchTimer, roundTrips int) handoffResult {
 
 	runTimed(timer, func() {
 		for k := range roundTrips {
-			latency.record(handoffLatency(roundTrip(int64(k))))
-			recorded++
+			result.record(roundTrip(int64(k)))
 		}
 	})
 	close(pings)
 	ponger.Wait()
-	return handoffResult{latency: latency, recorded: recorded}
+	return result
 }
 
 // forwardSink enqueues every batch it receives on target, so the ponger can answer each ping
@@ -315,12 +336,12 @@ func handoffImpls() []handoffImpl {
 	})
 }
 
-// BenchmarkHandoff measures b.N round trips of one int64 between two goroutines over two SPSC
-// queues, with nothing else queued. ns/op is one full round trip, including the pinger's two
-// clock reads and recording. A warm-up round trip runs before the timer, so handoff-max does not
-// include ponger start-up. The handoff percentiles are half a round trip, one handoff. ring,
-// chanpoll, and mutex poll with a bounded spin. chan blocks, so its handoff includes waking a
-// parked goroutine.
+// BenchmarkHandoff reports the sampled mean full round trip as ns/op, from immediately before
+// enqueue to immediately after the reply. Samples exclude sender preparation, waiter reset,
+// histogram recording, and counters. The outer Go timer still calibrates iterations. A warm-up
+// round trip runs before that timer and is not recorded. The handoff percentiles estimate half a
+// round trip. ring, chanpoll, and mutex poll with a bounded spin. chan blocks, so its handoff
+// includes waking a parked goroutine.
 func BenchmarkHandoff(b *testing.B) {
 	for _, impl := range handoffImpls() {
 		b.Run("impl="+impl.name, func(b *testing.B) {
@@ -331,7 +352,7 @@ func BenchmarkHandoff(b *testing.B) {
 			if result.recorded != b.N {
 				b.Fatalf("recorded %d round trips, want %d", result.recorded, b.N)
 			}
-			reportLatency(b, "handoff", result.latency)
+			reportHandoff(b, result)
 		})
 	}
 }

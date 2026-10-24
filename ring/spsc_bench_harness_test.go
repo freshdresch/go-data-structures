@@ -81,6 +81,9 @@ func TestSPSCComparisonHandoffProtocol(t *testing.T) {
 				})
 				require.Equal(t, total, result.recorded)
 				require.Equal(t, total, result.latency.count())
+				if total == 0 {
+					require.Zero(t, result.roundTripTotal)
+				}
 				require.Len(t, queues, 2)
 				expected := []int64{warmUpPing}
 				for index := range total {

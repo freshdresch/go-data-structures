@@ -6,30 +6,30 @@ import (
 )
 
 type spscProducer[T any] struct {
-	entries        []T
-	mask           uint32
-	cursor         uint32
-	cachedConsumer uint32
-	// The full gap separates private writes from remote-polled publication lines
-	// at every base phase for line widths up to cacheLine.
-	_                [cacheLine]byte
-	published        atomic.Uint32
+	entries          []T
+	mask             uint32
+	cursor           uint32
+	cachedConsumer   uint32
 	maxBatch         uint32
 	exactBatchCounts bool
+	// The full gap separates private writes from remote-polled publication lines
+	// at every base phase for line widths up to cacheLine.
+	_         [cacheLine]byte
+	published atomic.Uint32
 }
 
 type spscConsumer[T any] struct {
-	entries        []T
-	mask           uint32
-	cursor         uint32
-	cachedProducer uint32
-	// The full gap separates private writes from remote-polled publication lines
-	// at every base phase for line widths up to cacheLine.
-	_                [cacheLine]byte
-	published        atomic.Uint32
+	entries          []T
+	mask             uint32
+	cursor           uint32
+	cachedProducer   uint32
 	clearOnDequeue   bool
 	maxBatch         uint32
 	exactBatchCounts bool
+	// The full gap separates private writes from remote-polled publication lines
+	// at every base phase for line widths up to cacheLine.
+	_         [cacheLine]byte
+	published atomic.Uint32
 }
 
 // SPSC is a fixed-capacity FIFO with one serialized producer and one serialized consumer.
@@ -220,6 +220,24 @@ func (r *SPSC[T]) EnqueueBulk(items []T) (free int, err error) {
 			"enqueue", len(items), producer.maxBatch, producer.mask+1,
 		)
 	}
+	if len(items) == 1 {
+		capacity := producer.mask + 1
+		free := capacity + producer.cachedConsumer - producer.cursor
+		if producer.exactBatchCounts || free == 0 || free > capacity {
+			producer.cachedConsumer = r.consumer.published.Load()
+			free = capacity + producer.cachedConsumer - producer.cursor
+		}
+		if free > capacity {
+			return int(capacity), ErrFull
+		}
+		if free == 0 {
+			return 0, ErrFull
+		}
+		producer.entries[producer.cursor&producer.mask] = items[0]
+		producer.cursor++
+		producer.published.Store(producer.cursor)
+		return int(free - 1), nil
+	}
 	moved, remaining := r.enqueueBatch(items, true)
 	if moved != len(items) {
 		return remaining, ErrFull
@@ -232,6 +250,25 @@ func (r *SPSC[T]) EnqueueBulk(items []T) (free int, err error) {
 // its count without publication. This is a producer operation.
 func (r *SPSC[T]) EnqueueBurst(items []T) (enqueued, free int) {
 	length := min(len(items), int(r.producer.maxBatch))
+	if length == 1 {
+		producer := &r.producer
+		capacity := producer.mask + 1
+		free := capacity + producer.cachedConsumer - producer.cursor
+		if producer.exactBatchCounts || free == 0 || free > capacity {
+			producer.cachedConsumer = r.consumer.published.Load()
+			free = capacity + producer.cachedConsumer - producer.cursor
+		}
+		if free > capacity {
+			return 0, int(capacity)
+		}
+		if free == 0 {
+			return 0, 0
+		}
+		producer.entries[producer.cursor&producer.mask] = items[0]
+		producer.cursor++
+		producer.published.Store(producer.cursor)
+		return 1, int(free - 1)
+	}
 	return r.enqueueBatch(items[:length], false)
 }
 
@@ -248,6 +285,29 @@ func (r *SPSC[T]) DequeueBulk(dst []T) (available int, err error) {
 			"dequeue", len(dst), consumer.maxBatch, consumer.mask+1,
 		)
 	}
+	if len(dst) == 1 {
+		capacity := consumer.mask + 1
+		available := consumer.cachedProducer - consumer.cursor
+		if consumer.exactBatchCounts || available == 0 || available > capacity {
+			consumer.cachedProducer = r.producer.published.Load()
+			available = consumer.cachedProducer - consumer.cursor
+		}
+		if available > capacity {
+			return int(capacity), ErrEmpty
+		}
+		if available == 0 {
+			return 0, ErrEmpty
+		}
+		index := consumer.cursor & consumer.mask
+		dst[0] = consumer.entries[index]
+		if consumer.clearOnDequeue {
+			var zero T
+			consumer.entries[index] = zero
+		}
+		consumer.cursor++
+		consumer.published.Store(consumer.cursor)
+		return int(available - 1), nil
+	}
 	moved, remaining := r.dequeueBatch(dst, true)
 	if moved != len(dst) {
 		return remaining, ErrEmpty
@@ -260,6 +320,30 @@ func (r *SPSC[T]) DequeueBulk(dst []T) (available int, err error) {
 // WithSPSCExactBatchCounts. Zero length refreshes without publication. This is a consumer call.
 func (r *SPSC[T]) DequeueBurst(dst []T) (dequeued, available int) {
 	length := min(len(dst), int(r.consumer.maxBatch))
+	if length == 1 {
+		consumer := &r.consumer
+		capacity := consumer.mask + 1
+		available := consumer.cachedProducer - consumer.cursor
+		if consumer.exactBatchCounts || available == 0 || available > capacity {
+			consumer.cachedProducer = r.producer.published.Load()
+			available = consumer.cachedProducer - consumer.cursor
+		}
+		if available > capacity {
+			return 0, int(capacity)
+		}
+		if available == 0 {
+			return 0, 0
+		}
+		index := consumer.cursor & consumer.mask
+		dst[0] = consumer.entries[index]
+		if consumer.clearOnDequeue {
+			var zero T
+			consumer.entries[index] = zero
+		}
+		consumer.cursor++
+		consumer.published.Store(consumer.cursor)
+		return 1, int(available - 1)
+	}
 	return r.dequeueBatch(dst[:length], false)
 }
 

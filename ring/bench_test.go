@@ -298,12 +298,19 @@ func newThroughputResult(counts []int, gcCycles uint64, total int) throughputRes
 	}
 }
 
-// newBuffers returns count buffers of size elements each, one for each producer or consumer of a
-// run, so no two workers share a buffer.
+// newBuffers isolates occupied worker buffers with at least 128 bytes of exterior guards on
+// each side. Separate small allocations alone can share a cache line with neighboring objects.
 func newBuffers[T any](count, size int) [][]T {
+	const benchmarkBufferGuardBytes = 128
 	buffers := make([][]T, count)
 	for i := range buffers {
-		buffers[i] = make([]T, size)
+		guard := 0
+		elementSize := unsafe.Sizeof(*new(T))
+		if size > 0 && elementSize > 0 {
+			guard = int(1 + (benchmarkBufferGuardBytes-1)/elementSize)
+		}
+		backing := make([]T, guard+size+guard)
+		buffers[i] = backing[guard : guard+size : guard+size]
 	}
 	return buffers
 }

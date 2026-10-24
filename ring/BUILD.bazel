@@ -16,6 +16,8 @@ go_test(
         "alignment_test.go",
         "ring_test.go",
         "spsc_alloc_test.go",
+        "spsc_bulk_one_test.go",
+        "spsc_burst_one_test.go",
         "spsc_layout_test.go",
         "spsc_test.go",
         "spin_bench_test.go",
@@ -34,6 +36,7 @@ go_test(
     srcs = [
         "alloc_test.go",
         "bench_adapters_test.go",
+        "bench_buffers_test.go",
         "bench_harness_test.go",
         "bench_latency_test.go",
         "bench_manifest_test.go",

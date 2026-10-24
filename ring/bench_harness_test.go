@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -693,19 +694,97 @@ func TestHistogram(t *testing.T) {
 	})
 }
 
+func TestHandoffCompletionIsolation(t *testing.T) {
+	const cacheLineBytes = uintptr(64)
+	var layout handoffCompletion
+	fieldOffset := unsafe.Offsetof(layout.value)
+	fieldSize := unsafe.Sizeof(layout.value)
+	typeSize := unsafe.Sizeof(layout)
+	assert.GreaterOrEqual(t, fieldOffset, cacheLineBytes, "padding before completion flag")
+	assert.GreaterOrEqual(
+		t,
+		typeSize-fieldOffset-fieldSize,
+		cacheLineBytes,
+		"padding after completion flag",
+	)
+
+	for phase := range cacheLineBytes {
+		base := 2*cacheLineBytes + phase
+		firstFieldLine := (base + fieldOffset) / cacheLineBytes
+		lastFieldLine := (base + fieldOffset + fieldSize - 1) / cacheLineBytes
+		previousExternalLine := (base - 1) / cacheLineBytes
+		nextExternalLine := (base + typeSize) / cacheLineBytes
+		assert.Greater(t, firstFieldLine, previousExternalLine, "base phase %d", phase)
+		assert.Greater(t, lastFieldLine, previousExternalLine, "base phase %d", phase)
+		assert.Less(t, firstFieldLine, nextExternalLine, "base phase %d", phase)
+		assert.Less(t, lastFieldLine, nextExternalLine, "base phase %d", phase)
+	}
+
+	var completion handoffCompletion
+	assert.False(t, completion.value.Load())
+	completion.value.Store(true)
+	assert.True(t, completion.value.Load())
+}
+
+func TestHandoffSampledMean(t *testing.T) {
+	for _, extraHistogramSample := range []bool{false, true} {
+		t.Run(fmt.Sprintf("extraHistogramSample=%t", extraHistogramSample), func(t *testing.T) {
+			result := handoffResult{latency: &histogram{}}
+			result.record(65 * time.Nanosecond)
+			result.record(70 * time.Nanosecond)
+			require.Equal(t, 135*time.Nanosecond, result.roundTripTotal)
+			require.Equal(t, 2, result.recorded)
+			require.Equal(t, 2, result.latency.count())
+			require.Equal(t, time.Duration(32), result.latency.percentile(50))
+			require.Equal(t, time.Duration(34), result.latency.percentile(100))
+			require.Equal(t, time.Duration(35), result.latency.max())
+			if extraHistogramSample {
+				result.latency.record(time.Second)
+			}
+			measured := testing.Benchmark(func(b *testing.B) {
+				b.ReportMetric(1e9, "ns/op")
+				reportHandoff(b, result)
+			})
+			assert.Equal(t, 67.5, measured.Extra["ns/op"])
+			for _, percentile := range []float64{50, 90, 99, 99.9} {
+				metric := fmt.Sprintf("handoff-p%g", percentile)
+				assert.Equal(t, float64(result.latency.percentile(percentile)), measured.Extra[metric])
+			}
+			assert.Equal(t, float64(result.latency.max()), measured.Extra["handoff-max"])
+		})
+	}
+	t.Run("empty", func(t *testing.T) {
+		result := handoffResult{latency: &histogram{}}
+		measured := testing.Benchmark(func(b *testing.B) {
+			b.ReportMetric(1e9, "ns/op")
+			reportHandoff(b, result)
+		})
+		mean, reported := measured.Extra["ns/op"]
+		require.True(t, reported)
+		assert.False(t, math.IsNaN(mean))
+		assert.False(t, math.IsInf(mean, 0))
+		assert.Zero(t, mean)
+	})
+}
+
 // TestHandoffAccounting checks that every handoff run records each of its round trips once, and
 // that it returns, which shows the ponger stopped. Each run has accountingDeadline to finish.
 func TestHandoffAccounting(t *testing.T) {
-	const roundTrips = 10_000
 	for _, impl := range handoffImpls() {
-		t.Run("impl="+impl.name, func(t *testing.T) {
-			stuck := fmt.Sprintf("impl=%s, likely the ponger did not stop", impl.name)
-			result := runWithin(t, stuck, func() (handoffResult, error) {
-				return impl.run(noopTimer{}, roundTrips)
+		for _, roundTrips := range []int{0, 1, 10_000} {
+			name := fmt.Sprintf("impl=%s/roundTrips=%d", impl.name, roundTrips)
+			t.Run(name, func(t *testing.T) {
+				stuck := fmt.Sprintf("%s, likely the ponger did not stop", name)
+				result := runWithin(t, stuck, func() (handoffResult, error) {
+					return impl.run(noopTimer{}, roundTrips)
+				})
+				assert.Equal(t, roundTrips, result.recorded)
+				assert.Equal(t, roundTrips, result.latency.count())
+				if roundTrips == 0 {
+					assert.Zero(t, result.roundTripTotal)
+				}
 			})
-			assert.Equal(t, roundTrips, result.recorded)
-			assert.Equal(t, roundTrips, result.latency.count())
-		})
+		}
 	}
 }
 

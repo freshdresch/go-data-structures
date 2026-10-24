@@ -149,7 +149,11 @@ func spscComparisonQueues() []adapterImpl[int64] {
 	}
 }
 
-// BenchmarkSPSCComparisonHandoff measures round trips over two queues of each implementation.
+// BenchmarkSPSCComparisonHandoff reports the sampled mean full round trip as ns/op over two
+// queues of each implementation, from immediately before enqueue to immediately after the reply.
+// Samples exclude sender preparation, waiter reset, histogram recording, and counters. Warm-up is
+// unrecorded, the outer Go timer calibrates iterations, and handoff percentiles estimate half a
+// round trip.
 func BenchmarkSPSCComparisonHandoff(b *testing.B) {
 	for _, impl := range spscComparisonQueues() {
 		b.Run("impl="+impl.name, func(b *testing.B) {
@@ -160,7 +164,7 @@ func BenchmarkSPSCComparisonHandoff(b *testing.B) {
 			if result.recorded != b.N {
 				b.Fatalf("recorded %d round trips, want %d", result.recorded, b.N)
 			}
-			reportLatency(b, "handoff", result.latency)
+			reportHandoff(b, result)
 		})
 	}
 }

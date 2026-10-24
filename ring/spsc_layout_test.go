@@ -38,17 +38,40 @@ func checkSPSCLayout[T any](t *testing.T) {
 			)
 		}
 	}
+	for _, block := range []reflect.Type{producer, consumer} {
+		publication, _ := block.FieldByName("published")
+		ownerOffset := outer.Field(0).Offset
+		configuration := []string{"maxBatch", "exactBatchCounts"}
+		if block == consumer {
+			ownerOffset = outer.Field(2).Offset
+			configuration = append([]string{"clearOnDequeue"}, configuration...)
+		}
+		for _, name := range configuration {
+			field, _ := block.FieldByName(name)
+			checkSPSCLineSeparation(
+				t,
+				block.String()+"."+name+"/publication",
+				ownerOffset+field.Offset,
+				field.Type.Size(),
+				ownerOffset+publication.Offset,
+				publication.Type.Size(),
+			)
+		}
+	}
 	checkSPSCFieldOrder[T](t, producer, consumer, outer)
 	for _, block := range []reflect.Type{producer, consumer} {
-		cached := block.Field(3)
-		padding := block.Field(4)
-		publication := block.Field(5)
-		prefixWidth := cached.Offset + cached.Type.Size()
+		lastPrivate, _ := block.FieldByName("exactBatchCounts")
+		padding := block.Field(block.NumField() - 2)
+		publication, _ := block.FieldByName("published")
+		prefixWidth := lastPrivate.Offset + lastPrivate.Type.Size()
 		if padding.Offset != prefixWidth {
 			t.Fatalf("%s padding does not directly follow private prefix", block)
 		}
-		if publication.Offset != padding.Offset+padding.Type.Size() {
-			t.Fatalf("%s publication does not directly follow full padding", block)
+		paddingEnd := padding.Offset + padding.Type.Size()
+		alignment := uintptr(publication.Type.Align())
+		publicationOffset := (paddingEnd + alignment - 1) / alignment * alignment
+		if publication.Offset != publicationOffset {
+			t.Fatalf("%s publication does not follow aligned full padding", block)
 		}
 		ownerOffset := outer.Field(0).Offset
 		if block == consumer {
@@ -105,15 +128,15 @@ func checkSPSCLayout[T any](t *testing.T) {
 	}
 	checkFields(
 		producer,
-		[]uintptr{0, 24, 28, 32, 36, 164, 168, 172},
-		[]uintptr{24, 4, 4, 4, 128, 4, 4, 1},
-		[]uintptr{8, 4, 4, 4, 1, 4, 4, 1},
+		[]uintptr{0, 24, 28, 32, 36, 40, 41, 172},
+		[]uintptr{24, 4, 4, 4, 4, 1, 128, 4},
+		[]uintptr{8, 4, 4, 4, 4, 1, 1, 4},
 	)
 	checkFields(
 		consumer,
-		[]uintptr{0, 24, 28, 32, 36, 164, 168, 172, 176},
-		[]uintptr{24, 4, 4, 4, 128, 4, 1, 4, 1},
-		[]uintptr{8, 4, 4, 4, 1, 4, 1, 4, 1},
+		[]uintptr{0, 24, 28, 32, 36, 40, 44, 45, 176},
+		[]uintptr{24, 4, 4, 4, 1, 4, 1, 128, 4},
+		[]uintptr{8, 4, 4, 4, 1, 4, 1, 1, 4},
 	)
 	checkFields(
 		outer,
@@ -128,15 +151,21 @@ func checkSPSCLayout[T any](t *testing.T) {
 	for _, block := range []reflect.Type{producer, consumer} {
 		cached := block.Field(3)
 		if cached.Offset+cached.Type.Size() != 36 {
-			t.Fatalf("%s private prefix width is not 36", block)
+			t.Fatalf("%s mutable prefix width is not 36", block)
 		}
 	}
-	checkSPSCFieldPhases(t, producer, 0, 0, []uintptr{0, 24, 28, 32, 36, 40, 44})
-	checkSPSCFieldPhases(t, consumer, 304, 176, []uintptr{0, 24, 28, 32, 36, 40, 44, 48})
+	checkSPSCFieldPhases(t, producer, 0, 0, []uintptr{0, 24, 28, 32})
+	checkSPSCFieldPhases(t, consumer, 304, 176, []uintptr{0, 24, 28, 32})
+	producerPrivate, _ := producer.FieldByName("exactBatchCounts")
+	consumerPrivate, _ := consumer.FieldByName("exactBatchCounts")
+	if producerPrivate.Offset+producerPrivate.Type.Size() != 41 ||
+		consumerPrivate.Offset+consumerPrivate.Type.Size() != 45 {
+		t.Fatal("complete private prefix width")
+	}
 	producerLast := producer.Field(producer.NumField() - 1)
 	consumerLast := consumer.Field(consumer.NumField() - 1)
-	if producerLast.Offset+producerLast.Type.Size() != 173 ||
-		consumerLast.Offset+consumerLast.Type.Size() != 177 {
+	if producerLast.Offset+producerLast.Type.Size() != 176 ||
+		consumerLast.Offset+consumerLast.Type.Size() != 180 {
 		t.Fatal("occupied width")
 	}
 }
@@ -146,12 +175,18 @@ func checkSPSCFieldOrder[T any](t *testing.T, producer, consumer, outer reflect.
 	uint32Type := reflect.TypeOf(uint32(0))
 	boolType := reflect.TypeOf(false)
 	entriesType := reflect.TypeOf([]T(nil))
-	paddingType := reflect.TypeOf([128]byte{})
+	paddingType := reflect.TypeOf([cacheLine]byte{})
+	if cacheLine != 128 {
+		t.Fatalf("cacheLine=%d want=128", cacheLine)
+	}
 	publicationType := reflect.TypeOf(atomic.Uint32{})
 	check := func(block reflect.Type, names []string, types []reflect.Type) {
 		t.Helper()
 		if block.NumField() != len(names) {
-			t.Fatalf("%s fields=%d want=%d with publication padding", block, block.NumField(), len(names))
+			t.Fatalf(
+				"%s fields=%d want=%d with publication padding",
+				block, block.NumField(), len(names),
+			)
 		}
 		for index, name := range names {
 			field := block.Field(index)
@@ -165,17 +200,17 @@ func checkSPSCFieldOrder[T any](t *testing.T, producer, consumer, outer reflect.
 	}
 	check(
 		producer,
-		[]string{"entries", "mask", "cursor", "cachedConsumer", "_", "published",
-			"maxBatch", "exactBatchCounts"},
-		[]reflect.Type{entriesType, uint32Type, uint32Type, uint32Type, paddingType,
-			publicationType, uint32Type, boolType},
+		[]string{"entries", "mask", "cursor", "cachedConsumer", "maxBatch",
+			"exactBatchCounts", "_", "published"},
+		[]reflect.Type{entriesType, uint32Type, uint32Type, uint32Type, uint32Type,
+			boolType, paddingType, publicationType},
 	)
 	check(
 		consumer,
-		[]string{"entries", "mask", "cursor", "cachedProducer", "_", "published",
-			"clearOnDequeue", "maxBatch", "exactBatchCounts"},
-		[]reflect.Type{entriesType, uint32Type, uint32Type, uint32Type, paddingType,
-			publicationType, boolType, uint32Type, boolType},
+		[]string{"entries", "mask", "cursor", "cachedProducer", "clearOnDequeue",
+			"maxBatch", "exactBatchCounts", "_", "published"},
+		[]reflect.Type{entriesType, uint32Type, uint32Type, uint32Type, boolType,
+			uint32Type, boolType, paddingType, publicationType},
 	)
 	check(
 		outer,
@@ -214,17 +249,11 @@ func checkSPSCFieldPhases(
 	originalOffsets []uintptr,
 ) {
 	t.Helper()
-	originalIndex := 0
-	for index := range block.NumField() {
+	for index, originalOffset := range originalOffsets {
 		field := block.Field(index)
-		if field.Name == "_" {
-			continue
-		}
-		originalOffset := originalOffsets[originalIndex]
 		if field.Offset%128 != originalOffset%128 ||
 			(ownerOffset+field.Offset)%128 != (originalOwnerOffset+originalOffset)%128 {
 			t.Fatalf("%s.%s changed original relative or absolute phase", block, field.Name)
 		}
-		originalIndex++
 	}
 }

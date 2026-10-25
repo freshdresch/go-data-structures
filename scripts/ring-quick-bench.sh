@@ -125,7 +125,7 @@ build_dirs=()
 
 on_exit() {
 	echo "status: $status" >>"$state"
-	for build_dir in "${build_dirs[@]}"; do
+	for build_dir in ${build_dirs[@]+"${build_dirs[@]}"}; do
 		rm -rf "$build_dir"
 	done
 }
@@ -181,7 +181,7 @@ admit_comparison() {
 		--after "$results/provenance/after.json" \
 		--current-runner "$results/provenance/current-runner.json" \
 		--platform "$results/provenance/platform.json" --output "$results/provenance/admission.json" \
-		"${admission_flags[@]}" | tee -a "$state"
+		${admission_flags[@]+"${admission_flags[@]}"} | tee -a "$state"
 }
 
 if [ -z "$reuse_dir" ]; then
@@ -260,7 +260,7 @@ admit_comparison
 if [ -z "$reuse_dir" ]; then
 	check_variant before
 	check_variant after
-	for build_dir in "${build_dirs[@]}"; do
+	for build_dir in ${build_dirs[@]+"${build_dirs[@]}"}; do
 		rm -rf "$build_dir"
 	done
 	build_dirs=()

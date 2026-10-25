@@ -425,7 +425,7 @@ for corrupt_side in before after; do
 		execution_marker="$fixture/executed-$corrupt_side-$override"
 		name="reuse-corrupt-$corrupt_side-$override"
 		run_case "$name" rejected env FIXTURE_EXECUTION_MARKER="$execution_marker" \
-			bash "$quick" -rounds 1 -reuse "$corrupt_origin" "${flags[@]}"
+			bash "$quick" -rounds 1 -reuse "$corrupt_origin" ${flags[@]+"${flags[@]}"}
 		rejected_result=$(find "$HOME/ring-quick" -name state.txt -exec \
 			grep -l "^reuse-parent: $corrupt_origin$" {} +)
 		grep -q 'artifact hash mismatch' "$(dirname "$rejected_result")/provenance/admission.json"
@@ -466,8 +466,9 @@ for variant in compare-unpadded compare-padded compare-race; do
 		if [ "$variant" = compare-padded ]; then
 			extra=(FIXTURE_OS=Darwin FIXTURE_GOOS=darwin FIXTURE_ARCH=arm64 FIXTURE_OFFSET=96)
 		fi
-		run_case "$variant-$mutation" rejected env "${extra[@]}" FIXTURE_MUTATION="$mutation" \
-			FIXTURE_MUTATION_VARIANT="$variant" bash "$compare" -rounds 1
+		run_case "$variant-$mutation" rejected env ${extra[@]+"${extra[@]}"} \
+			FIXTURE_MUTATION="$mutation" FIXTURE_MUTATION_VARIANT="$variant" \
+			bash "$compare" -rounds 1
 		printf 'test fixture\n' >"$FIXTURE_ROOT/benchmark/harness_test.go"
 		rm -f "$FIXTURE_ROOT/benchmark/added_test.go" "$FIXTURE_ROOT/benchmark/removed"
 	done

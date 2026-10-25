@@ -1,9 +1,7 @@
 package ring_test
 
 import (
-	"encoding/json"
 	"fmt"
-	"runtime"
 	"testing"
 
 	"github.com/freshdresch/go-data-structures/ring"
@@ -78,71 +76,10 @@ func newMPMCComparisonQueue[T any](implementation string, api ringAPI) (queue[T]
 
 // BenchmarkMPMCComparison measures verified transfers with four producers and four consumers.
 func BenchmarkMPMCComparison(b *testing.B) {
-	for _, implementation := range []string{"ring", "mpmc"} {
-		b.Run("impl="+implementation+"/mode=MPMC", func(b *testing.B) {
-			for _, api := range []ringAPI{apiSingle, apiBulk, apiBurst} {
-				b.Run("api="+api.String(), func(b *testing.B) {
-					for _, batch := range []int{1, 32} {
-						if api == apiSingle && batch != 1 {
-							continue
-						}
-						run := func(b *testing.B) {
-							b.Run("elem=int64", func(b *testing.B) {
-								benchmarkMPMCComparisonRun(b, implementation, api, batch, fillInt64)
-							})
-							b.Run("elem=ptr", func(b *testing.B) {
-								benchmarkMPMCComparisonRun(b, implementation, api, batch, fillPtr(newItemPool()))
-							})
-						}
-						if api == apiSingle {
-							run(b)
-							continue
-						}
-						b.Run(fmt.Sprintf("batch=%d", batch), run)
-					}
-				})
-			}
-		})
-	}
-}
-
-func benchmarkMPMCComparisonRun[T any](
-	b *testing.B,
-	implementation string,
-	api ringAPI,
-	batch int,
-	fill fillFunc[T],
-) {
-	setElemBytes[T](b)
-	total := api.total(b.N, batch, 4)
-	var actual queue[T]
-	factory := func() (queue[T], error) {
-		created, err := newMPMCComparisonQueue[T](implementation, api)
-		actual = created
-		return created, err
-	}
-	result, err := runThroughput(b, factory, 4, 4, batch, total, fill, noopSinks[T])
-	if err != nil {
-		b.Fatal(err)
-	}
-	reportThroughput(b, result, total)
-	nsPerElem, elemPerOp, err := ringAPIMetrics(b.Elapsed(), b.N, total, result.received)
-	if err != nil {
-		b.Fatal(err)
-	}
-	b.ReportMetric(nsPerElem, "ns/elem")
-	if api == apiBulk {
-		b.ReportMetric(elemPerOp, "elem/op")
-	}
-	// runThroughput has stopped the timer before any layout inspection or serialization.
-	evidence := spmcComparisonLayoutRecord{
-		Name: b.Name(), Iterations: b.N, VerifiedTotal: result.received,
-		Layout: spmcComparisonQueueLayout(actual, "actual benchmark queue"),
-	}
-	encoded, err := json.Marshal(evidence)
-	if err != nil {
-		b.Fatal(err)
-	}
-	b.Log("MPMC_COMPARISON_LAYOUT " + string(encoded))
-	runtime.KeepAlive(actual)
+	benchmarkComparison(
+		b,
+		mpmcComparison,
+		newMPMCComparisonQueue[int64],
+		newMPMCComparisonQueue[*item],
+	)
 }

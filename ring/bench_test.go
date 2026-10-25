@@ -644,15 +644,7 @@ func benchmarkRingAPIRun[T any](
 	if err != nil {
 		b.Fatal(err)
 	}
-	reportThroughput(b, result, total)
-	nsPerElem, elemPerOp, metricErr := ringAPIMetrics(b.Elapsed(), b.N, total, result.received)
-	if metricErr != nil {
-		b.Fatal(metricErr)
-	}
-	b.ReportMetric(nsPerElem, "ns/elem")
-	if api == apiBulk {
-		b.ReportMetric(elemPerOp, "elem/op")
-	}
+	reportConcurrentAPIMetrics(b, api, result, total)
 }
 
 // benchmarkRingAPISeq calls Enqueue and then Dequeue on one element per b.Loop iteration, in one

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"reflect"
 	"runtime"
-	"slices"
 	"strings"
 	"testing"
 
@@ -14,147 +13,12 @@ import (
 	"github.com/freshdresch/go-data-structures/ring"
 )
 
-type spmcComparisonField struct {
-	Name      string                `json:"name"`
-	Type      string                `json:"type"`
-	Offset    uintptr               `json:"offset"`
-	Size      uintptr               `json:"size"`
-	Alignment int                   `json:"alignment"`
-	Fields    []spmcComparisonField `json:"fields,omitempty"`
-}
-
-type spmcComparisonLayout struct {
-	Source        string                `json:"source"`
-	Type          string                `json:"type"`
-	Size          uintptr               `json:"size"`
-	Alignment     int                   `json:"alignment"`
-	BaseModulo64  uintptr               `json:"base_modulo_64"`
-	BaseModulo128 uintptr               `json:"base_modulo_128"`
-	Fields        []spmcComparisonField `json:"fields"`
-}
-
-type spmcComparisonLayoutRecord struct {
-	Name          string               `json:"name"`
-	Iterations    int                  `json:"iterations"`
-	VerifiedTotal int                  `json:"verified_total"`
-	Layout        spmcComparisonLayout `json:"layout"`
-}
-
-func spmcComparisonFields(target reflect.Type) []spmcComparisonField {
-	var fields []spmcComparisonField
-	for index := range target.NumField() {
-		field := target.Field(index)
-		entry := spmcComparisonField{
-			Name: field.Name, Type: field.Type.String(), Offset: field.Offset,
-			Size: field.Type.Size(), Alignment: field.Type.Align(),
-		}
-		if field.Type.Kind() == reflect.Struct {
-			entry.Fields = spmcComparisonFields(field.Type)
-		}
-		fields = append(fields, entry)
-	}
-	return fields
-}
-
-func spmcComparisonQueueLayout(target any, source string) spmcComparisonLayout {
-	pointer := reflect.ValueOf(target).Elem().FieldByName("ring")
-	concrete := pointer.Type().Elem()
-	layout := spmcComparisonLayout{
-		Source: source, Type: concrete.String(), Size: concrete.Size(), Alignment: concrete.Align(),
-		BaseModulo64: pointer.Pointer() % 64, BaseModulo128: pointer.Pointer() % 128,
-		Fields: spmcComparisonFields(concrete),
-	}
-	runtime.KeepAlive(target)
-	return layout
-}
-
-type spmcComparisonDefaults struct {
-	MaxEnqueueBatch   int    `json:"max_enqueue_batch"`
-	MaxDequeueBatch   int    `json:"max_dequeue_batch"`
-	ClearOnDequeue    bool   `json:"clear_on_dequeue"`
-	ExactBatchCounts  bool   `json:"exact_batch_counts"`
-	ProducerAdmission string `json:"producer_admission"`
-	ConsumerAdmission string `json:"consumer_admission"`
-	ConsumerRelease   string `json:"consumer_release"`
-	SpinsBeforeYield  int    `json:"spins_before_yield"`
-}
-
-type spmcComparisonManifestRow struct {
-	benchmarkManifestRow
-	ExplicitOptions []string               `json:"explicit_options"`
-	Defaults        spmcComparisonDefaults `json:"defaults"`
-	Metrics         []string               `json:"metrics"`
-	Layout          spmcComparisonLayout   `json:"layout"`
-}
-
-type spmcComparisonManifest struct {
-	Schema     int                         `json:"schema"`
-	GOOS       string                      `json:"goos"`
-	GOARCH     string                      `json:"goarch"`
-	GoVersion  string                      `json:"go_version"`
-	GOMAXPROCS int                         `json:"gomaxprocs"`
-	Rows       []spmcComparisonManifestRow `json:"rows"`
-}
-
-func buildSPMCComparisonManifest() (spmcComparisonManifest, error) {
-	manifest := spmcComparisonManifest{
-		Schema: 1, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH,
-		GoVersion: runtime.Version(), GOMAXPROCS: runtime.GOMAXPROCS(0),
-	}
-	for _, implementation := range []string{"ring", "spmc"} {
-		for _, api := range []ringAPI{apiSingle, apiBulk, apiBurst} {
-			for _, batch := range []int{1, 32} {
-				if api == apiSingle && batch != 1 {
-					continue
-				}
-				for _, element := range []string{"int64", "ptr"} {
-					name := "BenchmarkSPMCComparison/impl=" + implementation + "/mode=SPMC/api=" + api.String()
-					if api != apiSingle {
-						name += fmt.Sprintf("/batch=%d", batch)
-					}
-					row := manifestRow(name+"/elem="+element, implementation, spmcMode, batch)
-					row.Family, row.PrimaryMetric = "SPMCComparison", "ns/elem"
-					row.API, row.APIReason = manifestPointer(api.String()), ""
-					row.Participants = 5
-					row.RingOptions = []string{}
-					if implementation == "ring" {
-						row.RingOptions = []string{"WithMultiConsDequeue"}
-					}
-					row = spscElementContract(row, element)
-					var exemplar any
-					if element == "int64" {
-						created, err := newSPMCComparisonQueue[int64](implementation, api)
-						if err != nil {
-							return spmcComparisonManifest{}, err
-						}
-						exemplar = created
-					} else {
-						created, err := newSPMCComparisonQueue[*item](implementation, api)
-						if err != nil {
-							return spmcComparisonManifest{}, err
-						}
-						exemplar = created
-					}
-					metrics := []string{"ns/op", "ns/elem", "gc-cycles", "gc/Melem", "B/op", "allocs/op"}
-					if api == apiBulk {
-						metrics = append(metrics, "elem/op")
-					}
-					manifest.Rows = append(manifest.Rows, spmcComparisonManifestRow{
-						benchmarkManifestRow: row, ExplicitOptions: slices.Clone(row.RingOptions),
-						Defaults: spmcComparisonDefaults{
-							MaxEnqueueBatch: 1024, MaxDequeueBatch: 1024,
-							ClearOnDequeue: true, ExactBatchCounts: false,
-							ProducerAdmission: "cached counts", ConsumerAdmission: "shared cached counts",
-							ConsumerRelease: "ordered", SpinsBeforeYield: 8192,
-						},
-						Metrics: metrics,
-						Layout:  spmcComparisonQueueLayout(exemplar, "separately allocated layout exemplar"),
-					})
-				}
-			}
-		}
-	}
-	return manifest, nil
+func buildSPMCComparisonManifest() (comparisonManifest, error) {
+	return buildComparisonManifest(
+		spmcComparison,
+		newSPMCComparisonQueue[int64],
+		newSPMCComparisonQueue[*item],
+	)
 }
 
 func TestSPMCComparisonManifest(t *testing.T) {
@@ -195,89 +59,31 @@ func TestSPMCComparisonManifest(t *testing.T) {
 	t.Log("SPMC_COMPARISON_MANIFEST " + string(encoded))
 }
 
-func checkSPMCComparisonRow(t *testing.T, row spmcComparisonManifestRow) {
+func checkSPMCComparisonRow(t *testing.T, row comparisonManifestRow) {
 	t.Helper()
 	require.Equal(t, "SPMCComparison", row.Family)
 	implementation := "ring"
 	if strings.Contains(row.Name, "/impl=spmc/") {
 		implementation = "spmc"
 	}
-	require.Equal(t, implementation, row.Implementation)
-	api := apiSingle
-	if strings.Contains(row.Name, "/api=bulk/") {
-		api = apiBulk
-	}
-	if strings.Contains(row.Name, "/api=burst/") {
-		api = apiBurst
-	}
-	require.NotNil(t, row.API)
-	require.Equal(t, api.String(), *row.API)
-	require.Empty(t, row.APIReason)
-	require.Empty(t, row.WorkerReason)
-	require.Empty(t, row.WaitReason)
-	require.Empty(t, row.RingOptionsReason)
-	batch := 1
-	if strings.Contains(row.Name, "/batch=32/") {
-		batch = 32
-	}
-	require.Equal(t, batch, row.Batch)
-	if api == apiSingle {
-		require.NotContains(t, row.Name, "/batch=")
-	}
-	require.Equal(t, 1024, row.UsableCapacity)
-	require.NotNil(t, row.Producers)
-	require.NotNil(t, row.Consumers)
-	require.Equal(t, 1, *row.Producers)
-	require.Equal(t, 4, *row.Consumers)
-	require.Zero(t, row.Callers)
-	require.Equal(t, 5, row.Participants)
-	require.Equal(t, 1, row.QueueCount)
 	options := []string{}
 	if implementation == "ring" {
 		options = []string{"WithMultiConsDequeue"}
 	}
-	require.Equal(t, options, row.ExplicitOptions)
-	require.Equal(t, options, row.RingOptions)
-	require.Equal(t, "ns/elem", row.PrimaryMetric)
-	wait := "runtime.Gosched after each unsuccessful "
-	require.NotNil(t, row.ProducerWait)
-	require.NotNil(t, row.ConsumerWait)
-	require.Equal(t, wait+"enqueue attempt", *row.ProducerWait)
-	require.Equal(t, wait+"dequeue attempt", *row.ConsumerWait)
-	require.Equal(t,
-		"excludes queue/buffer setup and pre-run GC; includes worker startup, "+
-			"payload fill, operations, retries, producer completion, drain, and joins",
-		row.TimingBoundary,
-	)
-	metrics := []string{"ns/op", "ns/elem", "gc-cycles", "gc/Melem", "B/op", "allocs/op"}
-	if api == apiBulk {
-		metrics = append(metrics, "elem/op")
-	}
-	require.Equal(t, metrics, row.Metrics)
-	require.Equal(t, spmcComparisonDefaults{
+	api := checkComparisonRow(t, row, implementation, 1, 4, options)
+	require.Equal(t, comparisonDefaults{
 		MaxEnqueueBatch: 1024, MaxDequeueBatch: 1024, ClearOnDequeue: true,
 		ProducerAdmission: "cached counts", ConsumerAdmission: "shared cached counts",
 		ConsumerRelease: "ordered", SpinsBeforeYield: 8192,
 	}, row.Defaults)
-	var actual any
-	if strings.HasSuffix(row.Name, "/elem=ptr") {
-		require.Equal(t, "ptr", row.Element)
-		require.NotNil(t, row.PointerPoolSize)
-		require.Equal(t, 1024, *row.PointerPoolSize)
-		require.Empty(t, row.PointerPoolReason)
-		require.Equal(t, "typed *item pointing into a rotating pool of 1024 items", row.Storage)
-		created, err := newSPMCComparisonQueue[*item](implementation, api)
-		require.NoError(t, err)
-		actual = created
-	} else {
-		require.Equal(t, "int64", row.Element)
-		require.Nil(t, row.PointerPoolSize)
-		require.Equal(t, "int64 values do not use a pointer pool", row.PointerPoolReason)
-		require.Equal(t, "typed int64", row.Storage)
-		created, err := newSPMCComparisonQueue[int64](implementation, api)
-		require.NoError(t, err)
-		actual = created
-	}
+	actual := comparisonRowQueue(
+		t,
+		row,
+		implementation,
+		api,
+		newSPMCComparisonQueue[int64],
+		newSPMCComparisonQueue[*item],
+	)
 	checkSPMCComparisonDefaults(t, actual, implementation)
 	checkSPMCComparisonLayout(t, row.Layout, actual, implementation)
 }
@@ -319,37 +125,13 @@ func checkSPMCComparisonDefaults(t *testing.T, target any, implementation string
 
 func checkSPMCComparisonLayout(
 	t *testing.T,
-	layout spmcComparisonLayout,
+	layout comparisonLayout,
 	target any,
 	implementation string,
 ) {
 	t.Helper()
-	require.Equal(t, "separately allocated layout exemplar", layout.Source)
-	concrete := reflect.ValueOf(target).Elem().FieldByName("ring").Type().Elem()
-	require.Equal(t, concrete.String(), layout.Type)
-	require.Equal(t, concrete.Size(), layout.Size)
-	require.Equal(t, concrete.Align(), layout.Alignment)
-	require.Less(t, layout.BaseModulo64, uintptr(64))
-	require.Less(t, layout.BaseModulo128, uintptr(128))
-	require.Equal(t, layout.BaseModulo64, layout.BaseModulo128%64)
-	var inspect func(reflect.Type, []spmcComparisonField)
-	inspect = func(kind reflect.Type, fields []spmcComparisonField) {
-		require.Len(t, fields, kind.NumField())
-		for index, field := range fields {
-			expected := kind.Field(index)
-			require.Equal(t, expected.Name, field.Name)
-			require.Equal(t, expected.Type.String(), field.Type)
-			require.Equal(t, expected.Offset, field.Offset)
-			require.Equal(t, expected.Type.Size(), field.Size)
-			require.Equal(t, expected.Type.Align(), field.Alignment)
-			if expected.Type.Kind() == reflect.Struct {
-				inspect(expected.Type, field.Fields)
-			} else {
-				require.Empty(t, field.Fields)
-			}
-		}
-	}
-	inspect(concrete, layout.Fields)
+	concrete := checkComparisonLayout(t, layout, target)
+
 	if implementation == "ring" {
 		if reflect.TypeFor[uintptr]().Size() != 8 {
 			return
@@ -382,96 +164,15 @@ func checkSPMCComparisonLayout(
 }
 
 func TestSPMCComparisonAccounting(t *testing.T) {
-	for _, implementation := range []string{"ring", "spmc"} {
-		for _, api := range []ringAPI{apiSingle, apiBulk, apiBurst} {
-			for _, batch := range []int{1, 32} {
-				if api == apiSingle && batch != 1 {
-					continue
-				}
-				for _, requested := range []int{0, 1, 31, 32, 33, 10007} {
-					name := fmt.Sprintf("impl=%s/api=%s/batch=%d/total=%d", implementation, api, batch, requested)
-					t.Run(name+"/elem=int64", func(t *testing.T) {
-						expectedTotal := requested
-						if api == apiBulk && requested%batch != 0 {
-							expectedTotal += batch - requested%batch
-						}
-						total := api.total(requested, batch, 1)
-						require.Equal(t, expectedTotal, total)
-						recorders := make([]*recordSink[int64], 4)
-						result := runWithin(t, t.Name(), func() (throughputResult, error) {
-							return runThroughput(
-								noopTimer{},
-								func() (queue[int64], error) {
-									return newSPMCComparisonQueue[int64](implementation, api)
-								},
-								1, 4, batch, total, fillInt64,
-								func(consumer int) *recordSink[int64] {
-									recorders[consumer] = &recordSink[int64]{}
-									return recorders[consumer]
-								},
-							)
-						})
-						require.Equal(t, expectedTotal, result.received)
-						expected := make(map[int64]int)
-						for sequence := range expectedTotal {
-							expected[int64(sequence)]++
-						}
-						actual := make(map[int64]int)
-						for _, recorder := range recorders {
-							for _, value := range recorder.items {
-								producer, sequence := unpackInt64(value)
-								require.Zero(t, producer)
-								require.Equal(t, sequence, value)
-								actual[value]++
-							}
-						}
-						require.Equal(t, expected, actual)
-					})
-					t.Run(name+"/elem=ptr", func(t *testing.T) {
-						expectedTotal := requested
-						if api == apiBulk && requested%batch != 0 {
-							expectedTotal += batch - requested%batch
-						}
-						total := api.total(requested, batch, 1)
-						require.Equal(t, expectedTotal, total)
-						pool := newItemPool()
-						require.Len(t, pool, 1024)
-						recorders := make([]*recordSink[*item], 4)
-						result := runWithin(t, t.Name(), func() (throughputResult, error) {
-							return runThroughput(
-								noopTimer{},
-								func() (queue[*item], error) {
-									return newSPMCComparisonQueue[*item](implementation, api)
-								},
-								1, 4, batch, total, fillPtr(pool),
-								func(consumer int) *recordSink[*item] {
-									recorders[consumer] = &recordSink[*item]{}
-									return recorders[consumer]
-								},
-							)
-						})
-						require.Equal(t, expectedTotal, result.received)
-						expected := make(map[*item]int)
-						for sequence := range expectedTotal {
-							expected[&pool[sequence%1024]]++
-						}
-						actual := make(map[*item]int)
-						for _, recorder := range recorders {
-							for _, value := range recorder.items {
-								require.NotNil(t, value)
-								require.Contains(t, expected, value)
-								actual[value]++
-							}
-						}
-						require.Equal(t, expected, actual)
-						for index := range pool {
-							require.Equal(t, int64(index), pool[index].value)
-						}
-					})
-				}
-			}
-		}
-	}
+	checkComparisonAccounting(
+		t,
+		"spmc",
+		1,
+		4,
+		[]int{0, 1, 31, 32, 33, 10007},
+		newSPMCComparisonQueue[int64],
+		newSPMCComparisonQueue[*item],
+	)
 }
 
 // Both concrete implementations expose the same errors before adapter translation.

@@ -67,6 +67,8 @@ go_test(
         "alloc_test.go",
         "bench_adapters_test.go",
         "bench_buffers_test.go",
+        "bench_comparison_test.go",
+        "bench_comparison_harness_test.go",
         "bench_harness_test.go",
         "bench_latency_test.go",
         "bench_manifest_test.go",

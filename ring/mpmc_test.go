@@ -2,7 +2,6 @@ package ring
 
 import (
 	"errors"
-	"fmt"
 	"math"
 	"slices"
 	"strconv"
@@ -43,113 +42,6 @@ func mpmcSeed[T any](queue *MPMCQueue[T], position, counter uint32) {
 	queue.consumerPublication.published.Store(position)
 }
 
-func TestMPMCSerialParity(t *testing.T) {
-	for mode := 0; mode < 4; mode++ {
-		for _, exact := range []bool{false, true} {
-			for _, clearing := range []bool{false, true} {
-				for _, capacity := range []int{1, 2, 4, 8, 64} {
-					t.Run(fmt.Sprintf(
-						"mode=%d/exact=%t/clear=%t/cap=%d",
-						mode,
-						exact,
-						clearing,
-						capacity,
-					), func(t *testing.T) {
-						var options []Option
-						if exact {
-							options = append(options, WithExactBatchCounts())
-						}
-						if !clearing {
-							options = append(options, WithoutDequeueClearing())
-						}
-						options = mpmcTestOptions(mode, options)
-						queue := mpmcNewForTest[int](t, capacity, options...)
-						reference, err := New[int](capacity, options...)
-						if err != nil {
-							t.Fatal(err)
-						}
-						items := make([]int, capacity)
-						actual, expected := make([]int, capacity), make([]int, capacity)
-						for round := 0; round < 12; round++ {
-							for index := range items {
-								items[index] = 100*round + index + 1
-							}
-							switch round % 3 {
-							case 0:
-								for _, item := range items {
-									if err := queue.Enqueue(item); err != reference.Enqueue(item) {
-										t.Fatal("single enqueue", err)
-									}
-								}
-							case 1:
-								got, err := queue.EnqueueBulk(items)
-								want, refErr := reference.EnqueueBulk(items)
-								if got != want || err != refErr || got != 0 {
-									t.Fatal("bulk enqueue", got, want, err, refErr)
-								}
-							case 2:
-								got, free := queue.EnqueueBurst(items)
-								want, refFree := reference.EnqueueBurst(items)
-								if got != want || free != refFree || got != capacity || free != 0 {
-									t.Fatal("burst enqueue", got, free, want, refFree)
-								}
-							}
-							if !queue.Full() || queue.Empty() || queue.Count() != capacity || queue.Free() != 0 {
-								t.Fatal("full observers")
-							}
-							if queue.Enqueue(-1) != ErrFull {
-								t.Fatal("full single")
-							}
-							if free, err := queue.EnqueueBulk(items); free != 0 || err != ErrFull {
-								t.Fatal("full bulk", free, err)
-							}
-							switch round % 3 {
-							case 0:
-								got, err := queue.DequeueBulk(actual)
-								want, refErr := reference.DequeueBulk(expected)
-								if got != want || err != refErr || got != 0 {
-									t.Fatal("bulk dequeue", got, want, err, refErr)
-								}
-							case 1:
-								got, left := queue.DequeueBurst(actual)
-								want, refLeft := reference.DequeueBurst(expected)
-								if got != want || left != refLeft || got != capacity || left != 0 {
-									t.Fatal("burst dequeue", got, left, want, refLeft)
-								}
-							case 2:
-								for index := range actual {
-									got, err := queue.Dequeue()
-									want, refErr := reference.Dequeue()
-									if got != want || err != refErr {
-										t.Fatal("single dequeue", got, want, err, refErr)
-									}
-									actual[index], expected[index] = got, want
-								}
-							}
-							if !slices.Equal(actual, items) || !slices.Equal(actual, expected) {
-								t.Fatal("FIFO", actual, items, expected)
-							}
-							saved := slices.Clone(actual)
-							if left, err := queue.DequeueBulk(actual); left != 0 || err != ErrEmpty {
-								t.Fatal("empty bulk", left, err)
-							}
-							if !slices.Equal(saved, actual) {
-								t.Fatal("failed dequeue changed destination")
-							}
-							if value, err := queue.Dequeue(); value != 0 || err != ErrEmpty {
-								t.Fatal("empty single", value, err)
-							}
-							if !queue.Empty() || queue.Full() || queue.Free() != capacity {
-								t.Fatal("empty observers")
-							}
-						}
-					})
-				}
-			}
-		}
-	}
-}
-
 func TestMPMCConstruction(t *testing.T) {
 	for mode := 0; mode < 4; mode++ {
 		queue := mpmcNewForTest[int](t, 8, mpmcTestOptions(mode, nil)...)
@@ -162,11 +54,6 @@ func TestMPMCConstruction(t *testing.T) {
 		if cfg.prodHTDMax != uint32(mode&1) || cfg.consHTDMax != uint32((mode>>1)&1) {
 			t.Fatal("default distances", mode, cfg.prodHTDMax, cfg.consHTDMax)
 		}
-	}
-	executed := false
-	_, err := NewMPMCQueue[int](3, func(*config) { executed = true })
-	if !errors.Is(err, ErrInvalidCount) || executed {
-		t.Fatal("count validation must precede options", err, executed)
 	}
 	configured := mpmcNewForTest[int](
 		t,
@@ -190,31 +77,6 @@ func TestMPMCConstruction(t *testing.T) {
 		configured.config.spinsBeforeYield != 0 || configured.config.prodHTDMax != 0 ||
 		configured.config.consHTDMax != 8 {
 		t.Fatal("final option values")
-	}
-	cases := []struct {
-		options  []Option
-		sentinel error
-	}{
-		{[]Option{WithMaxEnqueueBatch(0), WithMaxDequeueBatch(0), WithSpinsBeforeYield(-1)},
-			ErrInvalidMaxBatch},
-		{[]Option{WithMaxDequeueBatch(0), WithSpinsBeforeYield(-1)}, ErrInvalidMaxBatch},
-		{[]Option{WithSpinsBeforeYield(-1)}, ErrInvalidSpinsBeforeYield},
-		{[]Option{func(cfg *config) { cfg.prodMode = modeSingle }}, ErrUnsupportedOption},
-		{[]Option{func(cfg *config) { cfg.consMode = modeSingle }}, ErrUnsupportedOption},
-		{[]Option{WithMaxProducerHeadTailDistance(-1)}, ErrInvalidMaxHeadTailDistance},
-		{[]Option{WithMaxConsumerHeadTailDistance(-1)}, ErrInvalidMaxHeadTailDistance},
-		{[]Option{WithMaxProducerHeadTailDistance(0)}, ErrHeadTailDistanceRequiresRelaxed},
-		{[]Option{WithMaxConsumerHeadTailDistance(0)}, ErrHeadTailDistanceRequiresRelaxed},
-		{[]Option{WithRelaxedMultiProdEnqueue(), WithMultiProdEnqueue(),
-			WithMaxProducerHeadTailDistance(1)}, ErrHeadTailDistanceRequiresRelaxed},
-		{[]Option{WithRelaxedMultiConsDequeue(), WithMultiConsDequeue(),
-			WithMaxConsumerHeadTailDistance(1)}, ErrHeadTailDistanceRequiresRelaxed},
-	}
-	for index, test := range cases {
-		queue, err := NewMPMCQueue[int](8, test.options...)
-		if queue != nil || !errors.Is(err, test.sentinel) || err == test.sentinel {
-			t.Fatal("constructor error", index, queue, err, test.sentinel)
-		}
 	}
 	maximum := int(^uint(0) >> 1)
 	if uint64(maximum) > math.MaxUint32 {
@@ -503,33 +365,6 @@ func TestMPMCRolloverClearingReset(t *testing.T) {
 			if got, err := queue.Dequeue(); err != nil || got != &value {
 				t.Fatal("reuse after Reset", got, err)
 			}
-		}
-	}
-}
-
-func TestMPMCWideIntLengths(t *testing.T) {
-	if strconv.IntSize <= 32 {
-		t.Skip("requires wider int")
-	}
-	hugeLength := uint64(math.MaxUint32) + 2
-	huge := make([]struct{}, int(hugeLength))
-	for mode := 0; mode < 4; mode++ {
-		queue := mpmcNewForTest[struct{}](
-			t,
-			8,
-			mpmcTestOptions(mode, []Option{WithMaxBatch(1)})...,
-		)
-		if free, err := queue.EnqueueBulk(huge); free != 8 || !errors.Is(err, ErrExceedsCapacity) {
-			t.Fatal("wide enqueue length", free, err)
-		}
-		if left, err := queue.DequeueBulk(huge); left != 0 || !errors.Is(err, ErrExceedsCapacity) {
-			t.Fatal("wide dequeue length", left, err)
-		}
-		if moved, free := queue.EnqueueBurst(huge); moved != 1 || free != 7 {
-			t.Fatal("wide enqueue clamp", moved, free)
-		}
-		if moved, left := queue.DequeueBurst(huge); moved != 1 || left != 0 {
-			t.Fatal("wide dequeue clamp", moved, left)
 		}
 	}
 }

@@ -22,47 +22,11 @@ func newSPSCForTest[T any](t *testing.T, capacity int, options ...Option) *SPSCQ
 }
 
 func TestSPSCConstruction(t *testing.T) {
-	for _, count := range []int{-1, 0, 3, 5, maxCount + 1, math.MaxInt} {
-		queue, err := NewSPSCQueue[int](count)
-		if queue != nil || !errors.Is(err, ErrInvalidCount) || err == ErrInvalidCount {
-			t.Fatalf("count %d: queue=%p error=%v", count, queue, err)
-		}
-	}
-	for _, option := range []func(int) Option{
-		WithMaxBatch, WithMaxEnqueueBatch, WithMaxDequeueBatch,
-	} {
-		for _, limit := range []int{-1, 0, 5, math.MaxInt} {
-			queue, err := NewSPSCQueue[int](4, option(limit))
-			if queue != nil || !errors.Is(err, ErrInvalidMaxBatch) {
-				t.Fatalf("limit %d: queue=%p error=%v", limit, queue, err)
-			}
-		}
-	}
-	cases := []struct {
-		name             string
-		options          []Option
-		enqueue, dequeue int
-	}{
-		{"defaults", nil, 8, 8},
-		{"both", []Option{WithMaxBatch(4)}, 4, 4},
-		{"directional-last", []Option{
-			WithMaxBatch(4), WithMaxEnqueueBatch(2), WithMaxDequeueBatch(3),
-		}, 2, 3},
-		{"both-last", []Option{
-			WithMaxEnqueueBatch(2), WithMaxDequeueBatch(3), WithMaxBatch(4),
-		}, 4, 4},
-		{"invalid-overridden", []Option{WithMaxBatch(0), WithMaxBatch(4)}, 4, 4},
-	}
-	for _, test := range cases {
+	for _, test := range ringConstructorSuccessCases() {
 		t.Run(test.name, func(t *testing.T) {
 			queue := newSPSCForTest[int](t, 8, test.options...)
-			if queue.MaxEnqueueBatch() != test.enqueue || queue.MaxDequeueBatch() != test.dequeue {
-				t.Fatalf("limits=(%d,%d)", queue.MaxEnqueueBatch(), queue.MaxDequeueBatch())
-			}
-			if queue.Capacity() != 8 || queue.Count() != 0 || queue.Free() != 8 {
-				t.Fatal("initial capacity/count/free")
-			}
-			if !queue.Empty() || queue.Full() || !queue.consumer.clearOnDequeue {
+
+			if !queue.consumer.clearOnDequeue {
 				t.Fatal("initial flags")
 			}
 			if queue.producer.exactBatchCounts || queue.consumer.exactBatchCounts {
@@ -72,73 +36,6 @@ func TestSPSCConstruction(t *testing.T) {
 				t.Fatal("entries do not share storage")
 			}
 		})
-	}
-}
-
-func TestSPSCFullCapacityAndFIFO(t *testing.T) {
-	for _, capacity := range []int{1, 2, 4, 8} {
-		for _, exact := range []bool{false, true} {
-			t.Run(fmt.Sprintf("capacity=%d/exact=%t", capacity, exact), func(t *testing.T) {
-				var options []Option
-				if exact {
-					options = append(options, WithExactBatchCounts())
-				}
-				queue := newSPSCForTest[int](t, capacity, options...)
-				for round := 0; round < 6; round++ {
-					items := make([]int, capacity)
-					for index := range items {
-						items[index] = round*capacity + index
-					}
-					switch round % 3 {
-					case 0:
-						for _, item := range items {
-							if err := queue.Enqueue(item); err != nil {
-								t.Fatal(err)
-							}
-						}
-					case 1:
-						if free, err := queue.EnqueueBulk(items); err != nil || free != 0 {
-							t.Fatalf("bulk free=%d error=%v", free, err)
-						}
-					case 2:
-						if moved, free := queue.EnqueueBurst(items); moved != capacity || free != 0 {
-							t.Fatalf("burst moved=%d free=%d", moved, free)
-						}
-					}
-					if !queue.Full() || queue.Empty() || queue.Count() != capacity || queue.Free() != 0 {
-						t.Fatal("full query results")
-					}
-					if err := queue.Enqueue(-1); err != ErrFull || !errors.Is(err, ErrFull) {
-						t.Fatalf("full error=%v", err)
-					}
-					dst := make([]int, capacity)
-					switch round % 3 {
-					case 0:
-						if available, err := queue.DequeueBulk(dst); err != nil || available != 0 {
-							t.Fatalf("bulk available=%d error=%v", available, err)
-						}
-					case 1:
-						if moved, left := queue.DequeueBurst(dst); moved != capacity || left != 0 {
-							t.Fatalf("burst moved=%d available=%d", moved, left)
-						}
-					case 2:
-						for index := range dst {
-							value, err := queue.Dequeue()
-							if err != nil {
-								t.Fatal(err)
-							}
-							dst[index] = value
-						}
-					}
-					if !slices.Equal(dst, items) {
-						t.Fatalf("got %v want %v", dst, items)
-					}
-					if value, err := queue.Dequeue(); value != 0 || err != ErrEmpty {
-						t.Fatalf("empty value=%d error=%v", value, err)
-					}
-				}
-			})
-		}
 	}
 }
 
@@ -189,54 +86,18 @@ func TestSPSCPositionAndPhysicalWrap(t *testing.T) {
 	}
 }
 
-func TestSPSCBulkErrorsAndBurstLimits(t *testing.T) {
+func TestSPSCFailedBatchKeepsProducerPosition(t *testing.T) {
 	queue := newSPSCForTest[int](t, 4, WithMaxBatch(2))
-	for _, length := range []int{5, 3, 2} {
-		want := ErrEmpty
-		switch length {
-		case 5:
-			want = ErrExceedsCapacity
-		case 3:
-			want = ErrExceedsMaxBatch
+	for _, item := range []int{1, 2, 3, 4} {
+		if err := queue.Enqueue(item); err != nil {
+			t.Fatal(err)
 		}
-		dst := []int{9, 9, 9, 9, 9}[:length]
-		before := slices.Clone(dst)
-		available, err := queue.DequeueBulk(dst)
-		if available != 0 || !errors.Is(err, want) || !slices.Equal(dst, before) {
-			t.Fatalf("length=%d available=%d error=%v dst=%v", length, available, err, dst)
-		}
-		if want == ErrEmpty && err != want {
-			t.Fatal("wrapped empty")
-		}
-	}
-	if moved, free := queue.EnqueueBurst([]int{1, 2, 3, 4, 5}); moved != 2 || free != 2 {
-		t.Fatalf("clamp moved=%d free=%d", moved, free)
-	}
-	if _, err := queue.EnqueueBulk([]int{3, 4}); err != nil {
-		t.Fatal(err)
 	}
 	for _, length := range []int{5, 3, 2} {
-		want := ErrFull
-		switch length {
-		case 5:
-			want = ErrExceedsCapacity
-		case 3:
-			want = ErrExceedsMaxBatch
+		_, err := queue.EnqueueBulk(make([]int, length))
+		if err == nil {
+			t.Fatal("expected failed enqueue")
 		}
-		free, err := queue.EnqueueBulk(make([]int, length))
-		if free != 0 || !errors.Is(err, want) {
-			t.Fatalf("length=%d free=%d error=%v", length, free, err)
-		}
-		if want == ErrFull && err != want {
-			t.Fatal("wrapped full")
-		}
-	}
-	dst := []int{9, 9, 9, 9, 9}
-	if moved, left := queue.DequeueBurst(dst); moved != 2 || left != 2 {
-		t.Fatalf("clamp moved=%d available=%d", moved, left)
-	}
-	if !slices.Equal(dst, []int{1, 2, 9, 9, 9}) {
-		t.Fatalf("clamp dst=%v", dst)
 	}
 	if queue.producer.cursor != 4 || queue.producer.published.Load() != 4 {
 		t.Fatal("failed enqueue moved producer")
@@ -392,32 +253,9 @@ func TestSPSCPointerClearingAndReset(t *testing.T) {
 		}
 		queue := newSPSCForTest[*int](t, 4, options...)
 		seedSPSC(queue, math.MaxUint32-1)
-		values := []int{1, 2, 3}
-		items := []*int{&values[0], &values[1], &values[2]}
-		if _, err := queue.EnqueueBulk(items); err != nil {
-			t.Fatal(err)
-		}
-		if value, err := queue.Dequeue(); err != nil || value != items[0] {
-			t.Fatalf("single pointer=%p error=%v", value, err)
-		}
-		if _, err := queue.DequeueBulk(make([]*int, 2)); err != nil {
-			t.Fatal(err)
-		}
-		retained := 0
-		for _, value := range queue.producer.entries {
-			if value != nil {
-				retained++
-			}
-		}
-		want := 0
-		if keep {
-			want = 3
-		}
-		if retained != want {
-			t.Fatalf("keep=%t retained=%d want=%d", keep, retained, want)
-		}
-		if err := queue.Enqueue(items[0]); err != nil {
-			t.Fatal(err)
+		value := 42
+		for index := range queue.producer.entries {
+			queue.producer.entries[index] = &value
 		}
 		backing := &queue.producer.entries[0]
 		queue.Reset()
@@ -438,12 +276,6 @@ func TestSPSCPointerClearingAndReset(t *testing.T) {
 			if value != nil {
 				t.Fatal("reset retained pointer")
 			}
-		}
-		if err := queue.Enqueue(items[1]); err != nil {
-			t.Fatal(err)
-		}
-		if value, err := queue.Dequeue(); err != nil || value != items[1] {
-			t.Fatalf("reuse pointer=%p error=%v", value, err)
 		}
 	}
 }
@@ -618,27 +450,6 @@ func runSPSCTransfers(t *testing.T, capacity int, exact bool) {
 	}
 	if queue.Count() != 0 || queue.Free() != capacity {
 		t.Fatal("final count")
-	}
-}
-
-func TestSPSCLengthClampingBeforeNarrowing(t *testing.T) {
-	if uint64(^uint(0)) <= math.MaxUint32 {
-		t.Skip("slice length beyond uint32 requires a 64-bit int")
-	}
-	length := uint64(math.MaxUint32) + 2
-	items := make([]struct{}, int(length))
-	queue := newSPSCForTest[struct{}](t, 4, WithMaxBatch(2))
-	if free, err := queue.EnqueueBulk(items); free != 4 || !errors.Is(err, ErrExceedsCapacity) {
-		t.Fatalf("large bulk free=%d error=%v", free, err)
-	}
-	if moved, free := queue.EnqueueBurst(items); moved != 2 || free != 2 {
-		t.Fatalf("large burst moved=%d free=%d", moved, free)
-	}
-	if left, err := queue.DequeueBulk(items); left != 2 || !errors.Is(err, ErrExceedsCapacity) {
-		t.Fatalf("large bulk available=%d error=%v", left, err)
-	}
-	if moved, left := queue.DequeueBurst(items); moved != 2 || left != 0 {
-		t.Fatalf("large burst moved=%d available=%d", moved, left)
 	}
 }
 

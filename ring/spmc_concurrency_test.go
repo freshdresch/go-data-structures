@@ -1,14 +1,11 @@
 package ring
 
 import (
-	"context"
 	"fmt"
 	"math"
 	"runtime"
 	"slices"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -325,272 +322,6 @@ func TestSPMCFailedAttemptRecomputesAdmission(t *testing.T) {
 	}
 }
 
-func TestSPMCConcurrentTransfersAndObservers(t *testing.T) {
-	for _, relaxed := range []bool{false, true} {
-		t.Run(fmt.Sprintf("RTS=%t", relaxed), func(t *testing.T) {
-			for _, capacity := range []int{1, 2, 8, 64} {
-				for _, exact := range []bool{false, true} {
-					for _, keep := range []bool{false, true} {
-						for _, method := range []string{"single", "bulk", "burst"} {
-							name := fmt.Sprintf(
-								"capacity=%d/exact=%t/keep=%t/%s",
-								capacity, exact, keep, method,
-							)
-							t.Run(name, func(t *testing.T) {
-								options := []Option{WithSpinsBeforeYield(0)}
-								if exact {
-									options = append(options, WithExactBatchCounts())
-								}
-								if keep {
-									options = append(options, WithoutDequeueClearing())
-								}
-								queue := newSPMCForTest[int](t, capacity, spmcProtocolOptions(relaxed, options)...)
-								seedSPMC(queue, math.MaxUint32-3)
-								ownership := make(chan *SPMCQueue[int], 1)
-								ownership <- queue
-								checkSPMCConcurrentTransfers(t, queue, ownership, method, 1, 1, 384)
-							})
-						}
-					}
-				}
-			}
-
-		})
-	}
-}
-
-func checkSPMCConcurrentTransfers(
-	t *testing.T,
-	queue *SPMCQueue[int],
-	ownership <-chan *SPMCQueue[int],
-	method string,
-	firstProduced, firstExpected, lastTag int,
-) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), spmcWorkerTimeout)
-	defer cancel()
-	const consumerCount = 4
-	workerErrors := make(chan error, consumerCount+2)
-	var transferred atomic.Int64
-	firstPublication := make(chan struct{})
-	observerSampled := make(chan struct{})
-	var workers sync.WaitGroup
-	intervals := make([][][]int, consumerCount)
-	capacity := queue.Capacity()
-	request := min(3, capacity)
-	report := func(err error) { workerErrors <- err }
-	workers.Add(1)
-	go func() {
-		defer workers.Done()
-		var producer *SPMCQueue[int]
-		select {
-		case producer = <-ownership:
-		case <-ctx.Done():
-			return
-		}
-		publishedFirst := false
-		for next := firstProduced; next <= lastTag; {
-			if ctx.Err() != nil {
-				return
-			}
-			length := min(request, lastTag-next+1)
-			items := make([]int, length)
-			for index := range items {
-				items[index] = next + index
-			}
-			moved := 0
-			switch method {
-			case "single":
-				err := producer.Enqueue(next)
-				if err != nil && err != ErrFull {
-					report(fmt.Errorf("enqueue: %w", err))
-					return
-				}
-				if err == nil {
-					moved = 1
-				}
-			case "bulk":
-				free, err := producer.EnqueueBulk(items)
-				if free < 0 || free > capacity || (err != nil && err != ErrFull) {
-					report(fmt.Errorf("enqueue bulk free=%d error=%v", free, err))
-					return
-				}
-				if err == nil {
-					moved = length
-				}
-			case "burst":
-				var free int
-				moved, free = producer.EnqueueBurst(items)
-				if moved < 0 || moved > length || free < 0 || free > capacity {
-					report(fmt.Errorf("enqueue burst moved=%d free=%d", moved, free))
-					return
-				}
-			}
-			if moved > 0 && !publishedFirst {
-				close(firstPublication)
-				publishedFirst = true
-				select {
-				case <-observerSampled:
-				case <-ctx.Done():
-					return
-				}
-			}
-			next += moved
-			runtime.Gosched()
-		}
-	}()
-	for worker := range consumerCount {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			for transferred.Load() < int64(lastTag-firstExpected+1) {
-				if ctx.Err() != nil {
-					return
-				}
-				length := request
-				if method == "burst" {
-					length += 2
-				}
-				destination := make([]int, length)
-				for index := range destination {
-					destination[index] = -1
-				}
-				moved, available := 0, 0
-				switch method {
-				case "single":
-					value, err := queue.Dequeue()
-					if err != nil && err != ErrEmpty {
-						report(fmt.Errorf("dequeue: %w", err))
-						return
-					}
-					if err == nil {
-						destination[0], moved = value, 1
-					}
-				case "bulk":
-					var err error
-					available, err = queue.DequeueBulk(destination)
-					if err != nil && err != ErrEmpty {
-						report(fmt.Errorf("dequeue bulk: %w", err))
-						return
-					}
-					if err == nil {
-						moved = length
-					}
-				case "burst":
-					moved, available = queue.DequeueBurst(destination)
-				}
-				if moved < 0 || moved > min(length, capacity) {
-					report(fmt.Errorf("dequeue moved=%d", moved))
-					return
-				}
-				if available < 0 || available > capacity {
-					report(fmt.Errorf("dequeue available=%d", available))
-					return
-				}
-				for _, value := range destination[moved:] {
-					if value != -1 {
-						report(fmt.Errorf("destination suffix changed: %v", destination))
-						return
-					}
-				}
-				if moved > 0 {
-					interval := destination[:moved]
-					for index := 1; index < moved; index++ {
-						if interval[index] != interval[index-1]+1 {
-							report(fmt.Errorf("non-FIFO interval: %v", interval))
-							return
-						}
-					}
-					intervals[worker] = append(intervals[worker], interval)
-					transferred.Add(int64(moved))
-				}
-				runtime.Gosched()
-			}
-		}()
-	}
-	observerStarted := make(chan struct{})
-	observerDone := make(chan struct{})
-	go func() {
-		defer close(observerDone)
-		first := true
-		sampledPublication := false
-		for ctx.Err() == nil {
-			count, free := queue.Count(), queue.Free()
-			if count < 0 || count > capacity || free < 0 || free > capacity {
-				report(fmt.Errorf("observer count=%d free=%d", count, free))
-				return
-			}
-			queue.Empty()
-			queue.Full()
-			if queue.Capacity() != capacity || queue.MaxEnqueueBatch() != capacity {
-				report(fmt.Errorf("immutable producer query changed"))
-				return
-			}
-			if queue.MaxDequeueBatch() != capacity {
-				report(fmt.Errorf("immutable consumer query changed"))
-				return
-			}
-			if !sampledPublication {
-				select {
-				case <-firstPublication:
-					// The producer waits here until an observer reads during its transfer.
-					queue.Count()
-					close(observerSampled)
-					sampledPublication = true
-				default:
-				}
-			}
-			if first {
-				close(observerStarted)
-				first = false
-			}
-			runtime.Gosched()
-		}
-	}()
-	joined := make(chan struct{})
-	go func() {
-		workers.Wait()
-		close(joined)
-	}()
-	select {
-	case <-observerStarted:
-	case <-ctx.Done():
-		t.Error("observer did not complete a concurrent snapshot")
-	}
-	select {
-	case <-joined:
-	case <-ctx.Done():
-		t.Error("transfers exceeded deadline")
-	}
-	cancel()
-	awaitSPMCSignal(t, joined)
-	awaitSPMCSignal(t, observerDone)
-	close(workerErrors)
-	for err := range workerErrors {
-		t.Error(err)
-	}
-	seen := make([]int, lastTag+1)
-	for _, workerIntervals := range intervals {
-		for _, interval := range workerIntervals {
-			for _, tag := range interval {
-				if tag < firstExpected || tag > lastTag {
-					t.Errorf("tag outside expected range: %d", tag)
-					continue
-				}
-				seen[tag]++
-			}
-		}
-	}
-	for tag := firstExpected; tag <= lastTag; tag++ {
-		if seen[tag] != 1 {
-			t.Errorf("tag %d occurred %d times", tag, seen[tag])
-		}
-	}
-	if queue.Count() != 0 || queue.Free() != capacity || !queue.Empty() || queue.Full() {
-		t.Error("quiescent queue did not report empty with all slots free")
-	}
-}
-
 func TestSPMCProducerOwnershipHandoffs(t *testing.T) {
 	for _, relaxed := range []bool{false, true} {
 		t.Run(fmt.Sprintf("RTS=%t", relaxed), func(t *testing.T) {
@@ -601,22 +332,27 @@ func TestSPMCProducerOwnershipHandoffs(t *testing.T) {
 						if exact {
 							options = append(options, WithExactBatchCounts())
 						}
-						queue := newSPMCForTest[int](t, 4, spmcProtocolOptions(relaxed, options)...)
+						queue := newSPMCForTest[ringConcurrentTag](
+							t,
+							4,
+							spmcProtocolOptions(relaxed, options)...,
+						)
 						firstProduced, firstExpected := 2, 1
 						if outgoing == "successful" {
-							if err := queue.Enqueue(1); err != nil {
+							if err := queue.Enqueue(ringConcurrentTag{0, 1}); err != nil {
 								t.Fatal(err)
 							}
 						} else {
-							if _, err := queue.EnqueueBulk([]int{1, 2, 3, 4}); err != nil {
+							items := []ringConcurrentTag{{0, 1}, {0, 2}, {0, 3}, {0, 4}}
+							if _, err := queue.EnqueueBulk(items); err != nil {
 								t.Fatal(err)
 							}
-							if value, err := queue.Dequeue(); err != nil || value != 1 {
-								t.Fatalf("prepare handoff dequeue=%d error=%v", value, err)
+							if value, err := queue.Dequeue(); err != nil || value != (ringConcurrentTag{0, 1}) {
+								t.Fatalf("prepare handoff dequeue=%v error=%v", value, err)
 							}
 							before := queue.producer.cachedConsumer
 							if outgoing == "failed" {
-								if _, err := queue.EnqueueBulk([]int{5, 6}); err != ErrFull {
+								if _, err := queue.EnqueueBulk([]ringConcurrentTag{{0, 5}, {0, 6}}); err != ErrFull {
 									t.Fatalf("failed outgoing admission: %v", err)
 								}
 							} else if _, err := queue.EnqueueBulk(nil); err != nil {
@@ -627,10 +363,16 @@ func TestSPMCProducerOwnershipHandoffs(t *testing.T) {
 							}
 							firstProduced, firstExpected = 5, 2
 						}
-						ownership := make(chan *SPMCQueue[int], 1)
+						ownership := make(chan ringTestQueue[ringConcurrentTag], 1)
 						ownership <- queue
-						checkSPMCConcurrentTransfers(
-							t, queue, ownership, "single", firstProduced, firstExpected, 128,
+						checkRingConcurrentTransfers(
+							t,
+							queue,
+							ringConcurrentScenario{
+								producerCount: 1, consumerCount: 4, lastSequence: 128,
+								firstProduced: firstProduced, firstExpected: firstExpected,
+								method: "single", ownership: ownership,
+							},
 						)
 					})
 				}

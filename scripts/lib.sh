@@ -162,3 +162,151 @@ diff_rows() {
 		return 1
 	fi
 }
+
+check_ac_power() {
+	power_preflight="not applicable"
+	if [ "$platform" = Darwin ]; then
+		local power
+		power=$(pmset -g batt) || die "could not read AC-power state"
+		case "$power" in
+		*"AC Power"*) power_preflight="AC Power" ;;
+		*) die "not on AC power, pmset -g batt reports: $power" ;;
+		esac
+	fi
+}
+
+json_string() {
+	local value=$1
+	value=${value//\\/\\\\}
+	value=${value//\"/\\\"}
+	value=${value//$'\n'/\\n}
+	value=${value//$'\r'/\\r}
+	value=${value//$'\t'/\\t}
+	printf '"%s"' "$value"
+}
+
+json_array() {
+	local separator=""
+	local value
+	printf '['
+	for value in "$@"; do
+		printf '%s' "$separator"
+		json_string "$value"
+		separator=,
+	done
+	printf ']'
+}
+
+prepare_benchmeta() {
+	mkdir -p "$results/provenance"
+	benchmeta="$results/benchmeta"
+	GOTOOLCHAIN=local GOWORK=off GOFLAGS=-mod=readonly \
+		go -C "$repo" build -o "$benchmeta" ./scripts/benchmeta ||
+		die "building metadata helper failed"
+	runner_bundle=("$repo/scripts/$prog.sh" "$repo/scripts/lib.sh")
+	local source
+	for source in "$repo"/scripts/benchmeta/*.go; do
+		case "$source" in *_test.go) continue ;; esac
+		runner_bundle+=("$source")
+	done
+	{
+		printf '{"runner_bundle":'
+		json_array "${runner_bundle[@]}"
+		printf '}\n'
+	} >"$results/provenance/current-runner.json"
+	printf '{"os":%s,"architecture":%s}\n' \
+		"$(json_string "$platform")" "$(json_string "$(go env GOARCH)")" \
+		>"$results/provenance/platform.json"
+	go version -m "$benchmeta" >"$results/provenance/benchmeta-build-info.txt"
+	{
+		echo "## metadata helper"
+		echo "binary: $benchmeta"
+		echo "power preflight: $power_preflight"
+		echo "selected GOMAXPROCS: $own"
+		echo "selected CPUs: ${own_cpus:-OS scheduler}"
+		echo "WSL virtual CPUs and Apple mixed cores can limit affinity interpretation"
+	} >>"$state"
+}
+
+snapshot_variant() {
+	local variant=$1
+	local source_root=$2
+	local package_dir=$3
+	local target=$4
+	local origin=$5
+	local race=$6
+	local overlay=$7
+	shift 7
+	local request="$results/provenance/$variant.request.json"
+	status="aborted snapshotting $variant"
+	{
+		printf '{"schema":1,"runner_kind":%s,"origin":%s,' \
+			"$(json_string "$prog")" "$(json_string "$origin")"
+		printf '"source_root":%s,"package_dir":%s,"package_target":%s,' \
+			"$(json_string "$source_root")" "$(json_string "$package_dir")" "$(json_string "$target")"
+		printf '"helper_binary":%s,"variant":%s,"runner_bundle":' \
+			"$(json_string "$benchmeta")" "$(json_string "$variant")"
+		json_array "${runner_bundle[@]}"
+		printf ',"settings":{"race":%s,"overlay":%s,"environment":{' \
+			"$race" "$(json_string "$overlay")"
+		printf '"GOTOOLCHAIN":"local","GOWORK":"off","GOFLAGS":"-mod=readonly"}},'
+		printf '"build_command":'
+		json_array "$@"
+		printf '}\n'
+	} >"$request"
+	echo "snapshot: $variant" >>"$state"
+	"$benchmeta" snapshot --request "$request" \
+		--output "$results/provenance/$variant.snapshot.json"
+}
+
+export_workload() {
+	local binary=$1
+	local variant=$2
+	local cpu=$3
+	local stem="$results/provenance/$variant"
+	status="aborted exporting $variant metadata"
+	"$binary" -test.run '^TestBenchmarkManifest$' -test.v -test.cpu "$cpu" \
+		-test.count 1 -test.timeout 5m >"$stem.log" 2>&1 ||
+		die "metadata export failed: $stem.log"
+	local count
+	count=$(grep -c 'BENCHMARK_MANIFEST ' "$stem.log" || true)
+	[ "$count" -eq 1 ] || die "metadata export needs exactly one payload: $stem.log"
+	grep -q '^--- PASS: TestBenchmarkManifest (' "$stem.log" ||
+		die "metadata test did not explicitly pass: $stem.log"
+	sed -n 's/^.*BENCHMARK_MANIFEST //p' "$stem.log" >"$stem.manifest.json"
+}
+
+finalize_variant() {
+	local variant=$1
+	local binary=$2
+	local offset=$3
+	local stem="$results/provenance/$variant"
+	status="aborted finalizing $variant"
+	go version -m "$binary" >"$stem.build-info.txt" || die "cannot read binary build information"
+	{
+		printf '{"binary":%s,"build_info":%s,"manifest":%s,"manifest_log":%s,' \
+			"$(json_string "../$(basename "$binary")")" \
+			"$(json_string "$variant.build-info.txt")" \
+			"$(json_string "$variant.manifest.json")" "$(json_string "$variant.log")"
+		printf '"scheduler_offset":%s' "$(json_string "$offset")"
+		if [ "$prog" = ring-quick-bench ]; then
+			printf ',"single_manifest":%s,"single_manifest_log":%s' \
+				"$(json_string "$variant-single.manifest.json")" "$(json_string "$variant-single.log")"
+		fi
+		printf '}\n'
+	} >"$stem.artifacts.json"
+	echo "finalize: $variant offset=$offset" >>"$state"
+	"$benchmeta" finalize --snapshot "$stem.snapshot.json" --artifacts "$stem.artifacts.json" \
+		--output "$stem.json" --report "$stem.verification.json"
+}
+
+check_variant() {
+	local variant=$1
+	local stem="$results/provenance/$variant"
+	# The sourcing runner reads status in its EXIT trap.
+	# shellcheck disable=SC2034
+	status="aborted checking $variant before timing"
+	"$benchmeta" finalize --check-only --snapshot "$stem.snapshot.json" \
+		--artifacts "$stem.artifacts.json" --output "$stem.json" \
+		--report "$stem.pretiming-verification.json"
+}

@@ -1,6 +1,7 @@
 package ring_test
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"runtime"
@@ -8,9 +9,12 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/freshdresch/go-data-structures/ring"
 )
 
 // stopOrderQueue is a stub queue that is empty on every dequeue call except one. During call
@@ -179,38 +183,44 @@ func accountingCases(mode benchMode) []accountingCase {
 	var cases []accountingCase
 	for _, batch := range []int{1, 32} {
 		for _, impl := range throughputImpls[int64](mode) {
-			cases = append(cases, accountingCase{
-				name:  impl.name,
-				batch: batch,
-				run: func(total int, sinks func(consumer int) *recordSink[int64]) (throughputResult, error) {
-					return runThroughput(
-						noopTimer{},
-						impl.newQueue,
-						mode.producers,
-						mode.consumers,
-						batch,
-						total,
-						fillInt64,
-						sinks,
-					)
+			cases = append(
+				cases,
+				accountingCase{
+					name:  impl.name,
+					batch: batch,
+					run: func(total int, sinks func(consumer int) *recordSink[int64]) (throughputResult, error) {
+						return runThroughput(
+							noopTimer{},
+							impl.newQueue,
+							mode.producers,
+							mode.consumers,
+							batch,
+							total,
+							fillInt64,
+							sinks,
+						)
+					},
 				},
-			})
+			)
 		}
 	}
-	cases = append(cases, accountingCase{
-		name:  "chan",
-		batch: 1,
-		run: func(total int, sinks func(consumer int) *recordSink[int64]) (throughputResult, error) {
-			return runChanThroughput(
-				noopTimer{},
-				mode.producers,
-				mode.consumers,
-				total,
-				fillInt64,
-				sinks,
-			), nil
+	cases = append(
+		cases,
+		accountingCase{
+			name:  "chan",
+			batch: 1,
+			run: func(total int, sinks func(consumer int) *recordSink[int64]) (throughputResult, error) {
+				return runChanThroughput(
+					noopTimer{},
+					mode.producers,
+					mode.consumers,
+					total,
+					fillInt64,
+					sinks,
+				), nil
+			},
 		},
-	})
+	)
 	return cases
 }
 
@@ -240,7 +250,10 @@ func accountingError(sinks []*recordSink[int64], producers, total int) error {
 			if seq <= lastSeq[producer] {
 				return fmt.Errorf(
 					"consumer %d received producer %d sequence %d after %d",
-					c, producer, seq, lastSeq[producer],
+					c,
+					producer,
+					seq,
+					lastSeq[producer],
 				)
 			}
 			seen[producer][seq] = true
@@ -335,7 +348,10 @@ func checkAccounting(t *testing.T, tc accountingCase, mode benchMode, total int)
 	}
 	stuck := fmt.Sprintf(
 		"%s batch=%d mode=%s total=%d, likely a consumer exited early",
-		tc.name, tc.batch, mode.name, total,
+		tc.name,
+		tc.batch,
+		mode.name,
+		total,
 	)
 	result := runWithin(t, stuck, func() (throughputResult, error) {
 		return tc.run(total, newSink)
@@ -371,7 +387,7 @@ func TestRingAPIAccounting(t *testing.T) {
 						)
 					},
 				}
-				for _, requested := range []int{1, 10_007} {
+				for _, requested := range []int{1, 128, 10_007} {
 					total := api.total(requested, batch, mode.producers)
 					name := fmt.Sprintf("api=%s/mode=%s/batch=%d/total=%d", tc.name, mode.name, batch, total)
 					t.Run(name, func(t *testing.T) {
@@ -690,19 +706,97 @@ func TestHistogram(t *testing.T) {
 	})
 }
 
+func TestHandoffCompletionIsolation(t *testing.T) {
+	const cacheLineBytes = uintptr(64)
+	var layout handoffCompletion
+	fieldOffset := unsafe.Offsetof(layout.value)
+	fieldSize := unsafe.Sizeof(layout.value)
+	typeSize := unsafe.Sizeof(layout)
+	assert.GreaterOrEqual(t, fieldOffset, cacheLineBytes, "padding before completion flag")
+	assert.GreaterOrEqual(
+		t,
+		typeSize-fieldOffset-fieldSize,
+		cacheLineBytes,
+		"padding after completion flag",
+	)
+
+	for phase := range cacheLineBytes {
+		base := 2*cacheLineBytes + phase
+		firstFieldLine := (base + fieldOffset) / cacheLineBytes
+		lastFieldLine := (base + fieldOffset + fieldSize - 1) / cacheLineBytes
+		previousExternalLine := (base - 1) / cacheLineBytes
+		nextExternalLine := (base + typeSize) / cacheLineBytes
+		assert.Greater(t, firstFieldLine, previousExternalLine, "base phase %d", phase)
+		assert.Greater(t, lastFieldLine, previousExternalLine, "base phase %d", phase)
+		assert.Less(t, firstFieldLine, nextExternalLine, "base phase %d", phase)
+		assert.Less(t, lastFieldLine, nextExternalLine, "base phase %d", phase)
+	}
+
+	var completion handoffCompletion
+	assert.False(t, completion.value.Load())
+	completion.value.Store(true)
+	assert.True(t, completion.value.Load())
+}
+
+func TestHandoffSampledMean(t *testing.T) {
+	for _, extraHistogramSample := range []bool{false, true} {
+		t.Run(fmt.Sprintf("extraHistogramSample=%t", extraHistogramSample), func(t *testing.T) {
+			result := handoffResult{latency: &histogram{}}
+			result.record(65 * time.Nanosecond)
+			result.record(70 * time.Nanosecond)
+			require.Equal(t, 135*time.Nanosecond, result.roundTripTotal)
+			require.Equal(t, 2, result.recorded)
+			require.Equal(t, 2, result.latency.count())
+			require.Equal(t, time.Duration(32), result.latency.percentile(50))
+			require.Equal(t, time.Duration(34), result.latency.percentile(100))
+			require.Equal(t, time.Duration(35), result.latency.max())
+			if extraHistogramSample {
+				result.latency.record(time.Second)
+			}
+			measured := testing.Benchmark(func(b *testing.B) {
+				b.ReportMetric(1e9, "ns/op")
+				reportHandoff(b, result)
+			})
+			assert.Equal(t, 67.5, measured.Extra["ns/op"])
+			for _, percentile := range []float64{50, 90, 99, 99.9} {
+				metric := fmt.Sprintf("handoff-p%g", percentile)
+				assert.Equal(t, float64(result.latency.percentile(percentile)), measured.Extra[metric])
+			}
+			assert.Equal(t, float64(result.latency.max()), measured.Extra["handoff-max"])
+		})
+	}
+	t.Run("empty", func(t *testing.T) {
+		result := handoffResult{latency: &histogram{}}
+		measured := testing.Benchmark(func(b *testing.B) {
+			b.ReportMetric(1e9, "ns/op")
+			reportHandoff(b, result)
+		})
+		mean, reported := measured.Extra["ns/op"]
+		require.True(t, reported)
+		assert.False(t, math.IsNaN(mean))
+		assert.False(t, math.IsInf(mean, 0))
+		assert.Zero(t, mean)
+	})
+}
+
 // TestHandoffAccounting checks that every handoff run records each of its round trips once, and
 // that it returns, which shows the ponger stopped. Each run has accountingDeadline to finish.
 func TestHandoffAccounting(t *testing.T) {
-	const roundTrips = 10_000
 	for _, impl := range handoffImpls() {
-		t.Run("impl="+impl.name, func(t *testing.T) {
-			stuck := fmt.Sprintf("impl=%s, likely the ponger did not stop", impl.name)
-			result := runWithin(t, stuck, func() (handoffResult, error) {
-				return impl.run(noopTimer{}, roundTrips)
+		for _, roundTrips := range []int{0, 1, 10_000} {
+			name := fmt.Sprintf("impl=%s/roundTrips=%d", impl.name, roundTrips)
+			t.Run(name, func(t *testing.T) {
+				stuck := fmt.Sprintf("%s, likely the ponger did not stop", name)
+				result := runWithin(t, stuck, func() (handoffResult, error) {
+					return impl.run(noopTimer{}, roundTrips)
+				})
+				assert.Equal(t, roundTrips, result.recorded)
+				assert.Equal(t, roundTrips, result.latency.count())
+				if roundTrips == 0 {
+					assert.Zero(t, result.roundTripTotal)
+				}
 			})
-			assert.Equal(t, roundTrips, result.recorded)
-			assert.Equal(t, roundTrips, result.latency.count())
-		})
+		}
 	}
 }
 
@@ -1059,4 +1153,122 @@ func TestLoadedSmoke(t *testing.T) {
 	})
 	achieved := achievedRate(result.dequeued, result.lastDequeue)
 	assert.InDelta(t, rate, achieved, 0.1*rate)
+}
+
+func TestMovedOrPanic(t *testing.T) {
+	for _, expected := range []error{ring.ErrFull, ring.ErrEmpty} {
+		if got := movedOrPanic(nil, expected, 7); got != 7 {
+			t.Fatalf("success moved %d", got)
+		}
+		if got := movedOrPanic(expected, expected, 7); got != 0 {
+			t.Fatalf("retry moved %d", got)
+		}
+		opposite := ring.ErrFull
+		if expected == opposite {
+			opposite = ring.ErrEmpty
+		}
+		for _, unexpected := range []error{opposite, errors.New("unexpected"),
+			fmt.Errorf("wrapped: %w", expected)} {
+			func() {
+				defer func() {
+					if got := recover(); got != unexpected {
+						t.Errorf("panic = %v, want %v", got, unexpected)
+					}
+				}()
+				movedOrPanic(unexpected, expected, 7)
+			}()
+		}
+	}
+}
+
+func TestHarnessCapacity(t *testing.T) {
+	for _, mode := range benchModes {
+		for _, impl := range throughputImpls[int64](mode) {
+			t.Run(mode.name+"/"+impl.name, func(t *testing.T) {
+				target, err := impl.newQueue()
+				require.NoError(t, err)
+				checkHarnessCapacity(t, target)
+			})
+		}
+	}
+	for _, mode := range ringAPIModes {
+		for _, api := range ringAPIs {
+			t.Run(mode.name+"/"+api.String(), func(t *testing.T) {
+				target, err := newRingAPIQueue[int64](api, mode)
+				require.NoError(t, err)
+				checkHarnessCapacity(t, target)
+			})
+		}
+	}
+}
+
+func checkHarnessCapacity(t *testing.T, target queue[int64]) {
+	t.Helper()
+	for cycle := range 2 {
+		for index := range ringCapacity + 1 {
+			value := int64(cycle*ringCapacity + index)
+			want := 1
+			if index == ringCapacity {
+				want = 0
+			}
+			require.Equal(t, want, target.enqueue([]int64{value}), "cycle %d put %d", cycle, index)
+		}
+		for index := range ringCapacity + 1 {
+			dst := []int64{-1}
+			want := 1
+			if index == ringCapacity {
+				want = 0
+			}
+			require.Equal(t, want, target.dequeue(dst), "cycle %d get %d", cycle, index)
+			if want == 1 {
+				require.Equal(t, int64(cycle*ringCapacity+index), dst[0])
+			}
+		}
+	}
+}
+
+func TestRingAPIMetrics(t *testing.T) {
+	for _, testCase := range []struct {
+		api       ringAPI
+		requested int
+		total     int
+		nsPerElem float64
+		elemPerOp float64
+	}{
+		{apiBulk, 1, 128, 20, 128},
+		{apiBulk, 127, 128, 20, 128.0 / 127},
+		{apiBulk, 128, 128, 20, 1},
+		{apiBulk, 129, 256, 10, 256.0 / 129},
+		{apiSingle, 128, 128, 20, 1},
+		{apiBurst, 128, 128, 20, 1},
+	} {
+		require.Equal(t, testCase.total, testCase.api.total(testCase.requested, 32, 4))
+		nsPerElem, elemPerOp, err := ringAPIMetrics(
+			2560*time.Nanosecond,
+			testCase.requested,
+			testCase.total,
+			testCase.total,
+		)
+		require.NoError(t, err)
+		assert.Equal(t, testCase.nsPerElem, nsPerElem)
+		assert.Equal(t, testCase.elemPerOp, elemPerOp)
+	}
+	for _, testCase := range []struct {
+		elapsed                        time.Duration
+		iterations, expected, received int
+	}{
+		{-1, 1, 1, 1}, {0, 0, 1, 1}, {0, 1, 0, 0}, {0, 1, 2, 1},
+	} {
+		_, _, err := ringAPIMetrics(
+			testCase.elapsed,
+			testCase.iterations,
+			testCase.expected,
+			testCase.received,
+		)
+		require.Error(t, err)
+	}
+	nsPerElem, elemPerOp, err := ringAPIMetrics(0, 1, 1, 1)
+	require.NoError(t, err)
+	assert.Zero(t, nsPerElem)
+	assert.Equal(t, 1.0, elemPerOp)
 }

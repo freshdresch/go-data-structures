@@ -142,40 +142,127 @@ func runPolling[T any, S sink[T]](
 	return received, nil
 }
 
-// ringBurstQueue drives the ring through EnqueueBurst and DequeueBurst.
-type ringBurstQueue[T any] struct {
-	ring *ring.Ring[T]
+type spscBurstQueue[T any] struct {
+	ring *ring.SPSCQueue[T]
 }
 
-func (q *ringBurstQueue[T]) enqueue(items []T) int {
+func (q *spscBurstQueue[T]) enqueue(items []T) int {
 	enqueued, _ := q.ring.EnqueueBurst(items)
 	return enqueued
 }
 
-func (q *ringBurstQueue[T]) dequeue(dst []T) int {
+func (q *spscBurstQueue[T]) dequeue(dst []T) int {
 	dequeued, _ := q.ring.DequeueBurst(dst)
 	return dequeued
 }
 
-// newModeRing returns a ring with ringCapacity slots that allows as many producers and consumers
-// as mode has. Its multi sides use relaxed tail sync when mode is relaxed. extra options are
-// applied after the mode's options.
-func newModeRing[T any](mode benchMode, extra ...ring.Option) (*ring.Ring[T], error) {
-	multiProd := ring.WithMultiProdEnqueue()
-	multiCons := ring.WithMultiConsDequeue()
-	if mode.relaxed {
-		multiProd = ring.WithRelaxedMultiProdEnqueue()
-		multiCons = ring.WithRelaxedMultiConsDequeue()
-	}
+type mpscBurstQueue[T any] struct {
+	ring *ring.MPSCQueue[T]
+}
+
+func (q *mpscBurstQueue[T]) enqueue(items []T) int {
+	enqueued, _ := q.ring.EnqueueBurst(items)
+	return enqueued
+}
+
+func (q *mpscBurstQueue[T]) dequeue(dst []T) int {
+	dequeued, _ := q.ring.DequeueBurst(dst)
+	return dequeued
+}
+
+type spmcBurstQueue[T any] struct {
+	ring *ring.SPMCQueue[T]
+}
+
+func (q *spmcBurstQueue[T]) enqueue(items []T) int {
+	enqueued, _ := q.ring.EnqueueBurst(items)
+	return enqueued
+}
+
+func (q *spmcBurstQueue[T]) dequeue(dst []T) int {
+	dequeued, _ := q.ring.DequeueBurst(dst)
+	return dequeued
+}
+
+type mpmcBurstQueue[T any] struct {
+	ring *ring.MPMCQueue[T]
+}
+
+func (q *mpmcBurstQueue[T]) enqueue(items []T) int {
+	enqueued, _ := q.ring.EnqueueBurst(items)
+	return enqueued
+}
+
+func (q *mpmcBurstQueue[T]) dequeue(dst []T) int {
+	dequeued, _ := q.ring.DequeueBurst(dst)
+	return dequeued
+}
+
+// newModeRing chooses and wraps a concrete public queue before timing starts.
+// Each adapter calls its concrete queue directly so ring rows have one dispatch boundary,
+// like the third-party adapters. Concurrent sides default to ordered publication.
+func newModeRing[T any](
+	mode benchMode,
+	state *runState,
+	single bool,
+	extra ...ring.Option,
+) (queue[T], error) {
 	var options []ring.Option
-	if mode.producers > 1 {
-		options = append(options, multiProd)
-	}
-	if mode.consumers > 1 {
-		options = append(options, multiCons)
+	if mode.relaxed {
+		if mode.producers > 1 {
+			options = append(options, ring.WithRelaxedMultiProdEnqueue())
+		}
+		if mode.consumers > 1 {
+			options = append(options, ring.WithRelaxedMultiConsDequeue())
+		}
 	}
 	options = append(options, extra...)
-	return ring.New[T](ringCapacity, options...)
+	switch {
+	case mode.producers > 1 && mode.consumers > 1:
+		created, err := ring.NewMPMCQueue[T](ringCapacity, options...)
+		if err != nil {
+			return nil, err
+		}
+		if single {
+			return &mpmcSingleQueue[T]{
+				ring: created, ringSingleQueue: ringSingleQueue{state: state},
+			}, nil
+		}
+		return &mpmcBurstQueue[T]{ring: created}, nil
+	case mode.producers > 1:
+		created, err := ring.NewMPSCQueue[T](ringCapacity, options...)
+		if err != nil {
+			return nil, err
+		}
+		if single {
+			return &mpscSingleQueue[T]{
+				ring: created, ringSingleQueue: ringSingleQueue{state: state},
+			}, nil
+		}
+		return &mpscBurstQueue[T]{ring: created}, nil
+	case mode.consumers > 1:
+		created, err := ring.NewSPMCQueue[T](ringCapacity, options...)
+		if err != nil {
+			return nil, err
+		}
+		if single {
+			return &spmcSingleQueue[T]{
+				ring: created, ringSingleQueue: ringSingleQueue{state: state},
+			}, nil
+		}
+		return &spmcBurstQueue[T]{ring: created}, nil
+	default:
+		created, err := ring.NewSPSCQueue[T](ringCapacity, options...)
+		if err != nil {
+			return nil, err
+		}
+		if single {
+			return &spscSingleQueue[T]{
+				ring: created, ringSingleQueue: ringSingleQueue{state: state},
+			}, nil
+		}
+		return &spscBurstQueue[T]{ring: created}, nil
+	}
 }
 
 // rtsMode returns a copy of mode whose multi sides use relaxed tail sync.
@@ -185,20 +272,75 @@ func rtsMode(mode benchMode) benchMode {
 	return relaxed
 }
 
-// ringSingleQueue drives the ring through Enqueue and Dequeue, moving at most one element per
-// call. It is the only polling adapter that can fail, so it is the only one that holds the run.
-type ringSingleQueue[T any] struct {
-	ring  *ring.Ring[T]
+// ringSingleQueue shares run error handling without adding queue-method dispatch.
+type ringSingleQueue struct {
 	state *runState
 }
 
-// enqueue moves only items[0], so it returns 0 or 1.
-func (q *ringSingleQueue[T]) enqueue(items []T) int {
+type spscSingleQueue[T any] struct {
+	ringSingleQueue
+	ring *ring.SPSCQueue[T]
+}
+
+func (q *spscSingleQueue[T]) enqueue(items []T) int {
 	return q.movedOrFail(q.ring.Enqueue(items[0]), ring.ErrFull)
 }
 
-// dequeue fills only dst[0], so it returns 0 or 1.
-func (q *ringSingleQueue[T]) dequeue(dst []T) int {
+func (q *spscSingleQueue[T]) dequeue(dst []T) int {
+	elem, err := q.ring.Dequeue()
+	if q.movedOrFail(err, ring.ErrEmpty) == 0 {
+		return 0
+	}
+	dst[0] = elem
+	return 1
+}
+
+type mpscSingleQueue[T any] struct {
+	ringSingleQueue
+	ring *ring.MPSCQueue[T]
+}
+
+func (q *mpscSingleQueue[T]) enqueue(items []T) int {
+	return q.movedOrFail(q.ring.Enqueue(items[0]), ring.ErrFull)
+}
+
+func (q *mpscSingleQueue[T]) dequeue(dst []T) int {
+	elem, err := q.ring.Dequeue()
+	if q.movedOrFail(err, ring.ErrEmpty) == 0 {
+		return 0
+	}
+	dst[0] = elem
+	return 1
+}
+
+type spmcSingleQueue[T any] struct {
+	ringSingleQueue
+	ring *ring.SPMCQueue[T]
+}
+
+func (q *spmcSingleQueue[T]) enqueue(items []T) int {
+	return q.movedOrFail(q.ring.Enqueue(items[0]), ring.ErrFull)
+}
+
+func (q *spmcSingleQueue[T]) dequeue(dst []T) int {
+	elem, err := q.ring.Dequeue()
+	if q.movedOrFail(err, ring.ErrEmpty) == 0 {
+		return 0
+	}
+	dst[0] = elem
+	return 1
+}
+
+type mpmcSingleQueue[T any] struct {
+	ringSingleQueue
+	ring *ring.MPMCQueue[T]
+}
+
+func (q *mpmcSingleQueue[T]) enqueue(items []T) int {
+	return q.movedOrFail(q.ring.Enqueue(items[0]), ring.ErrFull)
+}
+
+func (q *mpmcSingleQueue[T]) dequeue(dst []T) int {
 	elem, err := q.ring.Dequeue()
 	if q.movedOrFail(err, ring.ErrEmpty) == 0 {
 		return 0
@@ -209,8 +351,8 @@ func (q *ringSingleQueue[T]) dequeue(dst []T) int {
 
 // movedOrFail returns 1 when err is nil, and 0 when err is the expected error. Any other error
 // fails the run, and it returns 0. It compares with == because the ring returns ErrFull and
-// ErrEmpty unwrapped, and that keeps each call as cheap as the other libraries' bool checks.
-func (q *ringSingleQueue[T]) movedOrFail(err, expected error) int {
+// ErrEmpty unwrapped.
+func (q *ringSingleQueue) movedOrFail(err, expected error) int {
 	if err == nil {
 		return 1
 	}

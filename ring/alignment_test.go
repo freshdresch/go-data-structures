@@ -27,6 +27,16 @@ type fortyBytes struct {
 // It is excluded from -asan builds, because the address sanitizer pads each allocation, which
 // moves the ring to an offset the layout was not built for.
 func TestRingAlignment(t *testing.T) {
+	if unsafe.Sizeof(uintptr(0)) == 8 {
+		require.Equal(t, uintptr(24), unsafe.Sizeof(prodHeadLine{}))
+		require.Equal(t, uintptr(24), unsafe.Sizeof(consHeadLine{}))
+		require.Equal(t, uintptr(640), unsafe.Sizeof(Ring[byte]{}))
+		require.Equal(t, uintptr(0), unsafe.Offsetof(Ring[byte]{}.readOnly))
+		require.Equal(t, uintptr(128), unsafe.Offsetof(Ring[byte]{}.prodHeadLine))
+		require.Equal(t, uintptr(256), unsafe.Offsetof(Ring[byte]{}.prodTailLine))
+		require.Equal(t, uintptr(384), unsafe.Offsetof(Ring[byte]{}.consHeadLine))
+		require.Equal(t, uintptr(512), unsafe.Offsetof(Ring[byte]{}.consTailLine))
+	}
 	t.Run("int", assertGroupsOnOwnLines[int])
 	t.Run("pointer", assertGroupsOnOwnLines[*int])
 	t.Run("fortyBytes", assertGroupsOnOwnLines[fortyBytes])

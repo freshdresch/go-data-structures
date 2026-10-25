@@ -1,7 +1,6 @@
 package ring_test
 
 import (
-	"errors"
 	"fmt"
 	"sync"
 
@@ -157,13 +156,13 @@ func (q *ringBulkQueue[T]) dequeue(dst []T) int {
 // movedOrPanic returns 0 when err is the call's expected failure, and moved when err is nil. Any
 // other error is a test bug, so it panics with it.
 func movedOrPanic(err, failure error, moved int) int {
-	if errors.Is(err, failure) {
+	if err == nil {
+		return moved
+	}
+	if err == failure {
 		return 0
 	}
-	if err != nil {
-		panic(err)
-	}
-	return moved
+	panic(err)
 }
 
 // chanPollQueue uses a channel as a polled, non-blocking queue, moving one element at a time

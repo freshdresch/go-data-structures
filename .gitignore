@@ -30,3 +30,8 @@ bazel-*
 # docs we actually care about will be in the docs folder
 designs/
 implementation-plans/
+
+# Local benchmark output and development evidence
+/benchmark/results/
+/benchmark/baselines/
+/benchmark/.local/

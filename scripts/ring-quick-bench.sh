@@ -10,6 +10,7 @@ prog=ring-quick-bench
 usage() {
 	echo "usage: scripts/ring-quick-bench.sh [-rounds N] [-benchtime D] <before-ref> <after-ref>"
 	echo "       scripts/ring-quick-bench.sh [-rounds N] [-benchtime D] -reuse <dir>"
+	echo "       optional: -methodology-comparison -allow-layout-confounded"
 }
 
 usage_error() {
@@ -34,6 +35,8 @@ state_section() {
 rounds=10
 benchtime=200ms
 reuse_dir=""
+methodology_comparison=false
+allow_layout_confounded=false
 refs=()
 
 while [ $# -gt 0 ]; do
@@ -41,6 +44,19 @@ while [ $# -gt 0 ]; do
 	-h)
 		usage
 		exit 0
+		;;
+	-methodology-comparison | -allow-layout-confounded)
+		case "$1" in
+		-methodology-comparison)
+			[ "$methodology_comparison" = false ] || usage_error "duplicate $1"
+			methodology_comparison=true
+			;;
+		-allow-layout-confounded)
+			[ "$allow_layout_confounded" = false ] || usage_error "duplicate $1"
+			allow_layout_confounded=true
+			;;
+		esac
+		shift
 		;;
 	-rounds | -benchtime | -reuse)
 		[ $# -ge 2 ] || usage_error "$1 needs a value"
@@ -79,6 +95,7 @@ platform=$(uname -s)
 # shellcheck source=lib.sh
 source "$(dirname "$0")/lib.sh"
 check_tools
+check_ac_power
 
 repo=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
 
@@ -104,12 +121,13 @@ state="$results/state.txt"
 
 status="aborted before round 1"
 build_dir=""
+build_dirs=()
 
 on_exit() {
 	echo "status: $status" >>"$state"
-	if [ -n "$build_dir" ]; then
+	for build_dir in ${build_dirs[@]+"${build_dirs[@]}"}; do
 		rm -rf "$build_dir"
-	fi
+	done
 }
 trap on_exit EXIT
 
@@ -121,7 +139,12 @@ build_side() {
 	local build_err
 
 	build_dir=$(mktemp -d)
+	build_dirs+=("$build_dir")
 	git -C "$repo" archive "$hash" | tar -x -C "$build_dir"
+	snapshot_variant "$side" "$build_dir" "$build_dir" ./ring "$hash" false "" \
+		env GOTOOLCHAIN=local GOWORK=off GOFLAGS=-mod=readonly \
+		go test -c -o "$results/$side.test" ./ring
+	status="aborted building $side"
 	if ! build_err=$(
 		cd "$build_dir" &&
 			GOTOOLCHAIN=local GOWORK=off GOFLAGS=-mod=readonly \
@@ -130,8 +153,35 @@ build_side() {
 		echo "$build_err" >&2
 		die_on_build_error "the $side ref" "$side" "$side ($hash)" "$build_err"
 	fi
-	rm -rf "$build_dir"
+	export_workload "$results/$side.test" "$side-single" 1
+	export_workload "$results/$side.test" "$side" "$own"
+	local offset
+	offset=$(sched_offset "$results/$side.test" 2>/dev/null) || offset=unknown
+	finalize_variant "$side" "$results/$side.test" "$offset"
 	build_dir=""
+}
+
+if [ -n "$reuse_dir" ]; then
+	[ -d "$reuse_dir/provenance" ] || die "legacy results need fresh builds for this protocol"
+	cp -R "$reuse_dir/provenance" "$results/"
+fi
+prepare_benchmeta
+
+admission_flags=()
+if [ "$methodology_comparison" = true ]; then
+	admission_flags+=(--methodology-comparison)
+fi
+if [ "$allow_layout_confounded" = true ]; then
+	admission_flags+=(--allow-layout-confounded)
+fi
+
+admit_comparison() {
+	status="aborted at admission"
+	"$benchmeta" admit --before "$results/provenance/before.json" \
+		--after "$results/provenance/after.json" \
+		--current-runner "$results/provenance/current-runner.json" \
+		--platform "$results/provenance/platform.json" --output "$results/provenance/admission.json" \
+		${admission_flags[@]+"${admission_flags[@]}"} | tee -a "$state"
 }
 
 if [ -z "$reuse_dir" ]; then
@@ -139,6 +189,17 @@ if [ -z "$reuse_dir" ]; then
 	build_side after "$after_hash"
 else
 	cp "$reuse_dir/before.test" "$reuse_dir/after.test" "$results/"
+	echo "reuse-parent: $reuse_dir" >>"$state"
+	admit_comparison
+	for side in before after; do
+		export_workload "$results/$side.test" "$side-reuse-single" 1
+		export_workload "$results/$side.test" "$side-reuse" "$own"
+		cmp "$results/provenance/$side.manifest.json" \
+			"$results/provenance/$side-reuse.manifest.json" || die "reused binary workload differs"
+		cmp "$results/provenance/$side-single.manifest.json" \
+			"$results/provenance/$side-reuse-single.manifest.json" ||
+			die "reused sequential workload differs"
+	done
 fi
 
 single_flags=(
@@ -183,6 +244,34 @@ BenchmarkRingAPI/mode=$mode/api=$api/batch=$batch/elem=int64-$own"
 		done
 	done
 done
+
+if [ "$own" -eq 1 ]; then
+	own_rows=$(printf '%s\n' "$own_rows" | sed 's/-1$//')
+fi
+printf '%s\n' "$single_rows" >"$results/provenance/expected-single.txt"
+printf '%s\n' "$own_rows" >"$results/provenance/expected-own.txt"
+for side in before after; do
+	"$benchmeta" rows --manifest "$results/provenance/$side-single.manifest.json" \
+		--expected "$results/provenance/expected-single.txt" --cpu 1
+	"$benchmeta" rows --manifest "$results/provenance/$side.manifest.json" \
+		--expected "$results/provenance/expected-own.txt" --cpu "$own"
+done
+admit_comparison
+if [ -z "$reuse_dir" ]; then
+	check_variant before
+	check_variant after
+	for build_dir in ${build_dirs[@]+"${build_dirs[@]}"}; do
+		rm -rf "$build_dir"
+	done
+	build_dirs=()
+fi
+interpretation=implementation-comparison
+if [ "$methodology_comparison" = true ]; then
+	interpretation=methodology-comparison
+fi
+if grep -q '"layout-confounded"' "$results/provenance/admission.json"; then
+	interpretation="$interpretation layout-confounded"
+fi
 
 command_line() {
 	if [ ${#pin[@]} -gt 0 ]; then
@@ -296,9 +385,11 @@ for ((k = 1; k <= rounds; k++)); do
 	status="aborted at round $k"
 	echo "round $k/$rounds" >&2
 	if ((k % 2 == 1)); then
+		echo "round $k order: before after" >>"$state"
 		run_side before "$k"
 		run_side after "$k"
 	else
+		echo "round $k order: after before" >>"$state"
 		run_side after "$k"
 		run_side before "$k"
 	fi
@@ -307,9 +398,27 @@ end=$(date +%s)
 elapsed=$((end - start))
 printf '## timing\nelapsed: %ss\n' "$elapsed" >>"$state"
 
-metrics='.unit:(sec/op OR B/s OR allocs/op OR handoff-p50 OR handoff-p90 OR handoff-p99)'
 status="rounds complete, comparison failed"
-(cd "$results" && benchstat -filter "$metrics" before.txt after.txt) >"$results/comparison.txt"
+for side in before after; do
+	"$benchmeta" project --input "$results/$side.txt" --output "$results/$side-primary.txt"
+done
+presentation_header() {
+	echo "interpretation: $interpretation"
+	echo "Concurrent RingAPI primary: ns/elem per verified transfer. Sequential ns/op: per pair."
+	echo "Throughput ns/op: per transfer. Handoff ns/op: per round trip."
+	echo "Raw ns/op, MB/s, B/op and allocs/op retain the Go iteration denominator."
+	echo "Bulk elem/op records actual transfers per Go iteration."
+}
+metrics='.unit:(sec/elem OR sec/op OR handoff-p50 OR handoff-p90 OR handoff-p99)'
+{
+	presentation_header
+	(cd "$results" && benchstat -filter "$metrics" before-primary.txt after-primary.txt)
+} >"$results/comparison.txt"
+{
+	presentation_header
+	(cd "$results" && benchstat -filter '.unit:(sec/op OR B/s OR allocs/op OR B/op OR elem/op)' \
+		before.txt after.txt)
+} >"$results/comparison-raw.txt"
 cat "$results/comparison.txt"
 
 echo

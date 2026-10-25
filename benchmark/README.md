@@ -1,109 +1,111 @@
-# Queue comparison
+# Benchmarks
 
-This module compares the ring with other Go queues. Every row runs through one harness, in one
-binary per machine, so the rows can be read against each other. The harness is a copy of the
-ring's test harness, adapted so that this module builds without the ring's test files. The
-comparison runs the ring through its exported API.
+The benchmark module compares this repository's data structures with other implementations.
+It is a separate Go module, so third-party benchmark dependencies stay outside the root module.
+The current comparison covers the four [ring queues](../ring/README.md).
 
-The comparison is a separate Go module, so the repository's root module gains no dependency on the
-compared libraries, and the ring's own test binary does not change.
+| Queue | Comparison report |
+|---|---|
+| SPSCQueue | [Single producer, single consumer](ring/spsc.md) |
+| SPMCQueue | [Single producer, multiple consumers](ring/spmc.md) |
+| MPSCQueue | [Multiple producers, single consumer](ring/mpsc.md) |
+| MPMCQueue | [Multiple producers, multiple consumers](ring/mpmc.md) |
 
-## Running it
+No third-party measurements for the current queue APIs are published yet. Crossbeam comparisons
+are future work. The reports will describe measured workloads and their limits when results exist.
+
+## Run the comparison
+
+Run from the repository root with Go, Git, and `benchstat` on the path. Linux also needs `lscpu`
+and `taskset`. macOS needs at least 10 CPUs. See [runner requirements](../scripts/README.md).
 
 ```bash
-scripts/ring-compare-bench.sh [-rounds N] [-benchtime D] [-pad N] [-seed N]
+scripts/ring-compare-bench.sh -rounds 10 -benchtime 200ms -seed 12345
 ```
 
-`-rounds` defaults to 10, and `-benchtime` defaults to 200ms. Each round runs every
-implementation once, in an order shuffled for that round.
+The script runs correctness gates before timing. Each round runs every implementation once,
+in a shuffled order. Results go to `~/ring-compare/<timestamp>-<pid>/`. The directory contains
+raw rounds, comparisons, and `state.txt` with the run's configuration.
 
-`-pad N` rebuilds the binary with N padding pointers, on the Mac only. Without it, the Mac pads
-with 4 pointers only when `runtime.sched` lands at offset 96. `-seed N` sets the shuffle seed. A
-seed repeats an order only on the same platform, because `awk`'s `srand` differs between macOS
-and Linux.
+Run one timing campaign at a time on an otherwise idle machine connected to AC power. On macOS,
+the script requires `pmset -g batt` to report AC power. Battery power changes CPU behavior.
 
-Run the script only while the machine is plugged into AC power. On the Mac, the script stops
-unless `pmset -g batt` reports AC Power. On battery, macOS throttles the CPU, and the results
-are meaningless.
+`-pad N` rebuilds the macOS binary with N padding pointers. Without this flag, macOS uses four
+padding pointers only when `runtime.sched` lands at offset 96 modulo 128. Linux never pads.
+A shuffle seed repeats an order only on the same platform because `awk` randomization differs
+between macOS and Linux.
 
-Results go to `~/ring-compare/<timestamp>-<pid>/`. The directory holds each round's raw output,
-the comparison, and a `state.txt` that records how the run was made.
+## Implementations and workloads
 
-## Implementations
+The `ring` row selects `SPSCQueue`, `MPSCQueue`, `SPMCQueue`, or `MPMCQueue` for its topology.
+It calls `EnqueueBurst` and `DequeueBurst` with batches of 1 and 32. The `ring-exact` row adds
+`WithExactBatchCounts`. The `ring-single` row calls `Enqueue` and `Dequeue` and is the
+single-element comparison with the other queues. The `ring-rts` row selects relaxed tail
+synchronization on concurrent sides in MPSC, SPMC, and MPMC workloads.
 
-- `ring`: the ring, through `EnqueueBurst` and `DequeueBurst`. Batch 1 is the main row. Batch 32
-  is labeled context, to show what batching gives the ring.
-- `ring-exact`: the `ring` row built with `WithExactBatchCounts`. By default, the ring's batch
-  calls check a cached copy of the other side's tail. `ring-exact` loads the real tail on every
-  call and returns exact counts.
-- `ring-single`: the ring, through `Enqueue` and `Dequeue`. It is the like-for-like comparison
-  with the libraries, which have only single-element calls.
-- `ring-rts`: the ring with relaxed tail sync on its sides that have several goroutines. It runs
-  in the MPSC, SPMC, and MPMC modes.
-- `chan`: a buffered Go channel.
-- `xsync`: `xsync.NewMPMCQueue` from `github.com/puzpuzpuz/xsync/v4`, at v4.5.0. It is a bounded
-  MPMC queue, and its `TryEnqueue` and `TryDequeue` return at once.
-- `mutex`: a slice guarded by a `sync.Mutex`. It is the lock-based reference point.
-- `workiva`: `queue.NewRingBuffer` from `github.com/Workiva/go-datastructures`, at v1.1.8. It is
-  the most widely used Go ring buffer. It stores `interface{}` values.
+The other rows are a buffered Go channel (`chan`), a slice guarded by `sync.Mutex` (`mutex`),
+`xsync.NewMPMCQueue` from `github.com/puzpuzpuz/xsync/v4` v4.5.0 (`xsync`), and
+`queue.NewRingBuffer` from `github.com/Workiva/go-datastructures` v1.1.8 (`workiva`).
+Dependency versions are recorded in [go.mod](go.mod).
 
-Every implementation is built with 1024 slots. Each multi-goroutine side runs 4 goroutines, as
-the ring's own benchmarks do.
+Every queue has exactly 1024 usable elements. SPSC uses one producer and one consumer.
+MPSC uses four producers and one consumer. SPMC uses one producer and four consumers.
+MPMC uses four producers and four consumers. Worker counts are independent of GOMAXPROCS and
+CPU affinity. Payloads are `int64` values or pointers rotated through a pool of 1024 items.
 
-## What each row measures
+`TestCompareCapacity` checks capacity, a rejected extra put, ordered drain, empty behavior,
+and reuse for each row and topology. Accounting tests check element transfers. Construction and
+pre-run GC are outside the timer. Worker startup, payload fill, operations, retries or blocking
+waits, completion, drain, stop, and joins are timed. Each row transfers the requested element
+count, so `ns/op` means nanoseconds per transferred element. Burst permits partial progress.
+The root module's bulk benchmarks require all-or-nothing batches and measure another workload.
 
-A row measures a queue together with the way its callers wait. In the list, our yield means that
-the harness calls `runtime.Gosched` after a call that moves nothing. Each implementation waits as
-follows.
+## Read the measurements
 
-- `ring` and `ring-single` wait with our yield on a full or empty call, and with the ring's
-  bounded spin in the multi publish wait.
-- `ring-exact` waits as `ring` does. Its difference from `ring` shows what exact batch counts cost.
-- `ring-rts` waits with our yield on a full or empty call, and with the relaxed side's
-  head-to-tail distance wait.
-- `chan` parks in the runtime.
-- `xsync` waits with our yield on a false result. `TryEnqueue` and `TryDequeue` also return false
-  when they lose a compare-and-swap to another goroutine, so the yield also runs on contention,
-  not only when the queue is full or empty.
-- `mutex` waits on the lock, and with our yield on a full or empty call.
-- `workiva` waits with `runtime.Gosched` in a loop inside the library. It never parks.
+A row measures the queue together with its callers' waiting behavior. The harness calls
+`runtime.Gosched` when a polling call moves nothing. Ordered ring publication also uses bounded
+spinning before yielding. RTS uses its configured head-to-tail distance wait. Channels park
+in the runtime. The mutex row waits for its lock and yields after full or empty calls.
+Workiva yields inside its library loop. xsync's try calls can return false after losing a
+compare-and-swap, so its harness also yields on contention.
 
-The following points also apply.
+xsync and Workiva use their MPMC algorithms in every topology. The ring selects an API for
+each topology. Batch-32 ring rows provide batching context because the other queues expose
+single-element operations. Compare `ring-single` with those rows when comparing single calls.
+The ring, xsync, Workiva, and mutex adapters clear dequeued slots.
 
-- **SPSC.** The ring runs its single-producer and single-consumer paths. xsync and workiva always
-  run their MPMC algorithm, because neither has an SPSC mode. mutex takes the same lock in every
-  mode.
-- **Algorithms.** xsync and workiva are both bounded queues in the style of Dmitry Vyukov's
-  design, which gives each slot a sequence number. They differ in generics against `interface{}`,
-  and in where they wait, not in the algorithm.
-- **Capacity.** `TestCompareCapacity` fills each implementation and logs how many elements it
-  holds.
-- **Allocations.** workiva stores `interface{}`, so its `int64` rows box nearly every element, at
-  8 bytes each. The benchmark values carry a producer and a sequence number, so they are far above
-  the small values that Go boxes without allocating. Go reports `allocs/op` as a whole number per
-  element, rounded down. A workiva `int64` row can therefore show 0 `allocs/op` while it still
-  boxes nearly every element. Read `B/op` for those rows, where a value near 8 shows the boxing.
-  The `ptr` rows do not box, because a pointer fits in an interface directly, so 0 `allocs/op` is
-  expected there.
-- **Slot clearing.** The ring, xsync, workiva, and mutex clear a dequeued slot.
-- **chan.** The `chan` rows go through the blocking runner's interface, so they differ from the
-  ring package's own `impl=chan` rows.
-- **Cross-reading.** Every producer and consumer loop here also loads the abort flag, which the
-  ring package's harness does not. The binary also has its own layout. So none of these rows
-  should be compared with the ring package's tables.
-- **Layout.** Each binary places the Go scheduler's state, `runtime.sched`, at some offset modulo
-  128 bytes. The implementations lean on the scheduler to different degrees. On Apple silicon,
-  one placement moved the ring's MPMC rows by 30% or more. A different placement could change the
-  numbers, and possibly a close ranking. The Mac pads the binary when the offset is 96, the
-  placement known to slow the ring's MPMC rows. The AMD never pads, because no offset is known to
-  be bad there.
-- **Cores.** The M3 Pro mixes performance and efficiency cores, and macOS cannot pin goroutines.
-  Which goroutines land on efficiency cores varies between invocations. Implementations that
-  yield more may be affected differently. Under WSL2, `taskset` pins virtual CPUs rather than
-  physical cores, and the Hyper-V host adds scheduling noise.
-- **Statistics.** benchstat does not correct p-values across rows and metrics. A few rows will
-  show a significant difference by chance.
+Workiva stores `interface{}` values. Its `int64` rows box nearly every value at about eight bytes
+each. Go rounds `allocs/op` down to a whole number per element, so read `B/op` as well.
+The pointer rows fit directly in an interface and do not need boxing allocations.
 
-## Results
+Binary layout and scheduling affect results. The runners record the offset of `runtime.sched`
+modulo 128, but equal offsets do not prove equivalent layouts. Apple silicon mixes performance
+and efficiency cores, and macOS cannot pin goroutines. Under WSL2, `taskset` pins virtual CPUs
+and host scheduling adds noise. Record the machine, toolchain, CPU policy, and workload beside
+published results. `benchstat` does not adjust p-values across rows and metrics, so individual
+significant comparisons can occur by chance.
 
-Results are pending.
+The comparison harness loads an abort flag in each worker loop and builds a separate binary
+from the root module. Its channel adapter also differs from the root harness. Compare rows
+within the same campaign. Do not combine the two modules' tables.
+
+## Provenance and local evidence
+
+Before timing, `TestBenchmarkManifest` exports all 84 workload contracts. The runner checks
+names, multiplicity, CPU suffixes, and required metadata. Ordinary, padded, and race builds
+have separate source snapshots and independent postbuild discovery. Changes to selected inputs
+stop finalization. Snapshots include dirty and untracked compiled inputs, correctness tests,
+dependency sources, module inputs, and the runner bundle. Validation gates precede repeated
+pre-timing checks. Failed runs retain gate, export, discovery, and round logs.
+
+When padding applies, the runner records both ordinary and padded binary identities, plus the
+separate unpadded race identity. It selects layout before timing. A methodology change requires
+new measurements of all compared implementations. Verification tests establish correctness,
+not a performance improvement. See [runner documentation](../scripts/README.md) for artifact
+names, source reconstruction, units, and the quick runner's admission policy.
+
+Keep raw data, source snapshots, profiles, binaries, and archives outside tracked files.
+`benchmark/results/`, `benchmark/baselines/`, and `benchmark/.local/` are ignored.
+Use `.local/` for temporary development evidence. Delete superseded experiments and evidence
+for resolved investigations as soon as they are no longer needed. Retain accepted baselines
+and evidence needed for unresolved investigations until they are replaced or resolved.

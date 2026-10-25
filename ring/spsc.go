@@ -166,7 +166,10 @@ func (r *SPSCQueue[T]) EnqueueBulk(items []T) (free int, err error) {
 	if len(items) > int(producer.maxBatch) {
 		fresh := producer.mask + 1 + r.consumer.published.Load() - producer.cursor
 		return int(min(fresh, producer.mask+1)), batchLengthError(
-			"enqueue", len(items), producer.maxBatch, producer.mask+1,
+			"enqueue",
+			len(items),
+			producer.maxBatch,
+			producer.mask+1,
 		)
 	}
 	if len(items) == 1 {
@@ -231,7 +234,10 @@ func (r *SPSCQueue[T]) DequeueBulk(dst []T) (available int, err error) {
 	if len(dst) > int(consumer.maxBatch) {
 		fresh := r.producer.published.Load() - consumer.cursor
 		return int(min(fresh, consumer.mask+1)), batchLengthError(
-			"dequeue", len(dst), consumer.maxBatch, consumer.mask+1,
+			"dequeue",
+			len(dst),
+			consumer.maxBatch,
+			consumer.mask+1,
 		)
 	}
 	if len(dst) == 1 {

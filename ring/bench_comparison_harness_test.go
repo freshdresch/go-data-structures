@@ -142,12 +142,15 @@ func buildComparisonManifest(
 					if api == apiBulk {
 						metrics = append(metrics, "elem/op")
 					}
-					manifest.Rows = append(manifest.Rows, comparisonManifestRow{
-						benchmarkManifestRow: row, ExplicitOptions: slices.Clone(row.RingOptions),
-						Defaults: scenario.defaults,
-						Metrics:  metrics,
-						Layout:   comparisonQueueLayout(exemplar, "separately allocated layout exemplar"),
-					})
+					manifest.Rows = append(
+						manifest.Rows,
+						comparisonManifestRow{
+							benchmarkManifestRow: row, ExplicitOptions: slices.Clone(row.RingOptions),
+							Defaults: scenario.defaults,
+							Metrics:  metrics,
+							Layout:   comparisonQueueLayout(exemplar, "separately allocated layout exemplar"),
+						},
+					)
 				}
 			}
 		}
@@ -236,7 +239,8 @@ func checkComparisonRow(
 	require.NotNil(t, row.ConsumerWait)
 	require.Equal(t, wait+"enqueue attempt", *row.ProducerWait)
 	require.Equal(t, wait+"dequeue attempt", *row.ConsumerWait)
-	require.Equal(t,
+	require.Equal(
+		t,
 		"excludes queue/buffer setup and pre-run GC; includes worker startup, "+
 			"payload fill, operations, retries, producer completion, drain, and joins",
 		row.TimingBoundary,
@@ -297,7 +301,11 @@ func checkComparisonAccounting(
 				}
 				for _, requested := range requestedTotals {
 					name := fmt.Sprintf(
-						"impl=%s/api=%s/batch=%d/total=%d", implementation, api, batch, requested,
+						"impl=%s/api=%s/batch=%d/total=%d",
+						implementation,
+						api,
+						batch,
+						requested,
 					)
 					expectedTotal := requested
 					if api == apiBulk {

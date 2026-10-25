@@ -168,8 +168,12 @@ fi
 prepare_benchmeta
 
 admission_flags=()
-if [ "$methodology_comparison" = true ]; then admission_flags+=(--methodology-comparison); fi
-if [ "$allow_layout_confounded" = true ]; then admission_flags+=(--allow-layout-confounded); fi
+if [ "$methodology_comparison" = true ]; then
+	admission_flags+=(--methodology-comparison)
+fi
+if [ "$allow_layout_confounded" = true ]; then
+	admission_flags+=(--allow-layout-confounded)
+fi
 
 admit_comparison() {
 	status="aborted at admission"
@@ -256,11 +260,15 @@ admit_comparison
 if [ -z "$reuse_dir" ]; then
 	check_variant before
 	check_variant after
-	for build_dir in "${build_dirs[@]}"; do rm -rf "$build_dir"; done
+	for build_dir in "${build_dirs[@]}"; do
+		rm -rf "$build_dir"
+	done
 	build_dirs=()
 fi
 interpretation=implementation-comparison
-if [ "$methodology_comparison" = true ]; then interpretation=methodology-comparison; fi
+if [ "$methodology_comparison" = true ]; then
+	interpretation=methodology-comparison
+fi
 if grep -q '"layout-confounded"' "$results/provenance/admission.json"; then
 	interpretation="$interpretation layout-confounded"
 fi

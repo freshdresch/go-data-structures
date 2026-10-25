@@ -3578,7 +3578,8 @@ func TestCachedStress(t *testing.T) {
 }
 
 func cachedStressModes() []stressMode {
-	modes := append(stressModes(),
+	modes := append(
+		stressModes(),
 		stressMode{"MPSC", 4, 1, []Option{WithMultiProdEnqueue()}},
 		stressMode{"SPMC", 1, 4, []Option{WithMultiConsDequeue()}},
 		stressMode{"RTSProdSingleCons", 4, 1, []Option{WithRelaxedMultiProdEnqueue()}},
@@ -3734,10 +3735,16 @@ func TestSinglePositionAndCacheOwnership(t *testing.T) {
 						require.Equal(t, -1, value)
 					}
 				}
-				require.Equal(t, prodCacheBefore,
-					[2]uint32{ring.cachedConsTail.Load(), ring.singleCachedConsTail})
-				require.Equal(t, consCacheBefore,
-					[2]uint32{ring.cachedProdTail.Load(), ring.singleCachedProdTail})
+				require.Equal(
+					t,
+					prodCacheBefore,
+					[2]uint32{ring.cachedConsTail.Load(), ring.singleCachedConsTail},
+				)
+				require.Equal(
+					t,
+					consCacheBefore,
+					[2]uint32{ring.cachedProdTail.Load(), ring.singleCachedProdTail},
+				)
 				wantTail := start
 				wantTail += 4
 				require.Equal(t, wantTail, ring.prodTail.Load())
@@ -3803,8 +3810,8 @@ func TestSingleOwnerHandoff(t *testing.T) {
 					stop := make(chan struct{})
 					var workers sync.WaitGroup
 					type phase struct {
-						call func()
-						done chan struct{}
+						call func() func()
+						done chan func()
 					}
 					startWorker := func() chan phase {
 						phases := make(chan phase)
@@ -3814,10 +3821,7 @@ func TestSingleOwnerHandoff(t *testing.T) {
 								case <-stop:
 									return
 								case task := <-phases:
-									func() {
-										defer close(task.done)
-										task.call()
-									}()
+									task.done <- task.call()
 								}
 							}
 						})
@@ -3844,114 +3848,152 @@ func TestSingleOwnerHandoff(t *testing.T) {
 						workers.Wait()
 					}()
 					nextOwner := 0
-					run := func(own bool, call func()) {
+					run := func(own bool, call func() func()) {
 						worker := other
 						if own {
 							worker = owners[nextOwner]
 							nextOwner = 1 - nextOwner
 						}
-						task := phase{call: call, done: make(chan struct{})}
+						task := phase{call: call, done: make(chan func(), 1)}
 						select {
 						case worker <- task:
 						case <-ctx.Done():
 							t.Fatal(ctx.Err())
 						}
 						select {
-						case <-task.done:
+						case check := <-task.done:
+							check()
 						case <-ctx.Done():
 							t.Fatal(ctx.Err())
 						}
 						require.False(t, t.Failed())
 					}
+
 					// These phases force a changed cache on a failed request without publication.
 					if producer {
-						run(true, func() {
-							require.NoError(t, ring.Enqueue(0))
-							_, err := ring.EnqueueBulk([]int{1, 2, 3})
-							require.NoError(t, err)
+						run(true, func() func() {
+							singleErr := ring.Enqueue(0)
+							_, bulkErr := ring.EnqueueBulk([]int{1, 2, 3})
+							return func() {
+								require.NoError(t, singleErr)
+								require.NoError(t, bulkErr)
+							}
 						})
-						run(false, func() {
+						run(false, func() func() {
 							value, err := ring.Dequeue()
-							require.NoError(t, err)
-							require.Zero(t, value)
+							return func() {
+								require.NoError(t, err)
+								require.Zero(t, value)
+							}
 						})
-						run(true, func() {
+						run(true, func() func() {
 							before := ring.prodTail.Load()
 							free, err := ring.EnqueueBulk([]int{4, 5})
-							require.ErrorIs(t, err, ErrFull)
-							require.Equal(t, 1, free)
-							require.Equal(t, before, ring.prodTail.Load())
+							after := ring.prodTail.Load()
+							return func() {
+								require.ErrorIs(t, err, ErrFull)
+								require.Equal(t, 1, free)
+								require.Equal(t, before, after)
+							}
 						})
-						run(false, func() {
+						run(false, func() func() {
 							dst := make([]int, 3)
 							_, err := ring.DequeueBulk(dst)
-							require.NoError(t, err)
-							require.Equal(t, []int{1, 2, 3}, dst)
+							return func() {
+								require.NoError(t, err)
+								require.Equal(t, []int{1, 2, 3}, dst)
+							}
 						})
 					} else {
-						run(false, func() { require.NoError(t, ring.Enqueue(0)) })
-						run(true, func() {
+						run(false, func() func() {
+							err := ring.Enqueue(0)
+							return func() { require.NoError(t, err) }
+						})
+						run(true, func() func() {
 							before := ring.consTail.Load()
 							dst := []int{-1, -1}
 							available, err := ring.DequeueBulk(dst)
-							require.ErrorIs(t, err, ErrEmpty)
-							require.Equal(t, 1, available)
-							require.Equal(t, []int{-1, -1}, dst)
-							require.Equal(t, before, ring.consTail.Load())
+							after := ring.consTail.Load()
+							return func() {
+								require.ErrorIs(t, err, ErrEmpty)
+								require.Equal(t, 1, available)
+								require.Equal(t, []int{-1, -1}, dst)
+								require.Equal(t, before, after)
+							}
 						})
-						run(true, func() {
+						run(true, func() func() {
 							value, err := ring.Dequeue()
-							require.NoError(t, err)
-							require.Zero(t, value)
+							return func() {
+								require.NoError(t, err)
+								require.Zero(t, value)
+							}
 						})
 					}
 					for value := range 256 {
-						run(true, func() {
+						run(true, func() func() {
 							prod, cons := ring.prodTail.Load(), ring.consTail.Load()
+							count := 0
+							var zeroErr, lengthErr error
 							if producer {
-								free, err := ring.EnqueueBulk(nil)
-								require.NoError(t, err)
-								require.Equal(t, 4, free)
-								_, err = ring.EnqueueBulk(make([]int, 5))
-								require.ErrorIs(t, err, ErrExceedsCapacity)
+								count, zeroErr = ring.EnqueueBulk(nil)
+								_, lengthErr = ring.EnqueueBulk(make([]int, 5))
 							} else {
-								available, err := ring.DequeueBulk(nil)
-								require.NoError(t, err)
-								require.Zero(t, available)
-								_, err = ring.DequeueBulk(make([]int, 5))
-								require.ErrorIs(t, err, ErrExceedsCapacity)
+								count, zeroErr = ring.DequeueBulk(nil)
+								_, lengthErr = ring.DequeueBulk(make([]int, 5))
 							}
-							require.Equal(t, prod, ring.prodTail.Load())
-							require.Equal(t, cons, ring.consTail.Load())
+							prodAfter, consAfter := ring.prodTail.Load(), ring.consTail.Load()
+							return func() {
+								require.NoError(t, zeroErr)
+								if producer {
+									require.Equal(t, 4, count)
+								} else {
+									require.Zero(t, count)
+								}
+								require.ErrorIs(t, lengthErr, ErrExceedsCapacity)
+								require.Equal(t, prod, prodAfter)
+								require.Equal(t, cons, consAfter)
+							}
 						})
-						run(producer, func() {
+						run(producer, func() func() {
+							moved := 0
+							var err error
 							switch value % 3 {
 							case 0:
-								require.NoError(t, ring.Enqueue(value))
+								err = ring.Enqueue(value)
 							case 1:
-								_, err := ring.EnqueueBulk([]int{value})
-								require.NoError(t, err)
+								_, err = ring.EnqueueBulk([]int{value})
 							default:
-								moved, _ := ring.EnqueueBurst([]int{value})
-								require.Equal(t, 1, moved)
+								moved, _ = ring.EnqueueBurst([]int{value})
+							}
+							return func() {
+								if value%3 == 2 {
+									require.Equal(t, 1, moved)
+								} else {
+									require.NoError(t, err)
+								}
 							}
 						})
 						require.Equal(t, 1, ring.Count())
-						run(!producer, func() {
+						run(!producer, func() func() {
 							dst := []int{-1}
+							moved := 0
+							var err error
 							switch value % 3 {
 							case 0:
-								got, err := ring.Dequeue()
-								require.NoError(t, err)
-								dst[0] = got
+								dst[0], err = ring.Dequeue()
 							case 1:
-								_, err := ring.DequeueBulk(dst)
-								require.NoError(t, err)
+								_, err = ring.DequeueBulk(dst)
 							default:
-								moved, _ := ring.DequeueBurst(dst)
-								require.Equal(t, 1, moved)
+								moved, _ = ring.DequeueBurst(dst)
 							}
-							require.Equal(t, value, dst[0])
+							return func() {
+								if value%3 == 2 {
+									require.Equal(t, 1, moved)
+								} else {
+									require.NoError(t, err)
+								}
+								require.Equal(t, value, dst[0])
+							}
 						})
 						require.Zero(t, ring.Count())
 					}
@@ -4224,10 +4266,13 @@ func TestSingleOwnerHandoffConcurrent(t *testing.T) {
 }
 
 func TestSingleResetHandoff(t *testing.T) {
-	modes := append(singleOwnershipModes(), optionSet{
-		name:    "Multi",
-		options: []Option{WithMultiProdEnqueue(), WithMultiConsDequeue()},
-	})
+	modes := append(
+		singleOwnershipModes(),
+		optionSet{
+			name:    "Multi",
+			options: []Option{WithMultiProdEnqueue(), WithMultiConsDequeue()},
+		},
+	)
 	modes = append(modes, optionSet{"Relaxed", relaxedOptions()})
 	for _, mode := range modes {
 		for _, keep := range []bool{false, true} {
@@ -4239,16 +4284,21 @@ func TestSingleResetHandoff(t *testing.T) {
 				ring, err := New[*int](4, options...)
 				require.NoError(t, err)
 				var users sync.WaitGroup
+				var initialEnqueueErrors [4]error
+				var initialDequeueError, initialZeroError error
 				users.Go(func() {
-					for range 4 {
-						require.NoError(t, ring.Enqueue(new(int)))
+					for index := range initialEnqueueErrors {
+						initialEnqueueErrors[index] = ring.Enqueue(new(int))
 					}
-					_, err := ring.Dequeue()
-					require.NoError(t, err)
-					_, err = ring.EnqueueBulk(nil)
-					require.NoError(t, err)
+					_, initialDequeueError = ring.Dequeue()
+					_, initialZeroError = ring.EnqueueBulk(nil)
 				})
 				users.Wait()
+				for _, err := range initialEnqueueErrors {
+					require.NoError(t, err)
+				}
+				require.NoError(t, initialDequeueError)
+				require.NoError(t, initialZeroError)
 				ring.cachedConsTail.Store(31)
 				ring.cachedProdTail.Store(37)
 				ring.singleCachedConsTail = 41
@@ -4263,22 +4313,33 @@ func TestSingleResetHandoff(t *testing.T) {
 				require.Zero(t, ring.cachedProdTail.Load())
 				assertSlotsNil(t, ring, 0, 1, 2, 3)
 				publication := make(chan *Ring[*int])
+				var emptyBefore, full, emptyAfter bool
+				var enqueueErrors, dequeueErrors [4]error
+				var values [4]*int
 				users.Go(func() {
 					fresh := <-publication
-					require.True(t, fresh.Empty())
-					for range 4 {
-						require.NoError(t, fresh.Enqueue(new(int)))
+					emptyBefore = fresh.Empty()
+					for index := range enqueueErrors {
+						enqueueErrors[index] = fresh.Enqueue(new(int))
 					}
-					require.True(t, fresh.Full())
-					for range 4 {
-						value, err := fresh.Dequeue()
-						require.NoError(t, err)
-						require.NotNil(t, value)
+					full = fresh.Full()
+					for index := range dequeueErrors {
+						values[index], dequeueErrors[index] = fresh.Dequeue()
 					}
-					require.True(t, fresh.Empty())
+					emptyAfter = fresh.Empty()
 				})
 				publication <- ring
 				users.Wait()
+				require.True(t, emptyBefore)
+				for _, err := range enqueueErrors {
+					require.NoError(t, err)
+				}
+				require.True(t, full)
+				for index, err := range dequeueErrors {
+					require.NoError(t, err)
+					require.NotNil(t, values[index])
+				}
+				require.True(t, emptyAfter)
 			})
 		}
 	}

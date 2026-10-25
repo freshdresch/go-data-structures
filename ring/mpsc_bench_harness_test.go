@@ -71,11 +71,15 @@ func checkMPSCComparisonRow(t *testing.T, row comparisonManifestRow) {
 		options = []string{"WithMultiProdEnqueue"}
 	}
 	api := checkComparisonRow(t, row, implementation, 4, 1, options)
-	require.Equal(t, comparisonDefaults{
-		MaxEnqueueBatch: 1024, MaxDequeueBatch: 1024, ClearOnDequeue: true,
-		ProducerAdmission: "shared cached counts", ConsumerAdmission: "cached counts",
-		ProducerPublication: "ordered", ConsumerRelease: "ordinary", SpinsBeforeYield: 8192,
-	}, row.Defaults)
+	require.Equal(
+		t,
+		comparisonDefaults{
+			MaxEnqueueBatch: 1024, MaxDequeueBatch: 1024, ClearOnDequeue: true,
+			ProducerAdmission: "shared cached counts", ConsumerAdmission: "cached counts",
+			ProducerPublication: "ordered", ConsumerRelease: "ordinary", SpinsBeforeYield: 8192,
+		},
+		row.Defaults,
+	)
 	actual := comparisonRowQueue(
 		t,
 		row,
@@ -119,10 +123,14 @@ func checkMPSCComparisonDefaults(t *testing.T, target any, implementation string
 	require.EqualValues(t, 8192, producer.FieldByName("spinsBeforeYield").Uint())
 	require.Equal(t, 1024, producer.FieldByName("entries").Len())
 	require.Equal(t, 1024, consumer.FieldByName("entries").Len())
-	require.Equal(t,
-		producer.FieldByName("entries").Pointer(), consumer.FieldByName("entries").Pointer(),
+	require.Equal(
+		t,
+		producer.FieldByName("entries").Pointer(),
+		consumer.FieldByName("entries").Pointer(),
 	)
-	require.Equal(t, reflect.Uint32,
+	require.Equal(
+		t,
+		reflect.Uint32,
 		concrete.FieldByName("producerReservation").FieldByName("cachedConsumer").
 			FieldByName("v").Kind(),
 	)

@@ -71,11 +71,15 @@ func checkSPMCComparisonRow(t *testing.T, row comparisonManifestRow) {
 		options = []string{"WithMultiConsDequeue"}
 	}
 	api := checkComparisonRow(t, row, implementation, 1, 4, options)
-	require.Equal(t, comparisonDefaults{
-		MaxEnqueueBatch: 1024, MaxDequeueBatch: 1024, ClearOnDequeue: true,
-		ProducerAdmission: "cached counts", ConsumerAdmission: "shared cached counts",
-		ConsumerRelease: "ordered", SpinsBeforeYield: 8192,
-	}, row.Defaults)
+	require.Equal(
+		t,
+		comparisonDefaults{
+			MaxEnqueueBatch: 1024, MaxDequeueBatch: 1024, ClearOnDequeue: true,
+			ProducerAdmission: "cached counts", ConsumerAdmission: "shared cached counts",
+			ConsumerRelease: "ordered", SpinsBeforeYield: 8192,
+		},
+		row.Defaults,
+	)
 	actual := comparisonRowQueue(
 		t,
 		row,
@@ -114,10 +118,14 @@ func checkSPMCComparisonDefaults(t *testing.T, target any, implementation string
 	require.EqualValues(t, 8192, consumer.FieldByName("spinsBeforeYield").Uint())
 	require.Equal(t, 1024, producer.FieldByName("entries").Len())
 	require.Equal(t, 1024, consumer.FieldByName("entries").Len())
-	require.Equal(t,
-		producer.FieldByName("entries").Pointer(), consumer.FieldByName("entries").Pointer(),
+	require.Equal(
+		t,
+		producer.FieldByName("entries").Pointer(),
+		consumer.FieldByName("entries").Pointer(),
 	)
-	require.Equal(t, reflect.Uint32,
+	require.Equal(
+		t,
+		reflect.Uint32,
 		concrete.FieldByName("consumerReservation").FieldByName("cachedProducer").
 			FieldByName("v").Kind(),
 	)

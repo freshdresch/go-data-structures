@@ -183,38 +183,44 @@ func accountingCases(mode benchMode) []accountingCase {
 	var cases []accountingCase
 	for _, batch := range []int{1, 32} {
 		for _, impl := range throughputImpls[int64](mode) {
-			cases = append(cases, accountingCase{
-				name:  impl.name,
-				batch: batch,
-				run: func(total int, sinks func(consumer int) *recordSink[int64]) (throughputResult, error) {
-					return runThroughput(
-						noopTimer{},
-						impl.newQueue,
-						mode.producers,
-						mode.consumers,
-						batch,
-						total,
-						fillInt64,
-						sinks,
-					)
+			cases = append(
+				cases,
+				accountingCase{
+					name:  impl.name,
+					batch: batch,
+					run: func(total int, sinks func(consumer int) *recordSink[int64]) (throughputResult, error) {
+						return runThroughput(
+							noopTimer{},
+							impl.newQueue,
+							mode.producers,
+							mode.consumers,
+							batch,
+							total,
+							fillInt64,
+							sinks,
+						)
+					},
 				},
-			})
+			)
 		}
 	}
-	cases = append(cases, accountingCase{
-		name:  "chan",
-		batch: 1,
-		run: func(total int, sinks func(consumer int) *recordSink[int64]) (throughputResult, error) {
-			return runChanThroughput(
-				noopTimer{},
-				mode.producers,
-				mode.consumers,
-				total,
-				fillInt64,
-				sinks,
-			), nil
+	cases = append(
+		cases,
+		accountingCase{
+			name:  "chan",
+			batch: 1,
+			run: func(total int, sinks func(consumer int) *recordSink[int64]) (throughputResult, error) {
+				return runChanThroughput(
+					noopTimer{},
+					mode.producers,
+					mode.consumers,
+					total,
+					fillInt64,
+					sinks,
+				), nil
+			},
 		},
-	})
+	)
 	return cases
 }
 
@@ -244,7 +250,10 @@ func accountingError(sinks []*recordSink[int64], producers, total int) error {
 			if seq <= lastSeq[producer] {
 				return fmt.Errorf(
 					"consumer %d received producer %d sequence %d after %d",
-					c, producer, seq, lastSeq[producer],
+					c,
+					producer,
+					seq,
+					lastSeq[producer],
 				)
 			}
 			seen[producer][seq] = true
@@ -339,7 +348,10 @@ func checkAccounting(t *testing.T, tc accountingCase, mode benchMode, total int)
 	}
 	stuck := fmt.Sprintf(
 		"%s batch=%d mode=%s total=%d, likely a consumer exited early",
-		tc.name, tc.batch, mode.name, total,
+		tc.name,
+		tc.batch,
+		mode.name,
+		total,
 	)
 	result := runWithin(t, stuck, func() (throughputResult, error) {
 		return tc.run(total, newSink)
@@ -1216,7 +1228,7 @@ func checkHarnessCapacity(t *testing.T, target queue[int64]) {
 }
 
 func TestRingAPIMetrics(t *testing.T) {
-	for _, tc := range []struct {
+	for _, testCase := range []struct {
 		api       ringAPI
 		requested int
 		total     int
@@ -1230,20 +1242,29 @@ func TestRingAPIMetrics(t *testing.T) {
 		{apiSingle, 128, 128, 20, 1},
 		{apiBurst, 128, 128, 20, 1},
 	} {
-		require.Equal(t, tc.total, tc.api.total(tc.requested, 32, 4))
-		nsPerElem, elemPerOp, err := ringAPIMetrics(2560*time.Nanosecond,
-			tc.requested, tc.total, tc.total)
+		require.Equal(t, testCase.total, testCase.api.total(testCase.requested, 32, 4))
+		nsPerElem, elemPerOp, err := ringAPIMetrics(
+			2560*time.Nanosecond,
+			testCase.requested,
+			testCase.total,
+			testCase.total,
+		)
 		require.NoError(t, err)
-		assert.Equal(t, tc.nsPerElem, nsPerElem)
-		assert.Equal(t, tc.elemPerOp, elemPerOp)
+		assert.Equal(t, testCase.nsPerElem, nsPerElem)
+		assert.Equal(t, testCase.elemPerOp, elemPerOp)
 	}
-	for _, tc := range []struct {
+	for _, testCase := range []struct {
 		elapsed                        time.Duration
 		iterations, expected, received int
 	}{
 		{-1, 1, 1, 1}, {0, 0, 1, 1}, {0, 1, 0, 0}, {0, 1, 2, 1},
 	} {
-		_, _, err := ringAPIMetrics(tc.elapsed, tc.iterations, tc.expected, tc.received)
+		_, _, err := ringAPIMetrics(
+			testCase.elapsed,
+			testCase.iterations,
+			testCase.expected,
+			testCase.received,
+		)
 		require.Error(t, err)
 	}
 	nsPerElem, elemPerOp, err := ringAPIMetrics(0, 1, 1, 1)

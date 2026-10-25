@@ -179,8 +179,11 @@ func buildBenchmarkManifest() benchmarkManifest {
 			if batch != 1 && batch != 32 {
 				continue
 			}
-			name := fmt.Sprintf("BenchmarkThroughput/mode=%s/batch=%d/elem=int64/impl=ring",
-				mode.name, batch)
+			name := fmt.Sprintf(
+				"BenchmarkThroughput/mode=%s/batch=%d/elem=int64/impl=ring",
+				mode.name,
+				batch,
+			)
 			row := manifestRow(name, "ring", mode, batch)
 			row.API = manifestPointer("burst")
 			row.APIReason = ""

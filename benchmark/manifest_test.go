@@ -182,8 +182,13 @@ func buildBenchmarkManifest() benchmarkManifest {
 		for _, mode := range implementation.modes {
 			for _, batch := range implementation.batches {
 				for _, element := range []string{"int64", "ptr"} {
-					name := fmt.Sprintf("BenchmarkCompare/mode=%s/batch=%d/elem=%s/impl=%s",
-						mode.name, batch, element, implementation.name)
+					name := fmt.Sprintf(
+						"BenchmarkCompare/mode=%s/batch=%d/elem=%s/impl=%s",
+						mode.name,
+						batch,
+						element,
+						implementation.name,
+					)
 					row := manifestRow(name, implementation.name, mode, batch)
 					row.Family, row.Element = "Compare", element
 					row.Storage = "typed " + element

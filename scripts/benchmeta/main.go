@@ -41,7 +41,8 @@ func writeJSON(path string, value any) error {
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		// A stderr failure cannot usefully report another error while printing this one.
+		_, _ = fmt.Fprintln(os.Stderr, err)
 		var rejected inadmissibleError
 		if errors.As(err, &rejected) {
 			os.Exit(2)

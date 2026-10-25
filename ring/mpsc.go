@@ -200,11 +200,16 @@ func (r *MPSCQueue[T]) EnqueueBulk(items []T) (free int, err error) {
 		head := r.mpscProducerHead()
 		fresh := capacity + r.consumerPublished.Load() - head
 		return int(min(fresh, capacity)), batchLengthError(
-			"enqueue", len(items), producer.maxBatch, capacity,
+			"enqueue",
+			len(items),
+			producer.maxBatch,
+			capacity,
 		)
 	}
 	start, count, remaining := r.mpscReserveProducer(
-		uint32(len(items)), true, producer.exactBatchCounts,
+		uint32(len(items)),
+		true,
+		producer.exactBatchCounts,
 	)
 	if count == 0 {
 		if len(items) == 0 {
@@ -224,7 +229,9 @@ func (r *MPSCQueue[T]) EnqueueBurst(items []T) (enqueued, free int) {
 	producer := &r.producerConfig
 	length := min(len(items), int(producer.maxBatch))
 	start, count, remaining := r.mpscReserveProducer(
-		uint32(length), false, producer.exactBatchCounts,
+		uint32(length),
+		false,
+		producer.exactBatchCounts,
 	)
 	if count == 0 {
 		return 0, int(remaining)
@@ -245,7 +252,10 @@ func (r *MPSCQueue[T]) DequeueBulk(dst []T) (available int, err error) {
 		cursor := consumer.cursor
 		fresh := r.producerPublication.published.Load() - cursor
 		return int(min(fresh, capacity)), batchLengthError(
-			"dequeue", len(dst), consumer.maxBatch, capacity,
+			"dequeue",
+			len(dst),
+			consumer.maxBatch,
+			capacity,
 		)
 	}
 	moved, remaining := r.mpscDequeueBatch(dst, true)

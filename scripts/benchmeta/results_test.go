@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -54,8 +55,12 @@ func TestRowsAndManifestLog(t *testing.T) {
 		t.Fatal(err)
 	}
 	expected := filepath.Join(directory, "expected")
-	writeFixture(t, expected, name+"-2\n"+
-		"BenchmarkThroughput/mode=SPSC/batch=1/elem=int64/impl=ring-2\n")
+	writeFixture(
+		t,
+		expected,
+		name+"-2\n"+
+			"BenchmarkThroughput/mode=SPSC/batch=1/elem=int64/impl=ring-2\n",
+	)
 	if err := checkRows(manifestPath, expected, 2); err != nil {
 		t.Fatal(err)
 	}
@@ -248,5 +253,27 @@ func TestLegacySequentialFiltering(t *testing.T) {
 	}
 	if err := checkSelectedRows(manifestPath, expected, 2, "all"); err == nil {
 		t.Fatal("all unexpectedly filtered a manifest row")
+	}
+}
+
+func TestManifestDecodeErrorContext(t *testing.T) {
+	for _, key := range []string{"name", "family", "batch", "pointer_pool_reason"} {
+		t.Run(key, func(t *testing.T) {
+			manifest := tinyManifest(t)
+			manifest.Rows[0][key] = json.RawMessage(`{}`)
+			err := validateManifest(manifest)
+			var typeError *json.UnmarshalTypeError
+			if !errors.As(err, &typeError) {
+				t.Fatalf("lost JSON type error: %v", err)
+			}
+			for _, context := range []string{"row 0", key} {
+				if !strings.Contains(err.Error(), context) {
+					t.Errorf("error %q lacks context %q", err, context)
+				}
+			}
+			if key != "name" && !strings.Contains(err.Error(), "BenchmarkRingAPI/") {
+				t.Errorf("error %q lacks workload name", err)
+			}
+		})
 	}
 }

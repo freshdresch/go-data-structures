@@ -272,9 +272,9 @@ const maxCount = 1 << 30
 // This option never selects RTS. Use WithRelaxedMultiProdEnqueue on MPSCQueue or MPMCQueue.
 // Numeric errors wrap ErrInvalidMaxHeadTailDistance. A serialized side wraps ErrUnsupportedOption.
 // An ordered side wraps ErrHeadTailDistanceRequiresRelaxed.
-func WithMaxProducerHeadTailDistance(n int) Option {
+func WithMaxProducerHeadTailDistance(distance int) Option {
 	return func(cfg *config) {
-		cfg.maxProducerHeadTailDistance = n
+		cfg.maxProducerHeadTailDistance = distance
 		cfg.producerHeadTailDistanceSet = true
 	}
 }
@@ -284,9 +284,9 @@ func WithMaxProducerHeadTailDistance(n int) Option {
 // requires a final relaxed consumer mode that supports concurrent consumers. Empty and
 // zero-length calls can wait. Use WithRelaxedMultiConsDequeue on SPMCQueue or MPMCQueue.
 // Distances never select relaxed mode implicitly. The producer option documents distance errors.
-func WithMaxConsumerHeadTailDistance(n int) Option {
+func WithMaxConsumerHeadTailDistance(distance int) Option {
 	return func(cfg *config) {
-		cfg.maxConsumerHeadTailDistance = n
+		cfg.maxConsumerHeadTailDistance = distance
 		cfg.consumerHeadTailDistanceSet = true
 	}
 }

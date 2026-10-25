@@ -54,8 +54,12 @@ func fixturePackages(request snapshotRequest) []listedPackage {
 
 func fixtureSnapshot(t *testing.T, request snapshotRequest, output string) sourceSnapshot {
 	t.Helper()
-	records, generated, err := recordsFromPackages(request, fixturePackages(request),
-		"/fixture/goroot", filepath.Join(filepath.Dir(output), "sources"))
+	records, generated, err := recordsFromPackages(
+		request,
+		fixturePackages(request),
+		"/fixture/goroot",
+		filepath.Join(filepath.Dir(output), "sources"),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,9 +92,12 @@ func TestOverlayOnlySourceDiscovery(t *testing.T) {
 	request.Settings.Overlay = filepath.Join(request.SourceRoot, "overlay.json")
 	writeMapping := func(target string) {
 		t.Helper()
-		if err := writeJSON(request.Settings.Overlay, map[string]any{
-			"Replace": map[string]string{original: target},
-		}); err != nil {
+		if err := writeJSON(
+			request.Settings.Overlay,
+			map[string]any{
+				"Replace": map[string]string{original: target},
+			},
+		); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -100,8 +107,15 @@ func TestOverlayOnlySourceDiscovery(t *testing.T) {
 		if _, err := os.Stat(original); !os.IsNotExist(err) {
 			t.Fatalf("overlay original must remain absent: %v", err)
 		}
-		discovered, _, err := goCommand(request,
-			"list", "-deps", "-test", "-json", "-overlay="+request.Settings.Overlay, ".")
+		discovered, _, err := goCommand(
+			request,
+			"list",
+			"-deps",
+			"-test",
+			"-json",
+			"-overlay="+request.Settings.Overlay,
+			".",
+		)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -240,8 +254,12 @@ func TestSourceMembership(t *testing.T) {
 	before := fixtureSnapshot(t, request, output)
 	packages := fixturePackages(request)
 	packages = append(packages, packages[0])
-	records, _, err := recordsFromPackages(request, packages, "/fixture/goroot",
-		filepath.Join(filepath.Dir(output), "sources"))
+	records, _, err := recordsFromPackages(
+		request,
+		packages,
+		"/fixture/goroot",
+		filepath.Join(filepath.Dir(output), "sources"),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,8 +268,12 @@ func TestSourceMembership(t *testing.T) {
 	}
 	writeFixture(t, filepath.Join(request.SourceRoot, "ring", "untracked_test.go"), "untracked")
 	packages[0].TestGoFiles = append(packages[0].TestGoFiles, "untracked_test.go")
-	records, _, err = recordsFromPackages(request, packages[:1], "/fixture/goroot",
-		filepath.Join(filepath.Dir(output), "sources"))
+	records, _, err = recordsFromPackages(
+		request,
+		packages[:1],
+		"/fixture/goroot",
+		filepath.Join(filepath.Dir(output), "sources"),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,8 +288,12 @@ func TestSourceMembership(t *testing.T) {
 		t.Fatalf("missing removal evidence: %+v", reverse.Removed)
 	}
 	packages[0].GoFiles = []string{"missing.go"}
-	if _, _, err := recordsFromPackages(request, packages[:1], "/fixture/goroot",
-		filepath.Join(filepath.Dir(output), "sources")); err == nil {
+	if _, _, err := recordsFromPackages(
+		request,
+		packages[:1],
+		"/fixture/goroot",
+		filepath.Join(filepath.Dir(output), "sources"),
+	); err == nil {
 		t.Fatal("missing source accepted")
 	}
 }
@@ -283,8 +309,12 @@ func TestSourceRootsAndIgnoredFiles(t *testing.T) {
 	packages := fixturePackages(firstRequest)
 	packages[0].IgnoredGoFiles = []string{"ignored.go"}
 	writeFixture(t, filepath.Join(firstRequest.SourceRoot, "ring", "ignored.go"), "//go:build ignored")
-	records, _, err := recordsFromPackages(firstRequest, packages, "/fixture/goroot",
-		filepath.Join(filepath.Dir(firstOutput), "sources"))
+	records, _, err := recordsFromPackages(
+		firstRequest,
+		packages,
+		"/fixture/goroot",
+		filepath.Join(filepath.Dir(firstOutput), "sources"),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -355,9 +385,12 @@ func TestFinalizeRejectsSourceChanges(t *testing.T) {
 					source := filepath.Join(request.SourceRoot, "padding.go")
 					writeFixture(t, source, "padding baseline")
 					request.Settings.Overlay = filepath.Join(request.SourceRoot, "overlay.json")
-					if err := writeJSON(request.Settings.Overlay, map[string]any{"Replace": map[string]string{
-						filepath.Join(request.SourceRoot, "ring", "padding.go"): source,
-					}}); err != nil {
+					if err := writeJSON(
+						request.Settings.Overlay,
+						map[string]any{"Replace": map[string]string{
+							filepath.Join(request.SourceRoot, "ring", "padding.go"): source,
+						}},
+					); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -439,11 +472,14 @@ func TestFinalizeUnchangedVariants(t *testing.T) {
 				padding := filepath.Join(request.SourceRoot, "padding.go")
 				writeFixture(t, padding, "generated padding")
 				request.Settings.Overlay = filepath.Join(request.SourceRoot, "overlay.json")
-				if err := writeJSON(request.Settings.Overlay, map[string]any{
-					"Replace": map[string]string{
-						filepath.Join(request.SourceRoot, "ring", "padding.go"): padding,
+				if err := writeJSON(
+					request.Settings.Overlay,
+					map[string]any{
+						"Replace": map[string]string{
+							filepath.Join(request.SourceRoot, "ring", "padding.go"): padding,
+						},
 					},
-				}); err != nil {
+				); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -466,8 +502,11 @@ func TestFinalizeUnchangedVariants(t *testing.T) {
 				t.Fatal(err)
 			}
 			writeFixture(t, filepath.Join(directory, "manifest.json"), string(encoded))
-			writeFixture(t, filepath.Join(directory, "manifest.log"),
-				"BENCHMARK_MANIFEST "+string(encoded)+"\n--- PASS: TestBenchmarkManifest (0.00s)\n")
+			writeFixture(
+				t,
+				filepath.Join(directory, "manifest.log"),
+				"BENCHMARK_MANIFEST "+string(encoded)+"\n--- PASS: TestBenchmarkManifest (0.00s)\n",
+			)
 			writeFixture(t, filepath.Join(directory, "binary"), "fixture binary")
 			info := "binary: go fixture\n\tbuild\tGOOS=linux\n\tbuild\tGOARCH=amd64\n" +
 				"\tbuild\tCGO_ENABLED=0\n"
@@ -525,8 +564,12 @@ func TestSourceModulesAndDependencies(t *testing.T) {
 		Module: &listedModule{Path: "example.com/dependency", Version: "v1.0.0", Dir: dependency},
 	}
 	packages := append(fixturePackages(request), entry)
-	records, _, err := recordsFromPackages(request, packages, "/fixture/goroot",
-		filepath.Join(filepath.Dir(output), "sources"))
+	records, _, err := recordsFromPackages(
+		request,
+		packages,
+		"/fixture/goroot",
+		filepath.Join(filepath.Dir(output), "sources"),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -540,8 +583,12 @@ func TestSourceModulesAndDependencies(t *testing.T) {
 		t.Fatal("external dependency source missing")
 	}
 	entry.Module.Replace = &listedModule{Path: dependency, Dir: dependency}
-	if _, err := logicalSourcePath(request, entry,
-		filepath.Join(dependency, "dependency.go"), "/fixture/goroot"); err == nil {
+	if _, err := logicalSourcePath(
+		request,
+		entry,
+		filepath.Join(dependency, "dependency.go"),
+		"/fixture/goroot",
+	); err == nil {
 		t.Fatal("external local replacement accepted")
 	}
 	request.Settings.Environment["GOFLAGS"] = "-tags=unsupported"

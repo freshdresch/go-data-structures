@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -21,8 +23,11 @@ func finalizedFixture(t *testing.T) (finalizedProvenance, string) {
 		t.Fatal(err)
 	}
 	writeFixture(t, filepath.Join(directory, "manifest.json"), string(encoded))
-	writeFixture(t, filepath.Join(directory, "manifest.log"),
-		"BENCHMARK_MANIFEST "+string(encoded)+"\n--- PASS: TestBenchmarkManifest (0.00s)\n")
+	writeFixture(
+		t,
+		filepath.Join(directory, "manifest.log"),
+		"BENCHMARK_MANIFEST "+string(encoded)+"\n--- PASS: TestBenchmarkManifest (0.00s)\n",
+	)
 	writeFixture(t, filepath.Join(directory, "binary"), "binary fixture")
 	writeFixture(t, filepath.Join(directory, "info"), "binary: go fixture\nGOOS=linux\n")
 	provenance := finalizedProvenance{Schema: 1, Phase: "finalized", Complete: true,
@@ -61,12 +66,25 @@ func TestAdmissionPolicy(t *testing.T) {
 					for _, layout := range []bool{false, true} {
 						after := before
 						after.Artifacts.SchedulerOffset = offset
-						decision := evaluateAdmission(before, after, before.Snapshot.Hashes.Runner,
-							admissionPlatform{osName, architecture}, methodology, layout)
+						decision := evaluateAdmission(
+							before,
+							after,
+							before.Snapshot.Hashes.Runner,
+							admissionPlatform{osName, architecture},
+							methodology,
+							layout,
+						)
 						want := osName != "Darwin" || architecture != "arm64" || offset == "0" || layout
 						if decision.Accepted != want {
-							t.Fatalf("policy %s/%s %s %v %v: %+v",
-								osName, architecture, offset, methodology, layout, decision)
+							t.Fatalf(
+								"policy %s/%s %s %v %v: %+v",
+								osName,
+								architecture,
+								offset,
+								methodology,
+								layout,
+								decision,
+							)
 						}
 					}
 				}
@@ -76,18 +94,36 @@ func TestAdmissionPolicy(t *testing.T) {
 	after := before
 	after.MeasurementHash = "changed"
 	for _, layout := range []bool{false, true} {
-		decision := evaluateAdmission(before, after, before.Snapshot.Hashes.Runner,
-			admissionPlatform{"Linux", "amd64"}, false, layout)
+		decision := evaluateAdmission(
+			before,
+			after,
+			before.Snapshot.Hashes.Runner,
+			admissionPlatform{"Linux", "amd64"},
+			false,
+			layout,
+		)
 		if decision.Accepted {
 			t.Fatal("layout override bypassed methodology")
 		}
 	}
-	if evaluateAdmission(before, before, "changed runner", admissionPlatform{"Linux", "amd64"},
-		false, false).Accepted {
+	if evaluateAdmission(
+		before,
+		before,
+		"changed runner",
+		admissionPlatform{"Linux", "amd64"},
+		false,
+		false,
+	).Accepted {
 		t.Fatal("current runner change admitted")
 	}
-	if !evaluateAdmission(before, after, "changed runner", admissionPlatform{"Linux", "amd64"},
-		true, false).Accepted {
+	if !evaluateAdmission(
+		before,
+		after,
+		"changed runner",
+		admissionPlatform{"Linux", "amd64"},
+		true,
+		false,
+	).Accepted {
 		t.Fatal("explicit methodology comparison rejected")
 	}
 }
@@ -144,5 +180,82 @@ func TestUnknownIdentityAndCorruptSource(t *testing.T) {
 	writeFixture(t, filepath.Join(filepath.Dir(path), record.Snapshot), "corrupted source")
 	if _, err := verifyProvenance(path); err == nil {
 		t.Fatal("corrupted source accepted")
+	}
+}
+
+func TestVerifyProvenanceDigestErrors(t *testing.T) {
+	for _, kind := range []string{"snapshot", "helper", "source", "artifact", "single export"} {
+		for _, missing := range []bool{false, true} {
+			name := kind + "/mismatch"
+			if missing {
+				name = kind + "/missing"
+			}
+			t.Run(name, func(t *testing.T) {
+				provenance, path := finalizedFixture(t)
+				directory := filepath.Dir(path)
+				var target string
+				switch kind {
+				case "snapshot":
+					target = provenance.SnapshotFile
+				case "helper":
+					target = "helper"
+					writeFixture(t, filepath.Join(directory, target), "helper fixture")
+					provenance.Snapshot.Request.HelperBinary = "fixture helper"
+					provenance.Snapshot.HelperBinarySnapshot = target
+					checksum, err := fileDigest(filepath.Join(directory, target))
+					if err != nil {
+						t.Fatal(err)
+					}
+					provenance.Snapshot.HelperBinaryHash = checksum
+					provenance.Snapshot.Hashes = computeHashes(provenance.Snapshot)
+					if err := writeJSON(
+						filepath.Join(directory, provenance.SnapshotFile),
+						provenance.Snapshot,
+					); err != nil {
+						t.Fatal(err)
+					}
+					provenance.SnapshotHash, err = fileDigest(
+						filepath.Join(directory, provenance.SnapshotFile),
+					)
+					if err != nil {
+						t.Fatal(err)
+					}
+				case "source":
+					target = provenance.Snapshot.Records[0].Snapshot
+				case "artifact":
+					target = provenance.Artifacts.Binary
+				case "single export":
+					target = "single-manifest"
+					writeFixture(t, filepath.Join(directory, target), "single fixture")
+					provenance.Artifacts.SingleManifest = target
+					checksum, err := fileDigest(filepath.Join(directory, target))
+					if err != nil {
+						t.Fatal(err)
+					}
+					provenance.SingleManifestHash = checksum
+				}
+				if err := writeJSON(path, provenance); err != nil {
+					t.Fatal(err)
+				}
+				target = filepath.Join(directory, target)
+				if missing {
+					if err := os.Remove(target); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					writeFixture(t, target, "checksum mismatch")
+				}
+				_, err := verifyProvenance(path)
+				if err == nil {
+					t.Fatal("invalid digest accepted")
+				}
+				if missing && !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("missing file cause lost: %v", err)
+				}
+				if !missing && strings.Contains(err.Error(), "<nil>") {
+					t.Fatalf("checksum mismatch included a nil cause: %v", err)
+				}
+			})
+		}
 	}
 }

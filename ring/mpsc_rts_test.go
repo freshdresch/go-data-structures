@@ -108,20 +108,23 @@ func mpscRTSOperationForTest(
 	queue *MPSCQueue[int],
 	method string,
 	entered, done chan struct{},
+	result chan<- error,
 ) {
 	close(entered)
+	var err error
 	switch method {
 	case "single":
-		_ = queue.Enqueue(99)
+		err = queue.Enqueue(99)
 	case "fixed":
-		_, _ = queue.EnqueueBulk([]int{99, 100})
+		_, err = queue.EnqueueBulk([]int{99, 100})
 	case "burst":
 		queue.EnqueueBurst([]int{99, 100})
 	case "zero-fixed":
-		_, _ = queue.EnqueueBulk(nil)
+		_, err = queue.EnqueueBulk(nil)
 	case "zero-burst":
 		queue.EnqueueBurst(nil)
 	}
+	result <- err
 	close(done)
 }
 
@@ -151,8 +154,13 @@ func TestMPSCRTSPreAdmissionWait(t *testing.T) {
 	for _, limit := range []int{0, 1, 8, 9} {
 		for _, method := range []string{"single", "fixed", "burst", "zero-fixed", "zero-burst"} {
 			t.Run(fmt.Sprintf("limit=%d/%s", limit, method), func(t *testing.T) {
-				queue := newMPSCForTest[int](t, 8, WithRelaxedMultiProdEnqueue(),
-					WithMaxProducerHeadTailDistance(limit), WithSpinsBeforeYield(0))
+				queue := newMPSCForTest[int](
+					t,
+					8,
+					WithRelaxedMultiProdEnqueue(),
+					WithMaxProducerHeadTailDistance(limit),
+					WithSpinsBeforeYield(0),
+				)
 				// The second reservation starts exactly at the limit and may cross it.
 				held := uint32(8)
 				var firstStart, firstCount uint32
@@ -178,7 +186,8 @@ func TestMPSCRTSPreAdmissionWait(t *testing.T) {
 					awaitMPSCSignal(t, done)
 				})
 				before := queue.producerReservation.headRTS.Load()
-				go mpscRTSOperationForTest(queue, method, entered, done)
+				result := make(chan error, 1)
+				go mpscRTSOperationForTest(queue, method, entered, done, result)
 				awaitMPSCSignal(t, entered)
 				if limit < 8 {
 					awaitMPSCDistanceWait(t, done)
@@ -196,6 +205,13 @@ func TestMPSCRTSPreAdmissionWait(t *testing.T) {
 				queue.mpscPublishProducer(start, count)
 				released = true
 				awaitMPSCSignal(t, done)
+				wantErr := error(nil)
+				if method == "single" || method == "fixed" {
+					wantErr = ErrFull
+				}
+				if err := <-result; err != wantErr {
+					t.Fatalf("operation error=%v want=%v", err, wantErr)
+				}
 				if queue.producerReservation.headRTS.Load() != before {
 					t.Fatal("failed or zero operation changed packed position/counter")
 				}
@@ -205,8 +221,13 @@ func TestMPSCRTSPreAdmissionWait(t *testing.T) {
 }
 
 func TestMPSCRTSLengthErrorsUseActiveHead(t *testing.T) {
-	queue := newMPSCForTest[int](t, 8, WithRelaxedMultiProdEnqueue(),
-		WithMaxProducerHeadTailDistance(0), WithMaxEnqueueBatch(3))
+	queue := newMPSCForTest[int](
+		t,
+		8,
+		WithRelaxedMultiProdEnqueue(),
+		WithMaxProducerHeadTailDistance(0),
+		WithMaxEnqueueBatch(3),
+	)
 	start, count, _ := queue.mpscReserveProducer(3, true, false)
 	queue.mpscWriteProducer(start, []int{1, 2, 3})
 	t.Cleanup(func() { queue.mpscPublishProducer(start, count) })
@@ -286,8 +307,14 @@ func TestMPSCRTSReorderedCompletion(t *testing.T) {
 func TestMPSCRTSRolloverAndReset(t *testing.T) {
 	for _, position := range []uint32{0, math.MaxUint32 - 1} {
 		for _, counter := range []uint32{0, math.MaxUint32 - 1, math.MaxUint32} {
-			queue := newMPSCForTest[*int](t, 4, WithRelaxedMultiProdEnqueue(),
-				WithMaxProducerHeadTailDistance(4), WithSpinsBeforeYield(0), WithoutDequeueClearing())
+			queue := newMPSCForTest[*int](
+				t,
+				4,
+				WithRelaxedMultiProdEnqueue(),
+				WithMaxProducerHeadTailDistance(4),
+				WithSpinsBeforeYield(0),
+				WithoutDequeueClearing(),
+			)
 			seedMPSC(queue, position)
 			queue.producerReservation.headRTS.Store(pack(position, counter))
 			queue.producerPublication.tailRTS.Store(pack(position, counter))
@@ -327,8 +354,12 @@ func TestMPSCRTSRolloverAndReset(t *testing.T) {
 }
 
 func TestMPSCRTSStalePackedCASAndMirror(t *testing.T) {
-	queue := newMPSCForTest[int](t, 4, WithRelaxedMultiProdEnqueue(),
-		WithMaxProducerHeadTailDistance(4))
+	queue := newMPSCForTest[int](
+		t,
+		4,
+		WithRelaxedMultiProdEnqueue(),
+		WithMaxProducerHeadTailDistance(4),
+	)
 	seedMPSC(queue, math.MaxUint32-1)
 	stale := queue.producerReservation.headRTS.Load()
 	start, count, _ := queue.mpscReserveProducer(2, true, false)
@@ -363,8 +394,13 @@ func TestMPSCRTSStalePackedCASAndMirror(t *testing.T) {
 func TestMPSCRTSWaitThenReserve(t *testing.T) {
 	for _, limit := range []int{0, 1} {
 		t.Run(fmt.Sprintf("limit=%d", limit), func(t *testing.T) {
-			queue := newMPSCForTest[int](t, 8, WithRelaxedMultiProdEnqueue(),
-				WithMaxProducerHeadTailDistance(limit), WithSpinsBeforeYield(0))
+			queue := newMPSCForTest[int](
+				t,
+				8,
+				WithRelaxedMultiProdEnqueue(),
+				WithMaxProducerHeadTailDistance(limit),
+				WithSpinsBeforeYield(0),
+			)
 			stale := queue.producerReservation.headRTS.Load()
 			start, count, _ := queue.mpscReserveProducer(uint32(limit+1), true, false)
 			queue.mpscWriteProducer(start, []int{1, 2}[:count])
@@ -380,7 +416,8 @@ func TestMPSCRTSWaitThenReserve(t *testing.T) {
 				}
 				awaitMPSCSignal(t, done)
 			})
-			go mpscRTSOperationForTest(queue, "single", entered, done)
+			result := make(chan error, 1)
+			go mpscRTSOperationForTest(queue, "single", entered, done, result)
 			awaitMPSCSignal(t, entered)
 			awaitMPSCDistanceWait(t, done)
 			if queue.producerReservation.headRTS.Load() != before {
@@ -389,6 +426,9 @@ func TestMPSCRTSWaitThenReserve(t *testing.T) {
 			queue.mpscPublishProducer(start, count)
 			released = true
 			awaitMPSCSignal(t, done)
+			if err := <-result; err != nil {
+				t.Fatal(err)
+			}
 			want := pack(start+count+1, unpackCnt(before)+1)
 			if queue.producerReservation.headRTS.Load() != want || queue.Count() != int(count+1) {
 				t.Fatal("release did not permit the next real reservation")

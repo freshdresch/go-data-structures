@@ -233,6 +233,7 @@ func canonicalModuleGraph(stream []byte, root, goroot string) (json.RawMessage, 
 	return json.RawMessage(normalized), nil
 }
 
+// normalizeModulePaths rewrites module and its nested replacements in place to remove host paths.
 func normalizeModulePaths(module map[string]any, root string) {
 	path, _ := module["Path"].(string)
 	version, _ := module["Version"].(string)
@@ -243,6 +244,7 @@ func normalizeModulePaths(module map[string]any, root string) {
 			continue
 		}
 		if within(root, original) {
+			// within already confirmed that Rel succeeds for these unchanged paths.
 			relative, _ := filepath.Rel(root, original)
 			module[key] = "repo/" + filepath.ToSlash(relative)
 		} else {
@@ -363,8 +365,13 @@ func recordsFromPackages(
 				if replacement, mapped := overlay.Replace[path]; mapped {
 					overlayLogical := normalized[logical]
 					if _, captured := records[overlayLogical]; !captured {
-						if err := addSourceRecord(records, overlayLogical, "layout",
-							replacement, snapshotDirectory); err != nil {
+						if err := addSourceRecord(
+							records,
+							overlayLogical,
+							"layout",
+							replacement,
+							snapshotDirectory,
+						); err != nil {
 							return nil, nil, err
 						}
 					}
@@ -394,8 +401,13 @@ func recordsFromPackages(
 			if err != nil {
 				return nil, nil, err
 			}
-			if err := addSourceRecord(records, "repo/"+filepath.ToSlash(relative), "module/build",
-				path, snapshotDirectory); err != nil {
+			if err := addSourceRecord(
+				records,
+				"repo/"+filepath.ToSlash(relative),
+				"module/build",
+				path,
+				snapshotDirectory,
+			); err != nil {
 				return nil, nil, err
 			}
 		}
@@ -410,8 +422,13 @@ func recordsFromPackages(
 			continue
 		}
 		path := filepath.Join(scriptsDirectory, entry.Name())
-		if err := addSourceRecord(records, "inventory/scripts/"+entry.Name(), "inventory", path,
-			snapshotDirectory); err != nil {
+		if err := addSourceRecord(
+			records,
+			"inventory/scripts/"+entry.Name(),
+			"inventory",
+			path,
+			snapshotDirectory,
+		); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -434,8 +451,13 @@ func recordsFromPackages(
 			if _, captured := records[logical]; captured {
 				continue
 			}
-			if err := addSourceRecord(records, logical, "layout", replacement,
-				snapshotDirectory); err != nil {
+			if err := addSourceRecord(
+				records,
+				logical,
+				"layout",
+				replacement,
+				snapshotDirectory,
+			); err != nil {
 				return nil, nil, err
 			}
 		}
@@ -453,8 +475,13 @@ func recordsFromPackages(
 			OriginalPath: request.Settings.Overlay, Snapshot: filepath.Join("sources", checksum),
 		}
 		// Preserve exact mapping bytes without putting temporary paths into content identities.
-		if err := addSourceRecord(records, "overlay/original-mapping", "inventory",
-			request.Settings.Overlay, snapshotDirectory); err != nil {
+		if err := addSourceRecord(
+			records,
+			"overlay/original-mapping",
+			"inventory",
+			request.Settings.Overlay,
+			snapshotDirectory,
+		); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -622,15 +649,24 @@ func captureSnapshot(request snapshotRequest, output string) (sourceSnapshot, er
 	if err != nil {
 		return snapshot, err
 	}
-	snapshot.Records, snapshot.GeneratedInputs, err = recordsFromPackages(request, packages, goroot,
-		filepath.Join(filepath.Dir(output), "sources"))
+	snapshot.Records, snapshot.GeneratedInputs, err = recordsFromPackages(
+		request,
+		packages,
+		goroot,
+		filepath.Join(filepath.Dir(output), "sources"),
+	)
 	if err != nil {
 		return snapshot, err
 	}
 	if request.HelperBinary != "" {
 		records := map[string]sourceRecord{}
-		if err := addSourceRecord(records, "helper", "artifact", request.HelperBinary,
-			filepath.Join(filepath.Dir(output), "sources")); err != nil {
+		if err := addSourceRecord(
+			records,
+			"helper",
+			"artifact",
+			request.HelperBinary,
+			filepath.Join(filepath.Dir(output), "sources"),
+		); err != nil {
 			return snapshot, err
 		}
 		snapshot.HelperBinaryHash = records["helper"].SHA256
@@ -811,8 +847,12 @@ func attachArtifacts(
 			return provenance, fmt.Errorf("binary build setting %s does not match snapshot", key)
 		}
 	}
-	actualInfo, _, err := goCommand(snapshot.Request, "version", "-m",
-		artifactPath(directory, artifacts.Binary))
+	actualInfo, _, err := goCommand(
+		snapshot.Request,
+		"version",
+		"-m",
+		artifactPath(directory, artifacts.Binary),
+	)
 	if err != nil {
 		return provenance, err
 	}

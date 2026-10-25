@@ -57,8 +57,12 @@ func checkSPMCLayout[T any](t *testing.T) {
 		[]reflect.Type{producer, gapType, atomicType, gapType, consumer, gapType,
 			reservation, gapType, publication},
 	)
-	checkSPMCBlockLayout(t, publication,
-		[]string{"tailRTS", "published"}, []reflect.Type{packedType, atomicType})
+	checkSPMCBlockLayout(
+		t,
+		publication,
+		[]string{"tailRTS", "published"},
+		[]reflect.Type{packedType, atomicType},
+	)
 	for _, offset := range []uintptr{
 		unsafe.Offsetof(SPMCQueue[T]{}.consumerReservation),
 		unsafe.Offsetof(SPMCQueue[T]{}.consumerPublication),

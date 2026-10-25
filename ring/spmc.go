@@ -95,7 +95,9 @@ func NewSPMCQueue[T any](count int, options ...Option) (*SPMCQueue[T], error) {
 			maxBatch:         uint32(cfg.maxDequeueBatch),
 			spinsBeforeYield: uint32(cfg.spinsBeforeYield),
 			htdMax: resolveHeadTailDistance(
-				cfg.consMode, count, cfg.maxConsumerHeadTailDistance,
+				cfg.consMode,
+				count,
+				cfg.maxConsumerHeadTailDistance,
 				cfg.consumerHeadTailDistanceSet,
 			),
 			relaxed:          cfg.consMode == modeRelaxed,
@@ -197,7 +199,10 @@ func (r *SPMCQueue[T]) EnqueueBulk(items []T) (free int, err error) {
 		cursor := producer.cursor
 		fresh := capacity + r.consumerPublication.published.Load() - cursor
 		return int(min(fresh, capacity)), batchLengthError(
-			"enqueue", len(items), producer.maxBatch, capacity,
+			"enqueue",
+			len(items),
+			producer.maxBatch,
+			capacity,
 		)
 	}
 	moved, remaining := r.spmcEnqueueBatch(items, true)
@@ -226,11 +231,16 @@ func (r *SPMCQueue[T]) DequeueBulk(dst []T) (available int, err error) {
 		head := r.spmcConsumerHeadPosition()
 		fresh := r.producerPublished.Load() - head
 		return int(min(fresh, capacity)), batchLengthError(
-			"dequeue", len(dst), consumer.maxBatch, capacity,
+			"dequeue",
+			len(dst),
+			consumer.maxBatch,
+			capacity,
 		)
 	}
 	start, count, remaining := r.spmcReserveConsumer(
-		uint32(len(dst)), true, consumer.exactBatchCounts,
+		uint32(len(dst)),
+		true,
+		consumer.exactBatchCounts,
 	)
 	if count == 0 {
 		if len(dst) == 0 {
@@ -250,7 +260,9 @@ func (r *SPMCQueue[T]) DequeueBurst(dst []T) (dequeued, available int) {
 	consumer := &r.consumerConfig
 	length := min(len(dst), int(consumer.maxBatch))
 	start, count, remaining := r.spmcReserveConsumer(
-		uint32(length), false, consumer.exactBatchCounts,
+		uint32(length),
+		false,
+		consumer.exactBatchCounts,
 	)
 	if count == 0 {
 		return 0, int(remaining)

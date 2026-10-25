@@ -79,22 +79,28 @@ func mpmcRTSReserveWorker(
 	close(done)
 }
 
+type mpmcRTSPublicResult struct {
+	moved, left int
+	err         error
+}
+
 func mpmcRTSPublicWorker(
 	queue *MPMCQueue[int],
 	producer bool,
 	method string,
-	result chan<- [2]int,
+	result chan<- mpmcRTSPublicResult,
 	done chan<- struct{},
 ) {
 	moved, left := 0, 0
+	var err error
 	if producer {
 		switch method {
 		case "single":
-			if queue.Enqueue(7) == nil {
+			err = queue.Enqueue(7)
+			if err == nil {
 				moved = 1
 			}
 		case "bulk":
-			var err error
 			left, err = queue.EnqueueBulk([]int{7, 8})
 			if err == nil {
 				moved = 2
@@ -102,17 +108,17 @@ func mpmcRTSPublicWorker(
 		case "burst":
 			moved, left = queue.EnqueueBurst([]int{7, 8})
 		case "zero":
-			left, _ = queue.EnqueueBulk(nil)
+			left, err = queue.EnqueueBulk(nil)
 		}
 	} else {
 		destination := make([]int, 2)
 		switch method {
 		case "single":
-			if _, err := queue.Dequeue(); err == nil {
+			_, err = queue.Dequeue()
+			if err == nil {
 				moved = 1
 			}
 		case "bulk":
-			var err error
 			left, err = queue.DequeueBulk(destination)
 			if err == nil {
 				moved = 2
@@ -120,10 +126,10 @@ func mpmcRTSPublicWorker(
 		case "burst":
 			moved, left = queue.DequeueBurst(destination)
 		case "zero":
-			left, _ = queue.DequeueBulk(nil)
+			left, err = queue.DequeueBulk(nil)
 		}
 	}
-	result <- [2]int{moved, left}
+	result <- mpmcRTSPublicResult{moved: moved, left: left, err: err}
 	close(done)
 }
 
@@ -168,7 +174,7 @@ func TestMPMCRTSDistanceWaitsBeforeFullEmptyAndZero(t *testing.T) {
 						beforeTail = queue.producerPublication.tailRTS.Load()
 						cache = queue.producerReservation.cachedConsumer.Load()
 					}
-					result := make(chan [2]int, 1)
+					result := make(chan mpmcRTSPublicResult, 1)
 					done = make(chan struct{})
 					go mpmcRTSPublicWorker(queue, producer, method, result, done)
 					mpmcConcurrentWaitFrame(t, done, "mpmcRTSPublicWorker", "waitHeadTailDistance")
@@ -200,7 +206,18 @@ func TestMPMCRTSDistanceWaitsBeforeFullEmptyAndZero(t *testing.T) {
 					completed = true
 					mpmcConcurrentAwait(t, done)
 					got := <-result
-					if got != [2]int{} || mpmcRTSHeadWord(queue, producer) != beforeHead {
+					wantErr := error(nil)
+					if method == "single" || method == "bulk" {
+						wantErr = ErrEmpty
+						if producer {
+							wantErr = ErrFull
+						}
+					}
+					if got.err != wantErr {
+						t.Fatalf("operation error=%v want=%v", got.err, wantErr)
+					}
+					if got.moved != 0 || got.left != 0 ||
+						mpmcRTSHeadWord(queue, producer) != beforeHead {
 						t.Fatalf("full/empty/zero changed reservation: result=%v", got)
 					}
 					tail := queue.consumerPublication.tailRTS.Load()
@@ -580,31 +597,50 @@ func TestMPMCRTSDelayedAndConcurrentMirrorRaisers(t *testing.T) {
 					t.Fatal("delayed mirror raiser moved publication backward")
 				}
 				stop := make(chan struct{})
+				var epoch atomic.Uint32
 				var raisers sync.WaitGroup
-				for range 4 {
+				acknowledgments := make([]chan struct{}, 4)
+				for index := range acknowledgments {
+					acknowledgment := make(chan struct{}, 1)
+					acknowledgments[index] = acknowledgment
 					raisers.Go(func() {
+						var acknowledged uint32
 						for {
 							select {
 							case <-stop:
 								return
 							default:
 							}
+							cycle := epoch.Load()
 							raiseMirror(mirror, tail)
+							if cycle != acknowledged {
+								acknowledged = cycle
+								acknowledgment <- struct{}{}
+							}
 							runtime.Gosched()
 						}
 					})
 				}
 				var backwards atomic.Bool
+				observed := make(chan struct{}, 1)
 				observerDone := make(chan struct{})
+				initial := mirror.Load()
 				go func() {
 					defer close(observerDone)
-					previous := mirror.Load()
+					previous, acknowledgedPosition := initial, initial
+					var acknowledged uint32
 					for {
+						cycle := epoch.Load()
 						current := mirror.Load()
 						if int32(current-previous) < 0 {
 							backwards.Store(true)
 						}
 						previous = current
+						if cycle != acknowledged && current != acknowledgedPosition {
+							acknowledged = cycle
+							acknowledgedPosition = current
+							observed <- struct{}{}
+						}
 						select {
 						case <-stop:
 							return
@@ -613,26 +649,38 @@ func TestMPMCRTSDelayedAndConcurrentMirrorRaisers(t *testing.T) {
 						runtime.Gosched()
 					}
 				}()
+				stopped := false
+				join := func() {
+					if !stopped {
+						close(stop)
+						stopped = true
+					}
+					joined := make(chan struct{})
+					go func() {
+						raisers.Wait()
+						close(joined)
+					}()
+					mpmcConcurrentAwait(t, joined)
+					mpmcConcurrentAwait(t, observerDone)
+				}
+				t.Cleanup(join)
 				// Complete outstanding visible data before cycling the same concrete queue.
 				queue.DequeueBurst(make([]int, 4))
-				for range 64 {
+				for cycle := range 64 {
 					if err := queue.Enqueue(9); err != nil {
-						t.Error(err)
-						break
+						t.Fatal(err)
 					}
 					if _, err := queue.Dequeue(); err != nil {
-						t.Error(err)
-						break
+						t.Fatal(err)
 					}
+					// Each worker must run after this publication before the next cycle.
+					epoch.Store(uint32(cycle + 1))
+					for _, acknowledgment := range acknowledgments {
+						mpmcConcurrentAwait(t, acknowledgment)
+					}
+					mpmcConcurrentAwait(t, observed)
 				}
-				close(stop)
-				joined := make(chan struct{})
-				go func() {
-					raisers.Wait()
-					close(joined)
-				}()
-				mpmcConcurrentAwait(t, joined)
-				mpmcConcurrentAwait(t, observerDone)
+				join()
 				if backwards.Load() || mirror.Load() != unpackPos(tail.Load()) {
 					t.Fatal("concurrent mirror raisers violated monotonic publication")
 				}

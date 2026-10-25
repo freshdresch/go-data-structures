@@ -122,7 +122,8 @@ func checkMPSCLayout[T any](t *testing.T) {
 	default:
 		return
 	}
-	expectations = append(expectations,
+	expectations = append(
+		expectations,
 		expectation{reservation, []uintptr{0, 8, 12}, 16, 8},
 		expectation{publication, []uintptr{0, 8}, 16, 8},
 	)

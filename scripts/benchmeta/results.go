@@ -31,7 +31,7 @@ func validateManifest(manifest workloadManifest) error {
 		"pointer_pool_reason", "storage",
 	}
 	seen := map[string]bool{}
-	for _, row := range manifest.Rows {
+	for index, row := range manifest.Rows {
 		for _, key := range required {
 			if _, exists := row[key]; !exists {
 				return inadmissibleError{"missing row field " + key}
@@ -39,7 +39,7 @@ func validateManifest(manifest workloadManifest) error {
 		}
 		var name string
 		if err := json.Unmarshal(row["name"], &name); err != nil {
-			return err
+			return fmt.Errorf("manifest row %d field name: %w", index, err)
 		}
 		if name == "" || seen[name] {
 			return inadmissibleError{"empty or duplicate workload name " + name}
@@ -49,7 +49,7 @@ func validateManifest(manifest workloadManifest) error {
 			"timing_boundary", "storage"} {
 			var value string
 			if err := json.Unmarshal(row[key], &value); err != nil {
-				return err
+				return fmt.Errorf("manifest row %d (%s) field %s: %w", index, name, key, err)
 			}
 			if value == "" {
 				return inadmissibleError{"empty row field " + key}
@@ -58,7 +58,7 @@ func validateManifest(manifest workloadManifest) error {
 		for _, key := range []string{"batch", "usable_capacity", "queue_count"} {
 			var value int
 			if err := json.Unmarshal(row[key], &value); err != nil {
-				return err
+				return fmt.Errorf("manifest row %d (%s) field %s: %w", index, name, key, err)
 			}
 			if value <= 0 {
 				return inadmissibleError{"invalid row field " + key}
@@ -74,7 +74,7 @@ func validateManifest(manifest workloadManifest) error {
 			}
 			var reason string
 			if err := json.Unmarshal(row[pair[1]], &reason); err != nil {
-				return err
+				return fmt.Errorf("manifest row %d (%s) field %s: %w", index, name, pair[1], err)
 			}
 			if reason == "" {
 				return inadmissibleError{"missing null reason for " + pair[0]}

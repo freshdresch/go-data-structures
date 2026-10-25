@@ -94,8 +94,11 @@ func TestSPMCRTSConstruction(t *testing.T) {
 }
 
 func spmcRTSReserveForTest(
-	queue *SPMCQueue[int], requested uint32, fixed bool,
-	entering, done chan struct{}, result chan [3]uint32,
+	queue *SPMCQueue[int],
+	requested uint32,
+	fixed bool,
+	entering, done chan struct{},
+	result chan [3]uint32,
 ) {
 	close(entering)
 	start, count, remaining := queue.spmcReserveConsumer(requested, fixed, true)
@@ -135,8 +138,13 @@ func TestSPMCRTSDistanceWaitAndCounterStability(t *testing.T) {
 		for _, request := range []uint32{0, 1, 2} {
 			for _, fixed := range []bool{false, true} {
 				t.Run(fmt.Sprintf("limit=%d/request=%d/fixed=%t", limit, request, fixed), func(t *testing.T) {
-					queue := newSPMCForTest[int](t, 4, WithRelaxedMultiConsDequeue(),
-						WithMaxConsumerHeadTailDistance(limit), WithSpinsBeforeYield(0))
+					queue := newSPMCForTest[int](
+						t,
+						4,
+						WithRelaxedMultiConsDequeue(),
+						WithMaxConsumerHeadTailDistance(limit),
+						WithSpinsBeforeYield(0),
+					)
 					enqueueSPMCValues(t, queue, 10, 11)
 					start, count, _ := queue.spmcReserveConsumer(2, true, true)
 					values := make([]int, count)
@@ -182,8 +190,12 @@ func TestSPMCRTSDistanceWaitAndCounterStability(t *testing.T) {
 
 func TestSPMCRTSDistanceEqualityAndCapacityAdmission(t *testing.T) {
 	for _, limit := range []int{0, 1, 4, 5} {
-		queue := newSPMCForTest[int](t, 4, WithRelaxedMultiConsDequeue(),
-			WithMaxConsumerHeadTailDistance(limit))
+		queue := newSPMCForTest[int](
+			t,
+			4,
+			WithRelaxedMultiConsDequeue(),
+			WithMaxConsumerHeadTailDistance(limit),
+		)
 		enqueueSPMCValues(t, queue, 1, 2, 3, 4)
 		first, count, _ := queue.spmcReserveConsumer(uint32(limit%4+1), true, true)
 		dst := make([]int, count)
@@ -225,8 +237,9 @@ func TestSPMCRTSReorderedCompletionAndSlotReuse(t *testing.T) {
 				}
 				queue := newSPMCForTest[*int](t, 4, options...)
 				seedSPMC(queue, position)
-				a, b, c, d := 1, 2, 3, 4
-				if _, err := queue.EnqueueBulk([]*int{&a, &b, &c, &d}); err != nil {
+				firstValue, secondValue, thirdValue, fourthValue := 1, 2, 3, 4
+				items := []*int{&firstValue, &secondValue, &thirdValue, &fourthValue}
+				if _, err := queue.EnqueueBulk(items); err != nil {
 					t.Fatal(err)
 				}
 				startA, countA, _ := queue.spmcReserveConsumer(2, true, true)
@@ -249,13 +262,14 @@ func TestSPMCRTSReorderedCompletionAndSlotReuse(t *testing.T) {
 				go spmcReleaseForTest(queue, startB, countB, entering, done)
 				awaitSPMCSignal(t, entering)
 				awaitSPMCSignal(t, done)
-				if valuesA[0] != &a || valuesA[1] != &b || valuesB[0] != &c || valuesB[1] != &d {
+				if valuesA[0] != &firstValue || valuesA[1] != &secondValue ||
+					valuesB[0] != &thirdValue || valuesB[1] != &fourthValue {
 					t.Fatal("reserved FIFO values")
 				}
 				if queue.consumerPublication.published.Load() != position || queue.Count() != 4 {
 					t.Fatal("later completion released slots")
 				}
-				if err := queue.Enqueue(&a); err != ErrFull {
+				if err := queue.Enqueue(&firstValue); err != ErrFull {
 					t.Fatal("premature reuse", err)
 				}
 				for _, value := range queue.producer.entries {
@@ -269,7 +283,7 @@ func TestSPMCRTSReorderedCompletionAndSlotReuse(t *testing.T) {
 					t.Fatal("earliest completion did not release full range")
 				}
 				for range 4 {
-					if err := queue.Enqueue(&a); err != nil {
+					if err := queue.Enqueue(&firstValue); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -283,8 +297,12 @@ func TestSPMCRTSPackedRolloverAndStaleCAS(t *testing.T) {
 		for _, counter := range []uint32{0, math.MaxUint32 - 1, math.MaxUint32} {
 			for _, exact := range []bool{false, true} {
 				for _, fixed := range []bool{false, true} {
-					queue := newSPMCForTest[int](t, 4, WithRelaxedMultiConsDequeue(),
-						WithMaxConsumerHeadTailDistance(4))
+					queue := newSPMCForTest[int](
+						t,
+						4,
+						WithRelaxedMultiConsDequeue(),
+						WithMaxConsumerHeadTailDistance(4),
+					)
 					seedSPMC(queue, position)
 					queue.consumerReservation.headRTS.Store(pack(position, counter))
 					queue.consumerPublication.tailRTS.Store(pack(position, counter))
@@ -322,8 +340,12 @@ func TestSPMCRTSPackedRolloverAndStaleCAS(t *testing.T) {
 
 func TestSPMCRTSMirrorAheadAndDelayedRaisers(t *testing.T) {
 	for _, position := range []uint32{0, math.MaxUint32 - 1} {
-		queue := newSPMCForTest[int](t, 4, WithRelaxedMultiConsDequeue(),
-			WithMaxConsumerHeadTailDistance(4))
+		queue := newSPMCForTest[int](
+			t,
+			4,
+			WithRelaxedMultiConsDequeue(),
+			WithMaxConsumerHeadTailDistance(4),
+		)
 		seedSPMC(queue, position)
 		enqueueSPMCValues(t, queue, 1, 2, 3, 4)
 		start, count, _ := queue.spmcReserveConsumer(4, true, true)
@@ -373,8 +395,13 @@ func spmcRaiseMirrorForTest(queue *SPMCQueue[int], entering, done chan struct{})
 func TestSPMCRTSWaitThenReserve(t *testing.T) {
 	for _, limit := range []int{0, 1} {
 		t.Run(fmt.Sprintf("limit=%d", limit), func(t *testing.T) {
-			queue := newSPMCForTest[int](t, 4, WithRelaxedMultiConsDequeue(),
-				WithMaxConsumerHeadTailDistance(limit), WithSpinsBeforeYield(0))
+			queue := newSPMCForTest[int](
+				t,
+				4,
+				WithRelaxedMultiConsDequeue(),
+				WithMaxConsumerHeadTailDistance(limit),
+				WithSpinsBeforeYield(0),
+			)
 			enqueueSPMCValues(t, queue, 10, 11, 12, 13)
 			stale := queue.consumerReservation.headRTS.Load()
 			start, count, _ := queue.spmcReserveConsumer(uint32(limit+1), true, true)
@@ -429,8 +456,12 @@ func TestSPMCRTSStaleOutOfRangeHead(t *testing.T) {
 	for _, position := range []uint32{0, math.MaxUint32 - 1} {
 		for _, exact := range []bool{false, true} {
 			for _, fixed := range []bool{false, true} {
-				queue := newSPMCForTest[int](t, 2, WithRelaxedMultiConsDequeue(),
-					WithMaxConsumerHeadTailDistance(0))
+				queue := newSPMCForTest[int](
+					t,
+					2,
+					WithRelaxedMultiConsDequeue(),
+					WithMaxConsumerHeadTailDistance(0),
+				)
 				seedSPMC(queue, position)
 				enqueueSPMCValues(t, queue, 10, 11)
 				stale := queue.consumerReservation.headRTS.Load()

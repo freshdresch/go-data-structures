@@ -60,8 +60,11 @@ func verifyProvenance(path string) (finalizedProvenance, error) {
 	directory := filepath.Dir(path)
 	snapshotPath := filepath.Join(directory, provenance.SnapshotFile)
 	snapshotHash, err := fileDigest(snapshotPath)
-	if err != nil || snapshotHash != provenance.SnapshotHash {
-		return provenance, fmt.Errorf("saved snapshot hash mismatch: %v", err)
+	if err != nil {
+		return provenance, fmt.Errorf("read saved snapshot: %w", err)
+	}
+	if snapshotHash != provenance.SnapshotHash {
+		return provenance, fmt.Errorf("saved snapshot hash mismatch")
 	}
 	var original sourceSnapshot
 	if err := readJSON(snapshotPath, &original); err != nil {
@@ -72,7 +75,10 @@ func verifyProvenance(path string) (finalizedProvenance, error) {
 	}
 	if snapshot.Request.HelperBinary != "" {
 		checksum, err := fileDigest(filepath.Join(directory, snapshot.HelperBinarySnapshot))
-		if err != nil || checksum != snapshot.HelperBinaryHash {
+		if err != nil {
+			return provenance, fmt.Errorf("read metadata helper binary snapshot: %w", err)
+		}
+		if checksum != snapshot.HelperBinaryHash {
 			return provenance, fmt.Errorf("metadata helper binary snapshot corrupted")
 		}
 	}
@@ -81,8 +87,11 @@ func verifyProvenance(path string) (finalizedProvenance, error) {
 			return provenance, fmt.Errorf("incomplete source record")
 		}
 		checksum, err := fileDigest(filepath.Join(directory, record.Snapshot))
-		if err != nil || checksum != record.SHA256 {
-			return provenance, fmt.Errorf("source snapshot corrupted: %s: %v", record.Path, err)
+		if err != nil {
+			return provenance, fmt.Errorf("read source snapshot %s: %w", record.Path, err)
+		}
+		if checksum != record.SHA256 {
+			return provenance, fmt.Errorf("source snapshot corrupted: %s", record.Path)
 		}
 	}
 	artifacts := provenance.Artifacts
@@ -92,8 +101,11 @@ func verifyProvenance(path string) (finalizedProvenance, error) {
 		{artifacts.ManifestLog, provenance.ManifestLogHash},
 	} {
 		checksum, err := fileDigest(artifactPath(directory, file.path))
-		if err != nil || checksum != file.expected {
-			return provenance, fmt.Errorf("artifact hash mismatch %s: %v", file.path, err)
+		if err != nil {
+			return provenance, fmt.Errorf("read artifact: %w", err)
+		}
+		if checksum != file.expected {
+			return provenance, fmt.Errorf("artifact hash mismatch %s", file.path)
 		}
 	}
 	if artifacts.SingleManifest != "" || artifacts.SingleManifestLog != "" {
@@ -102,8 +114,11 @@ func verifyProvenance(path string) (finalizedProvenance, error) {
 			{artifacts.SingleManifestLog, provenance.SingleManifestLogHash},
 		} {
 			checksum, err := fileDigest(artifactPath(directory, file.path))
-			if err != nil || checksum != file.expected {
-				return provenance, fmt.Errorf("single export hash mismatch")
+			if err != nil {
+				return provenance, fmt.Errorf("read single export: %w", err)
+			}
+			if checksum != file.expected {
+				return provenance, fmt.Errorf("single export hash mismatch %s", file.path)
 			}
 		}
 	}
@@ -134,9 +149,12 @@ func sourceChanges(before, after sourceSnapshot) []classifiedChange {
 		delete(previous, record.Path)
 	}
 	for _, record := range previous {
-		changes = append(changes, classifiedChange{
-			Path: record.Path, Class: record.Class, Before: record.SHA256,
-		})
+		changes = append(
+			changes,
+			classifiedChange{
+				Path: record.Path, Class: record.Class, Before: record.SHA256,
+			},
+		)
 	}
 	return changes
 }
@@ -207,8 +225,10 @@ func currentRunnerHash(paths []string) (string, error) {
 	return digestJSON(records), nil
 }
 
-func admitComparison(beforePath, afterPath, runnerPath, platformPath, output string,
-	methodology, layout bool) error {
+func admitComparison(
+	beforePath, afterPath, runnerPath, platformPath, output string,
+	methodology, layout bool,
+) error {
 	decision := admissionDecision{Accepted: false}
 	before, beforeErr := verifyProvenance(beforePath)
 	after, afterErr := verifyProvenance(afterPath)

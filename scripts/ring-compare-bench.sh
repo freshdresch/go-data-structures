@@ -437,7 +437,9 @@ run_gate 3 compare.test "$gate3_names" "$gate3_count" "${gate3_flags[@]}"
 } >>"$state"
 
 check_variant compare-unpadded
-if [ "$selected_variant" = compare-padded ]; then check_variant compare-padded; fi
+if [ "$selected_variant" = compare-padded ]; then
+	check_variant compare-padded
+fi
 check_variant compare-race
 cmp "$results/$selected_variant.test" "$results/compare.test" || die "selected binary changed"
 

@@ -75,100 +75,130 @@ cat >"$FIXTURE_TOOLS/go" <<'GO'
 set -euo pipefail
 args=("$@")
 directory=$PWD
-if [ "${1:-}" = -C ]; then directory=$2; shift 2; fi
+if [ "${1:-}" = -C ]; then
+	directory=$2
+	shift 2
+fi
 case "$1 ${2:-}" in
 'build -o')
- cp "$FIXTURE_HELPER" "$3"
- exit 0
- ;;
+	cp "$FIXTURE_HELPER" "$3"
+	exit 0
+	;;
 'env GOARCH') echo "${FIXTURE_ARCH:-amd64}" ;;
 'env GOTOOLDIR') echo "$FIXTURE_TOOLS" ;;
 'env -json')
- printf '{"GOOS":"%s","GOARCH":"%s","CGO_ENABLED":"0","GOROOT":"%s",' \
-  "${FIXTURE_GOOS:-linux}" "${FIXTURE_ARCH:-amd64}" "$FIXTURE_TOOLS"
- echo '"GOTOOLCHAIN":"local","GOWORK":"off","GOFLAGS":"-mod=readonly"}'
- ;;
+	printf '{"GOOS":"%s","GOARCH":"%s","CGO_ENABLED":"0","GOROOT":"%s",' \
+		"${FIXTURE_GOOS:-linux}" "${FIXTURE_ARCH:-amd64}" "$FIXTURE_TOOLS"
+	echo '"GOTOOLCHAIN":"local","GOWORK":"off","GOFLAGS":"-mod=readonly"}'
+	;;
 'version -m')
- printf '%s: go fixture\n\tbuild\tGOOS=%s\n\tbuild\tGOARCH=%s\n\tbuild\tCGO_ENABLED=0\n' \
-  "$3" "${FIXTURE_GOOS:-linux}" "${FIXTURE_ARCH:-amd64}"
- case "$3" in *race*) printf '\tbuild\t-race=true\n' ;; esac
- ;;
+	printf '%s: go fixture\n\tbuild\tGOOS=%s\n\tbuild\tGOARCH=%s\n\tbuild\tCGO_ENABLED=0\n' \
+		"$3" "${FIXTURE_GOOS:-linux}" "${FIXTURE_ARCH:-amd64}"
+	case "$3" in
+	*race*)
+		printf '\tbuild\t-race=true\n'
+		;;
+	esac
+	;;
 'version ') echo 'go version fixture' ;;
 'list -m') echo '{"Path":"fixture","Version":"v1"}' ;;
 'list -deps')
- if [ -f "$directory/benchmark/go.mod" ] && [ "${*: -1}" = ./ring ]; then
-  package_dir="$directory/ring"
- else
-  package_dir="$directory"
- fi
- files='"harness_test.go"'
- extra=''
- [ ! -f "$package_dir/added_test.go" ] || extra=',"added_test.go"'
- [ ! -f "$package_dir/removed" ] || files=''
- if [ -n "$files" ]; then files="$files$extra"; fi
- overlay=''
- for ((i=0; i<${#args[@]}; i++)); do
-  case "${args[i]}" in
-   -overlay) overlay=${args[i+1]} ;;
-   -overlay=*) overlay=${args[i]#-overlay=} ;;
-  esac
- done
- if [ -n "$overlay" ]; then
-  mapped_original=$(awk -F '"' '$2 == "Replace" { print $4 }' "$overlay")
-  if [ "$mapped_original" = "$package_dir/layout_pad_test.go" ]; then
-   files="${files:+$files,}\"layout_pad_test.go\""
-  fi
- fi
- if [ -f "$package_dir/ring.go" ]; then production='"ring.go"'; else production=''; fi
- printf '{"Dir":"%s","ImportPath":"github.com/freshdresch/go-data-structures/ring",' "$package_dir"
- printf '"GoFiles":[%s],"TestGoFiles":[%s]}\n' "$production" "$files"
- ;;
-'test -c'|'test -race')
- out=''
- for ((i=0; i<${#args[@]}; i++)); do
-  if [ "${args[i]}" = -o ]; then out=${args[i+1]}; fi
- done
- [ -n "$out" ]
- echo "build: $(basename "$out")" >>"$FIXTURE_DATA/events"
- cp "$FIXTURE_TOOLS/binary" "$out"
- chmod +x "$out"
- mutation=${FIXTURE_MUTATION:-}
- if [ -n "${FIXTURE_MUTATION_VARIANT:-}" ] &&
-  [[ "$out" != *"$FIXTURE_MUTATION_VARIANT.test" ]]; then
-  mutation=''
- fi
- if [ -d "$directory/ring" ]; then mutate_dir="$directory/ring"; else mutate_dir="$directory"; fi
- case "$mutation" in
- modify) printf changed >>"$mutate_dir/harness_test.go" ;;
- add) printf added >"$mutate_dir/added_test.go" ;;
- remove) touch "$mutate_dir/removed" ;;
- overlay-source) printf changed >>"$(dirname "$out")/layout_pad_test.go" ;;
- overlay-mapping) printf '{"Replace":{}}' >"$(dirname "$out")/overlay.json" ;;
- esac
- if [ -n "$mutation" ]; then echo "mutated: $mutation" >>"$FIXTURE_DATA/events"; fi
- case unused in
- esac
- ;;
+	if [ -f "$directory/benchmark/go.mod" ] && [ "${*: -1}" = ./ring ]; then
+		package_dir="$directory/ring"
+	else
+		package_dir="$directory"
+	fi
+	files='"harness_test.go"'
+	extra=''
+	[ ! -f "$package_dir/added_test.go" ] || extra=',"added_test.go"'
+	[ ! -f "$package_dir/removed" ] || files=''
+	if [ -n "$files" ]; then
+		files="$files$extra"
+	fi
+	overlay=''
+	for ((i = 0; i < ${#args[@]}; i++)); do
+		case "${args[i]}" in
+		-overlay) overlay=${args[i + 1]} ;;
+		-overlay=*) overlay=${args[i]#-overlay=} ;;
+		esac
+	done
+	if [ -n "$overlay" ]; then
+		mapped_original=$(awk -F '"' '$2 == "Replace" { print $4 }' "$overlay")
+		if [ "$mapped_original" = "$package_dir/layout_pad_test.go" ]; then
+			files="${files:+$files,}\"layout_pad_test.go\""
+		fi
+	fi
+	if [ -f "$package_dir/ring.go" ]; then
+		production='"ring.go"'
+	else
+		production=''
+	fi
+	printf '{"Dir":"%s","ImportPath":"github.com/freshdresch/go-data-structures/ring",' "$package_dir"
+	printf '"GoFiles":[%s],"TestGoFiles":[%s]}\n' "$production" "$files"
+	;;
+'test -c' | 'test -race')
+	out=''
+	for ((i = 0; i < ${#args[@]}; i++)); do
+		if [ "${args[i]}" = -o ]; then
+			out=${args[i + 1]}
+		fi
+	done
+	[ -n "$out" ]
+	echo "build: $(basename "$out")" >>"$FIXTURE_DATA/events"
+	cp "$FIXTURE_TOOLS/binary" "$out"
+	chmod +x "$out"
+	mutation=${FIXTURE_MUTATION:-}
+	if [ -n "${FIXTURE_MUTATION_VARIANT:-}" ] &&
+		[[ "$out" != *"$FIXTURE_MUTATION_VARIANT.test" ]]; then
+		mutation=''
+	fi
+	if [ -d "$directory/ring" ]; then
+		mutate_dir="$directory/ring"
+	else
+		mutate_dir="$directory"
+	fi
+	case "$mutation" in
+	modify) printf changed >>"$mutate_dir/harness_test.go" ;;
+	add) printf added >"$mutate_dir/added_test.go" ;;
+	remove) touch "$mutate_dir/removed" ;;
+	overlay-source) printf changed >>"$(dirname "$out")/layout_pad_test.go" ;;
+	overlay-mapping) printf '{"Replace":{}}' >"$(dirname "$out")/overlay.json" ;;
+	esac
+	if [ -n "$mutation" ]; then
+		echo "mutated: $mutation" >>"$FIXTURE_DATA/events"
+	fi
+	;;
 'tool nm')
- binary=${*: -1}
- offset=${FIXTURE_OFFSET:-0}
- case "$binary" in *after.test) offset=${FIXTURE_AFTER_OFFSET:-$offset} ;; esac
- [ "$offset" != unknown ] || exit 1
- case "$binary" in */compare-padded.test) offset=${FIXTURE_PADDED_OFFSET:-0} ;; esac
- printf '%x D runtime.sched\n' "$offset"
- if [ "$2" = nm ] && [ "${3:-}" = -size ]; then
-  pad=$(sed -n 's/^var layoutPad \[\([0-9]*\)\].*/\1/p' "$(dirname "$binary")/layout_pad_test.go")
-  echo "100 $((8*pad)) D github.com/freshdresch/go-data-structures/benchmark.layoutPad"
- fi
- ;;
-*) echo "unexpected fixture go: $*" >&2; exit 9 ;;
+	binary=${*: -1}
+	offset=${FIXTURE_OFFSET:-0}
+	case "$binary" in
+	*after.test)
+		offset=${FIXTURE_AFTER_OFFSET:-$offset}
+		;;
+	esac
+	[ "$offset" != unknown ] || exit 1
+	case "$binary" in
+	*/compare-padded.test)
+		offset=${FIXTURE_PADDED_OFFSET:-0}
+		;;
+	esac
+	printf '%x D runtime.sched\n' "$offset"
+	if [ "$2" = nm ] && [ "${3:-}" = -size ]; then
+		pad=$(sed -n 's/^var layoutPad \[\([0-9]*\)\].*/\1/p' "$(dirname "$binary")/layout_pad_test.go")
+		echo "100 $((8 * pad)) D github.com/freshdresch/go-data-structures/benchmark.layoutPad"
+	fi
+	;;
+*)
+	echo "unexpected fixture go: $*" >&2
+	exit 9
+	;;
 esac
 GO
 
 cat >"$FIXTURE_TOOLS/binary" <<'BINARY'
 #!/usr/bin/env bash
 if [ -n "${FIXTURE_EXECUTION_MARKER:-}" ]; then
- echo "$(basename "$0")" >>"$FIXTURE_EXECUTION_MARKER"
+	echo "$(basename "$0")" >>"$FIXTURE_EXECUTION_MARKER"
 fi
 set -euo pipefail
 cpu=1
@@ -176,20 +206,24 @@ run=''
 bench=''
 count=1
 while [ $# -gt 0 ]; do
- case "$1" in
- -test.cpu) cpu=$2 ;;
- -test.run) run=$2 ;;
- -test.bench) bench=$2 ;;
- -test.count) count=$2 ;;
- esac
- shift
+	case "$1" in
+	-test.cpu) cpu=$2 ;;
+	-test.run) run=$2 ;;
+	-test.bench) bench=$2 ;;
+	-test.count) count=$2 ;;
+	esac
+	shift
 done
 kind=quick
-case "$0" in *compare*) kind=compare ;; esac
+case "$0" in
+*compare*)
+	kind=compare
+	;;
+esac
 if [ -n "$bench" ]; then
- echo "$(basename "$0") $bench" >>"$FIXTURE_MARKER"
- [ "${FIXTURE_FAIL_TIMING:-false}" = false ] || exit 7
- awk -v cpu="$cpu" -v kind="$kind" -v bench="$bench" '
+	echo "$(basename "$0") $bench" >>"$FIXTURE_MARKER"
+	[ "${FIXTURE_FAIL_TIMING:-false}" = false ] || exit 7
+	awk -v cpu="$cpu" -v kind="$kind" -v bench="$bench" '
   kind == "quick" && bench ~ /api=seq/ && $0 !~ /api=seq/ { next }
   kind == "quick" && bench !~ /api=seq/ && $0 ~ /api=seq/ { next }
   kind == "compare" {
@@ -203,12 +237,12 @@ if [ -n "$bench" ]; then
    if ($0 ~ /^BenchmarkRingAPI\/mode=/) printf " 10 ns/elem 2 elem/op"
    print " 0 B/op 0 allocs/op"
   }' "$FIXTURE_DATA/$kind.rows"
- echo PASS
- exit 0
+	echo PASS
+	exit 0
 fi
 if [[ "$run" == *TestBenchmarkManifest* ]]; then
- echo '=== RUN   TestBenchmarkManifest'
- awk -v cpu="$cpu" -v wrong="${FIXTURE_WRONG_ROWS:-false}" '
+	echo '=== RUN   TestBenchmarkManifest'
+	awk -v cpu="$cpu" -v wrong="${FIXTURE_WRONG_ROWS:-false}" '
   BEGIN { printf "BENCHMARK_MANIFEST {\"schema\":1,\"gomaxprocs\":%s,\"rows\":[", cpu }
   wrong == "true" && NR == 2 { next }
   {
@@ -222,16 +256,18 @@ if [[ "$run" == *TestBenchmarkManifest* ]]; then
    sep=","
   }
   END { print "]}" }' "$FIXTURE_DATA/$kind.rows"
- echo '--- PASS: TestBenchmarkManifest (0.00s)'
- echo PASS
- exit 0
+	echo '--- PASS: TestBenchmarkManifest (0.00s)'
+	echo PASS
+	exit 0
 fi
 [ "${FIXTURE_FAIL_GATE:-false}" = false ] || exit 8
 names=${run#^(}
 names=${names%)$}
 names=${names//|/ }
-for ((iteration=0; iteration<count; iteration++)); do
- for name in $names; do echo "--- PASS: $name (0.00s)"; done
+for ((iteration = 0; iteration < count; iteration++)); do
+	for name in $names; do
+		echo "--- PASS: $name (0.00s)"
+	done
 done
 echo PASS
 BINARY
@@ -239,29 +275,45 @@ BINARY
 cat >"$FIXTURE_TOOLS/git" <<'GIT'
 #!/usr/bin/env bash
 set -euo pipefail
-if [ "$1" = -C ]; then shift 2; fi
+if [ "$1" = -C ]; then
+	shift 2
+fi
 case "$1 ${2:-}" in
 'rev-parse --show-toplevel') echo "$FIXTURE_ROOT" ;;
 'rev-parse HEAD') echo fixture-head ;;
 'rev-parse --verify') echo "${*: -1}" ;;
 'archive '*)
- if [ "${FIXTURE_METHODOLOGY:-false}" = true ] && [[ "$2" == *after* ]]; then
-  printf changed-measurement >"$FIXTURE_ROOT/ring/harness_test.go"
- fi
- tar -C "$FIXTURE_ROOT" -cf - .
- printf 'test fixture\n' >"$FIXTURE_ROOT/ring/harness_test.go"
- ;;
-'diff --stat'|'status --porcelain'|'status --porcelain'*) : ;;
-*) echo "unexpected fixture git $*" >&2; exit 9 ;;
+	if [ "${FIXTURE_METHODOLOGY:-false}" = true ] && [[ "$2" == *after* ]]; then
+		printf changed-measurement >"$FIXTURE_ROOT/ring/harness_test.go"
+	fi
+	tar -C "$FIXTURE_ROOT" -cf - .
+	printf 'test fixture\n' >"$FIXTURE_ROOT/ring/harness_test.go"
+	;;
+'diff --stat' | 'status --porcelain' | 'status --porcelain'*) : ;;
+*)
+	echo "unexpected fixture git $*" >&2
+	exit 9
+	;;
 esac
 GIT
 cat >"$FIXTURE_TOOLS/uname" <<'UNAME'
 #!/bin/sh
-case "$1" in -s) echo "${FIXTURE_OS:-Linux}" ;; *) echo fixture-machine ;; esac
+case "$1" in
+-s)
+	echo "${FIXTURE_OS:-Linux}"
+	;;
+*)
+	echo fixture-machine
+	;;
+esac
 UNAME
 cat >"$FIXTURE_TOOLS/lscpu" <<'LSCPU'
 #!/bin/sh
-if [ "$#" = 0 ]; then echo 'Model name: fixture'; else printf '0,0,0\n1,1,0\n'; fi
+if [ "$#" = 0 ]; then
+	echo 'Model name: fixture'
+else
+	printf '0,0,0\n1,1,0\n'
+fi
 LSCPU
 cat >"$FIXTURE_TOOLS/taskset" <<'TASKSET'
 #!/bin/sh
@@ -270,7 +322,14 @@ exec "$@"
 TASKSET
 cat >"$FIXTURE_TOOLS/sysctl" <<'SYSCTL'
 #!/bin/sh
-case "$2" in hw.ncpu) echo 10 ;; *) echo fixture ;; esac
+case "$2" in
+hw.ncpu)
+	echo 10
+	;;
+*)
+	echo fixture
+	;;
+esac
 SYSCTL
 cat >"$FIXTURE_TOOLS/pmset" <<'PMSET'
 #!/bin/sh
@@ -322,7 +381,9 @@ run_case() {
 	if [ "$name" = methodology ] || [ "$name" = apple-layout-diagnostic ]; then
 		result=$(sed -n 's/^results: //p' "$fixture/$name.log")
 		label=methodology-comparison
-		if [ "$name" = apple-layout-diagnostic ]; then label=layout-confounded; fi
+		if [ "$name" = apple-layout-diagnostic ]; then
+			label=layout-confounded
+		fi
 		grep -q "$label" "$result/comparison.txt"
 	fi
 	printf '%s: exit=%s expected=%s\n' "$name" "$status" "$expected"

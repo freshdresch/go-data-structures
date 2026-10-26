@@ -47,10 +47,11 @@ search.
 run on its own.
 
 `ring-spin-bound.sh` compares one committed ref built with several publish wait spin bounds, the
-`defaultSpinsBeforeYield` constant in `ring/ring.go`, or `tailSpins` in commits before it was
-renamed. It builds one binary per bound, with the first bound as the base, runs the MPSC, SPMC, and
-MPMC throughput rows for every side in rotating order, and prints a `benchstat` comparison. Run it
-to choose the spin bound after a change to the publish wait or to the ring's layout.
+`defaultSpinsBeforeYield` constant in `ring/dpdk/ring.go` (`ring/ring.go` in older commits), or
+`tailSpins` in commits before it was renamed. It builds one binary per bound, with the first bound
+as the base, runs the MPSC, SPMC, and MPMC throughput rows for every side in rotating order, and
+prints a `benchstat` comparison. Run it to choose the spin bound after a change to the publish
+wait or to the ring's layout.
 
 ```bash
 scripts/ring-spin-bound.sh [-rounds N] [-benchtime D] <ref> <bound> <bound>...

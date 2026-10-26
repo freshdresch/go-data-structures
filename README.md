@@ -9,12 +9,13 @@ Import the packages you need. There is no Go package at the module root.
 | Package | Use it for |
 |---|---|
 | [`buffer`](buffer/) | Reuse fixed-capacity storage and consume elements from either end. |
-| [`ring`](ring/README.md) | Transfer values or batches between producers and consumers. |
+| [`ring/dpdk`](ring/dpdk/README.md) | Transfer values or batches, modeled on DPDK's `rte_ring`. |
+| [`ring/frontier`](ring/README.md) | Transfer values or batches with non-waiting producers. |
 | [`set`](set/) | Track membership and compute unions, intersections, and differences. |
 | [`xmaps`](xmaps/) | Collect keys or values, invert a map, or merge maps into a new result. |
 | [`xslices`](xslices/) | Remove duplicates, partition elements, and find or reverse elements. |
 
-The five library packages use only the Go standard library. Tests and the separate benchmark
+The library packages use only the Go standard library. Tests and the separate benchmark
 module have additional dependencies.
 
 ## Install
@@ -26,12 +27,13 @@ you want:
 go get github.com/freshdresch/go-data-structures/set
 ```
 
-Replace `set` with `buffer`, `ring`, `xmaps`, or `xslices` for another package. Import paths share
+Replace `set` with `buffer`, `ring/dpdk`, `ring/frontier`, `xmaps`, or `xslices` for another
+package. Import paths share
 the prefix `github.com/freshdresch/go-data-structures/`.
 
 ## Example
 
-This program uses all five packages. It runs sequentially so that the output is reproducible.
+This program uses five of the packages. It runs sequentially so that the output is reproducible.
 
 ```go
 package main
@@ -41,7 +43,7 @@ import (
 	"log"
 
 	"github.com/freshdresch/go-data-structures/buffer"
-	"github.com/freshdresch/go-data-structures/ring"
+	"github.com/freshdresch/go-data-structures/ring/dpdk"
 	"github.com/freshdresch/go-data-structures/set"
 	"github.com/freshdresch/go-data-structures/xmaps"
 	"github.com/freshdresch/go-data-structures/xslices"
@@ -54,7 +56,7 @@ func main() {
 	pending.Append(40, 50, 60)
 	fmt.Println("buffer:", pending.Slice())
 
-	queue, err := ring.NewSPSCQueue[string](4)
+	queue, err := dpdk.NewSPSCQueue[string](4)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -131,8 +133,13 @@ lifetimes and aliasing restrictions. After `Put`, stop using both the buffer and
 
 ## Ring queues
 
-[`ring`](ring/README.md) provides four fixed-capacity FIFO queue types. Choose a type according to
-which sides your application serializes:
+The [ring queues](ring/README.md) come in two packages with the same type names and methods.
+[`ring/dpdk`](ring/dpdk/README.md) is modeled on DPDK's `rte_ring`: a returned enqueue's values
+are visible to consumers, and DPDK's relaxed tail sync is available as an option.
+`ring/frontier` lets producers publish without waiting for one another, which is much faster
+for single-element transfers under contention, but a returned enqueue's values can stay invisible
+while an earlier producer is still copying. `ring/frontier` implements `MPSCQueue` so far.
+Choose a type according to which sides your application serializes:
 
 | Type | Producers | Consumers |
 |---|---|---|
@@ -152,8 +159,8 @@ many values moved. Construction options control batch limits, slot clearing, cou
 publication behavior on concurrent sides.
 
 A call can wait internally for another call's progress. The queues have no close, cancellation,
-or notification API. Read the [ring guide](ring/README.md) for ownership rules, waiting behavior,
-options, and the limits of count snapshots before using a queue concurrently.
+or notification API. Read the [`ring/dpdk` guide](ring/dpdk/README.md) for ownership rules,
+waiting behavior, options, and the limits of count snapshots before using a queue concurrently.
 
 ## Sets
 
@@ -219,7 +226,7 @@ golangci-lint run
 ```
 
 Bazel is optional. [.bazelversion](.bazelversion) pins Bazel 9.3.1, and [MODULE.bazel](MODULE.bazel)
-selects the Go SDK from `go.mod`. With Bazelisk installed, test the five packages:
+selects the Go SDK from `go.mod`. With Bazelisk installed, test the packages:
 
 ```sh
 bazelisk test //buffer/... //ring/... //set/... //xmaps/... //xslices/...

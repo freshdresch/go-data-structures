@@ -5,7 +5,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/freshdresch/go-data-structures/ring"
+	"github.com/freshdresch/go-data-structures/ring/dpdk"
 )
 
 // compareRow is one implementation's name and the modes and batch sizes it runs at.
@@ -109,7 +109,7 @@ func compareImpls[T any, S sink[T]]() map[string]compareImpl[T, S] {
 		},
 		"ring-exact": {
 			run: pollingRun[T, S](func(mode benchMode) (queue[T], *runState, error) {
-				created, err := newModeRing[T](mode, nil, false, ring.WithExactBatchCounts())
+				created, err := newModeRing[T](mode, nil, false, dpdk.WithExactBatchCounts())
 				if err != nil {
 					return nil, nil, err
 				}
@@ -212,7 +212,7 @@ func newTestRing[T any](
 	mode benchMode,
 	state *runState,
 	single bool,
-	extra ...ring.Option,
+	extra ...dpdk.Option,
 ) queue[T] {
 	t.Helper()
 	created, err := newModeRing[T](mode, state, single, extra...)

@@ -46,7 +46,7 @@ type benchmarkManifestRow struct {
 func manifestPointer[T any](value T) *T { return &value }
 
 // manifestQueueRow reports whether implementation is one of this repository's ring queues, from
-// ring or ring/frontier, whose rows record the queue type and options.
+// ring/dpdk or ring/frontier, whose rows record the queue type and options.
 func manifestQueueRow(implementation string) bool {
 	return strings.HasPrefix(implementation, "ring") || strings.HasPrefix(implementation, "frontier")
 }

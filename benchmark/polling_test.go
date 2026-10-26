@@ -8,7 +8,7 @@ import (
 
 	"github.com/puzpuzpuz/xsync/v4"
 
-	"github.com/freshdresch/go-data-structures/ring"
+	"github.com/freshdresch/go-data-structures/ring/dpdk"
 	"github.com/freshdresch/go-data-structures/ring/frontier"
 )
 
@@ -144,7 +144,7 @@ func runPolling[T any, S sink[T]](
 }
 
 type spscBurstQueue[T any] struct {
-	ring *ring.SPSCQueue[T]
+	ring *dpdk.SPSCQueue[T]
 }
 
 func (q *spscBurstQueue[T]) enqueue(items []T) int {
@@ -158,7 +158,7 @@ func (q *spscBurstQueue[T]) dequeue(dst []T) int {
 }
 
 type mpscBurstQueue[T any] struct {
-	ring *ring.MPSCQueue[T]
+	ring *dpdk.MPSCQueue[T]
 }
 
 func (q *mpscBurstQueue[T]) enqueue(items []T) int {
@@ -172,7 +172,7 @@ func (q *mpscBurstQueue[T]) dequeue(dst []T) int {
 }
 
 type spmcBurstQueue[T any] struct {
-	ring *ring.SPMCQueue[T]
+	ring *dpdk.SPMCQueue[T]
 }
 
 func (q *spmcBurstQueue[T]) enqueue(items []T) int {
@@ -186,7 +186,7 @@ func (q *spmcBurstQueue[T]) dequeue(dst []T) int {
 }
 
 type mpmcBurstQueue[T any] struct {
-	ring *ring.MPMCQueue[T]
+	ring *dpdk.MPMCQueue[T]
 }
 
 func (q *mpmcBurstQueue[T]) enqueue(items []T) int {
@@ -206,21 +206,21 @@ func newModeRing[T any](
 	mode benchMode,
 	state *runState,
 	single bool,
-	extra ...ring.Option,
+	extra ...dpdk.Option,
 ) (queue[T], error) {
-	var options []ring.Option
+	var options []dpdk.Option
 	if mode.relaxed {
 		if mode.producers > 1 {
-			options = append(options, ring.WithRelaxedMultiProdEnqueue())
+			options = append(options, dpdk.WithRelaxedMultiProdEnqueue())
 		}
 		if mode.consumers > 1 {
-			options = append(options, ring.WithRelaxedMultiConsDequeue())
+			options = append(options, dpdk.WithRelaxedMultiConsDequeue())
 		}
 	}
 	options = append(options, extra...)
 	switch {
 	case mode.producers > 1 && mode.consumers > 1:
-		created, err := ring.NewMPMCQueue[T](ringCapacity, options...)
+		created, err := dpdk.NewMPMCQueue[T](ringCapacity, options...)
 		if err != nil {
 			return nil, err
 		}
@@ -231,7 +231,7 @@ func newModeRing[T any](
 		}
 		return &mpmcBurstQueue[T]{ring: created}, nil
 	case mode.producers > 1:
-		created, err := ring.NewMPSCQueue[T](ringCapacity, options...)
+		created, err := dpdk.NewMPSCQueue[T](ringCapacity, options...)
 		if err != nil {
 			return nil, err
 		}
@@ -242,7 +242,7 @@ func newModeRing[T any](
 		}
 		return &mpscBurstQueue[T]{ring: created}, nil
 	case mode.consumers > 1:
-		created, err := ring.NewSPMCQueue[T](ringCapacity, options...)
+		created, err := dpdk.NewSPMCQueue[T](ringCapacity, options...)
 		if err != nil {
 			return nil, err
 		}
@@ -253,7 +253,7 @@ func newModeRing[T any](
 		}
 		return &spmcBurstQueue[T]{ring: created}, nil
 	default:
-		created, err := ring.NewSPSCQueue[T](ringCapacity, options...)
+		created, err := dpdk.NewSPSCQueue[T](ringCapacity, options...)
 		if err != nil {
 			return nil, err
 		}
@@ -330,16 +330,16 @@ type ringSingleQueue struct {
 
 type spscSingleQueue[T any] struct {
 	ringSingleQueue
-	ring *ring.SPSCQueue[T]
+	ring *dpdk.SPSCQueue[T]
 }
 
 func (q *spscSingleQueue[T]) enqueue(items []T) int {
-	return q.movedOrFail(q.ring.Enqueue(items[0]), ring.ErrFull)
+	return q.movedOrFail(q.ring.Enqueue(items[0]), dpdk.ErrFull)
 }
 
 func (q *spscSingleQueue[T]) dequeue(dst []T) int {
 	elem, err := q.ring.Dequeue()
-	if q.movedOrFail(err, ring.ErrEmpty) == 0 {
+	if q.movedOrFail(err, dpdk.ErrEmpty) == 0 {
 		return 0
 	}
 	dst[0] = elem
@@ -348,16 +348,16 @@ func (q *spscSingleQueue[T]) dequeue(dst []T) int {
 
 type mpscSingleQueue[T any] struct {
 	ringSingleQueue
-	ring *ring.MPSCQueue[T]
+	ring *dpdk.MPSCQueue[T]
 }
 
 func (q *mpscSingleQueue[T]) enqueue(items []T) int {
-	return q.movedOrFail(q.ring.Enqueue(items[0]), ring.ErrFull)
+	return q.movedOrFail(q.ring.Enqueue(items[0]), dpdk.ErrFull)
 }
 
 func (q *mpscSingleQueue[T]) dequeue(dst []T) int {
 	elem, err := q.ring.Dequeue()
-	if q.movedOrFail(err, ring.ErrEmpty) == 0 {
+	if q.movedOrFail(err, dpdk.ErrEmpty) == 0 {
 		return 0
 	}
 	dst[0] = elem
@@ -366,16 +366,16 @@ func (q *mpscSingleQueue[T]) dequeue(dst []T) int {
 
 type spmcSingleQueue[T any] struct {
 	ringSingleQueue
-	ring *ring.SPMCQueue[T]
+	ring *dpdk.SPMCQueue[T]
 }
 
 func (q *spmcSingleQueue[T]) enqueue(items []T) int {
-	return q.movedOrFail(q.ring.Enqueue(items[0]), ring.ErrFull)
+	return q.movedOrFail(q.ring.Enqueue(items[0]), dpdk.ErrFull)
 }
 
 func (q *spmcSingleQueue[T]) dequeue(dst []T) int {
 	elem, err := q.ring.Dequeue()
-	if q.movedOrFail(err, ring.ErrEmpty) == 0 {
+	if q.movedOrFail(err, dpdk.ErrEmpty) == 0 {
 		return 0
 	}
 	dst[0] = elem
@@ -384,16 +384,16 @@ func (q *spmcSingleQueue[T]) dequeue(dst []T) int {
 
 type mpmcSingleQueue[T any] struct {
 	ringSingleQueue
-	ring *ring.MPMCQueue[T]
+	ring *dpdk.MPMCQueue[T]
 }
 
 func (q *mpmcSingleQueue[T]) enqueue(items []T) int {
-	return q.movedOrFail(q.ring.Enqueue(items[0]), ring.ErrFull)
+	return q.movedOrFail(q.ring.Enqueue(items[0]), dpdk.ErrFull)
 }
 
 func (q *mpmcSingleQueue[T]) dequeue(dst []T) int {
 	elem, err := q.ring.Dequeue()
-	if q.movedOrFail(err, ring.ErrEmpty) == 0 {
+	if q.movedOrFail(err, dpdk.ErrEmpty) == 0 {
 		return 0
 	}
 	dst[0] = elem

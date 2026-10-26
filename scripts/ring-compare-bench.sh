@@ -337,8 +337,8 @@ write_state() {
 	echo "ring/: ${ring_status:-clean}"
 	module_status=$(git -C "$repo" status --porcelain -- go.mod go.sum)
 	echo "root go.mod and go.sum: ${module_status:-clean}"
-	ring_go_status=$(git -C "$repo" status --porcelain --untracked-files=all -- ':(glob)ring/*.go')
-	echo "ring/*.go: ${ring_go_status:-clean}"
+	ring_go_status=$(git -C "$repo" status --porcelain --untracked-files=all -- ':(glob)ring/**/*.go')
+	echo "ring/**/*.go: ${ring_go_status:-clean}"
 
 	echo "## binaries"
 	record compare.test binary_info "$results/compare.test"

@@ -105,7 +105,9 @@ if [ -z "$reuse_dir" ]; then
 	before_hash=$(resolve_ref "${refs[0]}")
 	after_hash=$(resolve_ref "${refs[1]}")
 	harness_diff=$(git -C "$repo" diff --stat "$before_hash" "$after_hash" -- \
-		'ring/alloc_test.go' 'ring/bench_test.go' 'ring/bench_*_test.go' 'ring/race_*_test.go')
+		'ring/alloc_test.go' 'ring/bench_test.go' 'ring/bench_*_test.go' 'ring/race_*_test.go' \
+		'ring/dpdk/alloc_test.go' 'ring/dpdk/bench_test.go' 'ring/dpdk/bench_*_test.go' \
+		'ring/dpdk/race_*_test.go')
 	[ -n "$harness_diff" ] || harness_diff=none
 else
 	for name in before.test after.test state.txt; do
@@ -141,14 +143,19 @@ build_side() {
 	build_dir=$(mktemp -d)
 	build_dirs+=("$build_dir")
 	git -C "$repo" archive "$hash" | tar -x -C "$build_dir"
-	snapshot_variant "$side" "$build_dir" "$build_dir" ./ring "$hash" false "" \
+	# The DPDK-style queues moved from ring to ring/dpdk. Older refs keep them in ring.
+	local package=./ring
+	if [ -d "$build_dir/ring/dpdk" ]; then
+		package=./ring/dpdk
+	fi
+	snapshot_variant "$side" "$build_dir" "$build_dir" "$package" "$hash" false "" \
 		env GOTOOLCHAIN=local GOWORK=off GOFLAGS=-mod=readonly \
-		go test -c -o "$results/$side.test" ./ring
+		go test -c -o "$results/$side.test" "$package"
 	status="aborted building $side"
 	if ! build_err=$(
 		cd "$build_dir" &&
 			GOTOOLCHAIN=local GOWORK=off GOFLAGS=-mod=readonly \
-				go test -c -o "$results/$side.test" ./ring 2>&1 >/dev/null
+				go test -c -o "$results/$side.test" "$package" 2>&1 >/dev/null
 	); then
 		echo "$build_err" >&2
 		die_on_build_error "the $side ref" "$side" "$side ($hash)" "$build_err"

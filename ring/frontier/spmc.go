@@ -39,10 +39,10 @@ type spmcReleases struct {
 // Consumers never wait for one another. Each reserves an interval with one compare-and-swap,
 // copies out of it, and releases it on its own. The producer reuses slots up to the first
 // reservation that has not been released, so a returned dequeue does not mean its slots are
-// reusable yet: a consumer stalled mid-dequeue holds back reuse of every slot released after it
-// until it finishes. A consumer that loses the compare-and-swap to another consumer calls
-// runtime.Gosched before retrying. Retries have no fixed bound, so the queue is neither
-// wait-free nor formally lock-free.
+// reusable yet. A consumer stalled mid-dequeue holds back reuse of every slot released after it
+// until it finishes, which is why the queue is not lock-free. A consumer that loses the
+// compare-and-swap to another consumer calls runtime.Gosched before retrying, and its retries
+// have no fixed bound, so the queue is not wait-free either.
 //
 // Every producer call, including failed and zero-length calls, belongs to one serialized owner,
 // and handing that role to another goroutine needs a happens-before edge such as a channel or
@@ -93,7 +93,7 @@ func NewSPMCQueue[T any](count int, options ...Option) (*SPMCQueue[T], error) {
 }
 
 // Capacity returns the number of usable slots.
-func (r *SPMCQueue[T]) Capacity() int { return int(r.producer.mask + 1) }
+func (r *SPMCQueue[T]) Capacity() int { return int(r.consumerConfig.mask + 1) }
 
 // MaxEnqueueBatch returns the configured enqueue batch limit.
 func (r *SPMCQueue[T]) MaxEnqueueBatch() int { return int(r.producer.maxBatch) }
@@ -106,9 +106,11 @@ func (r *SPMCQueue[T]) MaxDequeueBatch() int { return int(r.consumerConfig.maxBa
 // MPSCQueue.Count it does not include slots awaiting release. It loads two positions and is a
 // snapshot, not a linearizable count.
 func (r *SPMCQueue[T]) Count() int {
+	// The head is loaded first. The published position only grows and never trails a head
+	// loaded earlier, so the difference cannot wrap.
 	head := r.consumerReservation.head.Load()
 	published := r.producerPublished.Load()
-	return int(min(published-head, uint64(r.producer.mask+1)))
+	return int(min(published-head, uint64(r.consumerConfig.mask+1)))
 }
 
 // Free returns Capacity minus Count. Reserved and unreleased intervals can make it exceed the room
@@ -211,6 +213,7 @@ func (r *SPMCQueue[T]) DequeueBulk(dst []T) (available int, err error) {
 	consumer := &r.consumerConfig
 	capacity := consumer.mask + 1
 	if len(dst) > int(capacity) || len(dst) > int(consumer.maxBatch) {
+		// The head is loaded before the published position so the difference cannot wrap.
 		head := r.consumerReservation.head.Load()
 		fresh := r.producerPublished.Load() - head
 		return int(min(fresh, uint64(capacity))), shared.BatchLengthError(
@@ -332,9 +335,9 @@ func (r *SPMCQueue[T]) spmcAttemptConsumer(
 	}
 	available := published - head
 	// A head loaded before other consumers advanced it past a lap of reuse sees more than a
-	// capacity of values, so it reloads.
+	// capacity of values, so it reloads, even for a zero-length request.
 	if available > capacity {
-		return head, 0, uint32(capacity), requested != 0
+		return head, 0, 0, true
 	}
 	if fixed && available < uint64(requested) {
 		return head, 0, uint32(available), false

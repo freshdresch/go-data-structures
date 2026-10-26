@@ -1,13 +1,13 @@
 # Ring queues
 
-Two packages provide fixed-capacity FIFO queues. They differ in how concurrent producers
-publish what they enqueued.
+Two packages provide fixed-capacity FIFO queues. They differ in how concurrent callers on one side
+publish their progress to the other side.
 
 | | [`ring/dpdk`](dpdk/README.md) | [`ring/frontier`](#frontier) |
 |---|---|---|
-| Model | DPDK's `rte_ring` | Producers publish completed ranges independently |
-| Concurrent producers | Publish in reservation order, or with RTS | Never wait for one another |
-| Returned `Enqueue` | Value visible (ordered mode) | Visible once earlier reservations finish |
+| Model | DPDK's `rte_ring` | Concurrent callers publish completed ranges independently |
+| Concurrent callers | Publish in reservation order, or with RTS | Never wait for one another |
+| Returned call | Effect visible (ordered mode) | Visible once earlier reservations finish |
 | Topologies | `SPSCQueue`, `SPMCQueue`, `MPSCQueue`, `MPMCQueue` | `SPMCQueue`, `MPSCQueue` |
 | Options | Batches, clearing, exact counts, RTS, spins, distances | Batches, clearing, counts |
 

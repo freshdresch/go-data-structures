@@ -4,11 +4,14 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"runtime"
 	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
+	"unsafe"
 )
 
 func spmcTestQueue[T any](t *testing.T, capacity int, options ...Option) *SPMCQueue[T] {
@@ -161,6 +164,71 @@ func TestSPMCStaleReleaseRecords(t *testing.T) {
 	queue.spmcDiscoverReleases()
 	if queue.producer.released != 16 {
 		t.Fatal("released frontier after hole", queue.producer.released)
+	}
+}
+
+// TestSPMCCacheBelowHead checks that a shared cache that a delayed consumer moved below the head is
+// refreshed instead of being read as more than a capacity of published values.
+func TestSPMCCacheBelowHead(t *testing.T) {
+	queue := spmcTestQueue[int](t, 8)
+	for value := range 5 {
+		if err := queue.Enqueue(value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 4 {
+		if _, err := queue.Dequeue(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A delayed consumer stores an older published position after the head reached 4.
+	queue.consumerReservation.cachedProducer.Store(2)
+	start, count, remaining, retry := queue.spmcAttemptConsumer(4, 1, true, false)
+	if start != 4 || count != 1 || remaining != 0 || retry {
+		t.Fatalf("start=%d count=%d remaining=%d retry=%t", start, count, remaining, retry)
+	}
+	if cached := queue.consumerReservation.cachedProducer.Load(); cached != 5 {
+		t.Fatalf("admitted attempt stored cache %d, want 5", cached)
+	}
+}
+
+// TestSPMCStaleHead checks that a head loaded a lap behind the published position reloads, even
+// for a zero-length request.
+func TestSPMCStaleHead(t *testing.T) {
+	queue := spmcTestQueue[int](t, 8)
+	spmcTestSeed(queue, 16)
+	if _, err := queue.EnqueueBulk([]int{1, 2}); err != nil {
+		t.Fatal(err)
+	}
+	_, count, _, retry := queue.spmcAttemptConsumer(7, 1, true, false)
+	if count != 0 || !retry {
+		t.Fatalf("count=%d retry=%t", count, retry)
+	}
+	_, count, _, retry = queue.spmcAttemptConsumer(7, 0, true, false)
+	if count != 0 || !retry {
+		t.Fatalf("zero-length count=%d retry=%t", count, retry)
+	}
+}
+
+// TestSPMCFailedAttemptLeavesCache checks that only an attempt that goes on to reserve stores the
+// refreshed published position in the shared cache.
+func TestSPMCFailedAttemptLeavesCache(t *testing.T) {
+	queue := spmcTestQueue[int](t, 8)
+	if err := queue.Enqueue(1); err != nil {
+		t.Fatal(err)
+	}
+	_, count, remaining, retry := queue.spmcAttemptConsumer(0, 2, true, false)
+	if count != 0 || remaining != 1 || retry {
+		t.Fatalf("count=%d remaining=%d retry=%t", count, remaining, retry)
+	}
+	if cached := queue.consumerReservation.cachedProducer.Load(); cached != 0 {
+		t.Fatalf("failed attempt stored cache %d", cached)
+	}
+	if _, count, _, _ := queue.spmcAttemptConsumer(0, 1, true, false); count != 1 {
+		t.Fatalf("admitted count=%d", count)
+	}
+	if cached := queue.consumerReservation.cachedProducer.Load(); cached != 1 {
+		t.Fatalf("admitted attempt stored cache %d, want 1", cached)
 	}
 }
 
@@ -355,7 +423,7 @@ func TestSPMCConcurrentAccounting(t *testing.T) {
 				var remaining sync.WaitGroup
 				remaining.Add(total)
 				done := make(chan struct{})
-				for c := range consumers {
+				for consumer := range consumers {
 					workers.Go(func() {
 						dst := make([]int, batch)
 						last := -1
@@ -366,14 +434,18 @@ func TestSPMCConcurrentAccounting(t *testing.T) {
 							default:
 							}
 							var moved int
-							if c%2 == 0 {
+							if consumer%2 == 0 {
 								moved, _ = queue.DequeueBurst(dst)
 							} else if value, err := queue.Dequeue(); err == nil {
 								dst[0], moved = value, 1
 							}
+							if moved == 0 {
+								runtime.Gosched()
+								continue
+							}
 							for _, value := range dst[:moved] {
 								if value <= last {
-									t.Errorf("consumer %d saw %d after %d", c, value, last)
+									t.Errorf("consumer %d saw %d after %d", consumer, value, last)
 								}
 								last = value
 								mu.Lock()
@@ -387,22 +459,298 @@ func TestSPMCConcurrentAccounting(t *testing.T) {
 						}
 					})
 				}
+				deadline := time.Now().Add(time.Minute)
 				items := make([]int, batch)
 				for sent := 0; sent < total; {
+					if time.Now().After(deadline) {
+						close(done)
+						workers.Wait()
+						t.Fatalf("producer sent %d of %d values within a minute", sent, total)
+					}
 					length := min(batch, total-sent)
 					for index := range items[:length] {
 						items[index] = sent + index
 					}
 					moved, _ := queue.EnqueueBurst(items[:length])
+					if moved == 0 {
+						runtime.Gosched()
+					}
 					sent += moved
 				}
-				remaining.Wait()
+				received := make(chan struct{})
+				go func() {
+					remaining.Wait()
+					close(received)
+				}()
+				select {
+				case <-received:
+				case <-time.After(time.Until(deadline)):
+					close(done)
+					workers.Wait()
+					t.Fatal("consumers did not receive every value within a minute")
+				}
 				close(done)
 				workers.Wait()
 				if !queue.Empty() {
 					t.Fatal("not drained")
 				}
 			})
+		}
+	}
+}
+
+// TestSPMCConcurrentMixedAPIs checks exactly-once delivery in increasing order per consumer when
+// consumers mix scalar, Burst, and Bulk calls, the producer mixes scalar, Burst, and Bulk calls,
+// and an observer calls Count throughout, for each combination of exact counts and clearing.
+func TestSPMCConcurrentMixedAPIs(t *testing.T) {
+	for _, exact := range []bool{false, true} {
+		for _, keep := range []bool{false, true} {
+			t.Run(fmt.Sprintf("exact=%t/keep=%t", exact, keep), func(t *testing.T) {
+				var options []Option
+				if exact {
+					options = append(options, WithExactBatchCounts())
+				}
+				if keep {
+					options = append(options, WithoutDequeueClearing())
+				}
+				spmcTestMixedAPIs(t, spmcTestQueue[int](t, 64, options...))
+			})
+		}
+	}
+}
+
+func spmcTestMixedAPIs(t *testing.T, queue *SPMCQueue[int]) {
+	t.Helper()
+	total := 50000
+	if testing.Short() {
+		total = 5000
+	}
+	deadline := time.Now().Add(time.Minute)
+	seen := make([]atomic.Bool, total)
+	var received atomic.Int64
+	done := make(chan struct{})
+	var workers sync.WaitGroup
+	for consumer, length := range []int{1, 3, 7, 16} {
+		workers.Go(func() {
+			dst := make([]int, length)
+			last := -1
+			for {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				moved := spmcTestDequeue(t, queue, consumer, dst)
+				if moved == 0 {
+					runtime.Gosched()
+					continue
+				}
+				for _, value := range dst[:moved] {
+					if value <= last {
+						t.Errorf("consumer %d saw %d after %d", consumer, value, last)
+					}
+					last = value
+					if seen[value].Swap(true) {
+						t.Errorf("value %d received twice", value)
+					}
+				}
+				received.Add(int64(moved))
+			}
+		})
+	}
+	// The observer exercises Count against both sides under the race detector.
+	workers.Go(func() {
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			if count := queue.Count(); count > queue.Capacity() {
+				t.Errorf("Count %d exceeds capacity %d", count, queue.Capacity())
+			}
+			runtime.Gosched()
+		}
+	})
+	batch := make([]int, 5)
+	for sent := 0; sent < total; {
+		if time.Now().After(deadline) {
+			close(done)
+			workers.Wait()
+			t.Fatalf("producer sent %d of %d values within a minute", sent, total)
+		}
+		moved := 0
+		style := sent % 3
+		if total-sent < len(batch) {
+			style = 0
+		}
+		switch style {
+		case 0:
+			err := queue.Enqueue(sent)
+			if err == nil {
+				moved = 1
+			} else if err != ErrFull {
+				t.Fatal(err)
+			}
+		case 1:
+			for index := range batch {
+				batch[index] = sent + index
+			}
+			moved, _ = queue.EnqueueBurst(batch)
+		default:
+			for index := range batch {
+				batch[index] = sent + index
+			}
+			_, err := queue.EnqueueBulk(batch)
+			if err == nil {
+				moved = len(batch)
+			} else if err != ErrFull {
+				t.Fatal(err)
+			}
+		}
+		if moved == 0 {
+			runtime.Gosched()
+		}
+		sent += moved
+	}
+	for received.Load() < int64(total) {
+		if time.Now().After(deadline) {
+			close(done)
+			workers.Wait()
+			t.Fatalf("received %d of %d values within a minute", received.Load(), total)
+		}
+		runtime.Gosched()
+	}
+	close(done)
+	workers.Wait()
+	for value := range seen {
+		if !seen[value].Load() {
+			t.Fatalf("value %d never received", value)
+		}
+	}
+	if !queue.Empty() {
+		t.Fatal("not drained")
+	}
+}
+
+// spmcTestDequeue dequeues into dst with the call style assigned to consumer. Consumer 0 calls
+// Dequeue, consumer 1 calls DequeueBurst, and the others call DequeueBulk for a full dst.
+func spmcTestDequeue(t *testing.T, queue *SPMCQueue[int], consumer int, dst []int) int {
+	switch consumer {
+	case 0:
+		value, err := queue.Dequeue()
+		if err != nil {
+			if err != ErrEmpty {
+				t.Error(err)
+			}
+			return 0
+		}
+		dst[0] = value
+		return 1
+	case 1:
+		moved, _ := queue.DequeueBurst(dst)
+		return moved
+	default:
+		if _, err := queue.DequeueBulk(dst); err != nil {
+			if err != ErrEmpty {
+				t.Error(err)
+			}
+			return 0
+		}
+		return len(dst)
+	}
+}
+
+// TestSPMCReleaseLookaheadHole checks release discovery with lookahead over records left from the
+// previous lap, with a hole among the predicted boundaries.
+func TestSPMCReleaseLookaheadHole(t *testing.T) {
+	queue := spmcTestQueue[int](t, 64)
+	batch := make([]int, 8)
+	// Lap 0 leaves a release record at every eighth position.
+	for range 8 {
+		if _, err := queue.EnqueueBulk(batch); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := queue.DequeueBulk(batch); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 8 {
+		if _, err := queue.EnqueueBulk(batch); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Lap 1 releases every eight-position interval except the one starting at 80.
+	var hole uint64
+	var holeCount uint32
+	for range 8 {
+		start, count, _ := queue.spmcReserveConsumer(8, true, false)
+		if start == 80 {
+			hole, holeCount = start, count
+			continue
+		}
+		queue.spmcReleaseConsumer(start, count)
+	}
+	queue.spmcDiscoverReleases()
+	if queue.producer.released != 80 {
+		t.Fatalf("released %d past the hole, want 80", queue.producer.released)
+	}
+	queue.spmcReleaseConsumer(hole, holeCount)
+	queue.spmcDiscoverReleases()
+	if queue.producer.released != 128 {
+		t.Fatalf("released %d after the hole, want 128", queue.producer.released)
+	}
+}
+
+// TestSPMCLayout checks that each group keeps its fields, that 128-byte gaps separate the groups,
+// and that the atomic fields are 8-byte aligned.
+func TestSPMCLayout(t *testing.T) {
+	queue := spmcTestQueue[int64](t, 8)
+	outer := reflect.TypeOf(queue).Elem()
+	groups := []struct {
+		name   string
+		fields []string
+	}{
+		{"producer", []string{"entries", "mask", "cursor", "released", "maxBatch", "exactBatchCounts"}},
+		{"producerPublished", nil},
+		{"consumerConfig", []string{"entries", "mask", "maxBatch", "clearOnDequeue", "exactBatchCounts"}},
+		{"consumerReservation", []string{"head", "cachedProducer"}},
+		{"releases", []string{"records"}},
+	}
+	if outer.NumField() != 2*len(groups)-1 {
+		t.Fatalf("got %d fields, want %d", outer.NumField(), 2*len(groups)-1)
+	}
+	for index, group := range groups {
+		field := outer.Field(2 * index)
+		if field.Name != group.name {
+			t.Fatalf("field %d is %s, want %s", 2*index, field.Name, group.name)
+		}
+		if index > 0 && outer.Field(2*index-1).Type != reflect.TypeOf([128]byte{}) {
+			t.Fatalf("field %d is not a 128-byte gap", 2*index-1)
+		}
+		if group.fields == nil {
+			if field.Type != reflect.TypeOf(atomic.Uint64{}) {
+				t.Fatalf("%s is %s, want atomic.Uint64", field.Name, field.Type)
+			}
+			continue
+		}
+		if field.Type.NumField() != len(group.fields) {
+			t.Fatalf("%s has %d fields, want %d", field.Name, field.Type.NumField(), len(group.fields))
+		}
+		for position, name := range group.fields {
+			if field.Type.Field(position).Name != name {
+				t.Fatalf("%s field %d is %s, want %s", field.Name, position,
+					field.Type.Field(position).Name, name)
+			}
+		}
+	}
+	for _, address := range []uintptr{
+		uintptr(unsafe.Pointer(&queue.producerPublished)),
+		uintptr(unsafe.Pointer(&queue.consumerReservation.head)),
+		uintptr(unsafe.Pointer(&queue.consumerReservation.cachedProducer)),
+	} {
+		if address%8 != 0 {
+			t.Fatalf("atomic field at %#x is not 8-byte aligned", address)
 		}
 	}
 }

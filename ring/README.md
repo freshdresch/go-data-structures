@@ -25,8 +25,10 @@ Choose `ring/frontier` for throughput on a concurrent side. On an AMD Ryzen 7 58
 transfers with four producers and one consumer measured about 31 to 34 ns per element through
 `frontier.MPSCQueue` and about 88 ns through ordered `dpdk.MPSCQueue`. With one producer and four
 consumers they measured about 32 to 34 ns through `frontier.SPMCQueue` and about 90 ns through
-ordered `dpdk.SPMCQueue`. Burst batches of 32 measured about 1.7 to 1.9 ns for `int64` in both
-topologies, against 2.7 and 3.0 ns.
+ordered `dpdk.SPMCQueue`. With four producers and four consumers they measured about 30 to 37
+ns through `frontier.MPMCQueue` and about 81 to 83 ns through ordered `dpdk.MPMCQueue`. Burst
+batches of 32 measured about 1.7 to 1.9 ns for `int64` in MPSC and SPMC, against 2.7 and 3.0 ns,
+and about 2.0 ns in MPMC, against 3.2 ns.
 
 ## Frontier
 
@@ -64,11 +66,13 @@ can still claim, in two loads.
 
 `MPMCQueue` applies both mechanisms. Producers record completions and consumers record
 releases. Neither side has a single owner, so the completed and released frontiers are shared
-atomics that any caller advances with a compare-and-swap once it has followed the records past
-them. `MPMCQueue.Count` counts published values that no consumer has reserved, as
-`SPMCQueue.Count` does, and it can advance the completed frontier itself. Dequeue calls can
-advance the completed frontier and enqueue calls the released frontier, including zero-length
-and invalid-length calls.
+atomics. Consumers advance the completed frontier and producers advance the released frontier,
+each with a compare-and-swap once it has followed the records past it. Dequeue calls, `Count`,
+`Free`, `Full`, and `Empty` can advance the completed frontier, and enqueue calls the released
+frontier, including zero-length and invalid-length calls. `MPMCQueue.Count` counts published
+values that no consumer has reserved, as `SPMCQueue.Count` does. Producers and consumers that
+lose a compare-and-swap call `runtime.Gosched` before retrying. With four producers and four
+consumers, the producer yield took single-element transfers from about 53 to 30 ns for `int64`.
 
 Ownership follows `ring/dpdk`: synchronize every handoff of a serialized role, and give `Reset`
 exclusive access against every operation and observer. Positions are 64-bit and must not overflow

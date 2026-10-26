@@ -804,8 +804,8 @@ func mpmcTestDequeue(t *testing.T, queue *MPMCQueue[uint64], consumer int, dst [
 	}
 }
 
-// TestMPMCSingleProcessorProgress checks that consumers yielding after a lost compare-and-swap and
-// producers retrying at once still let every caller finish when they share one processor.
+// TestMPMCSingleProcessorProgress checks that producers and consumers yielding after a lost
+// compare-and-swap still let every caller finish when they share one processor.
 func TestMPMCSingleProcessorProgress(t *testing.T) {
 	previous := runtime.GOMAXPROCS(1)
 	defer runtime.GOMAXPROCS(previous)

@@ -69,15 +69,16 @@ The root module's bulk benchmarks require all-or-nothing batches and measure ano
 
 A row measures the queue together with its callers' waiting behavior. The harness calls
 `runtime.Gosched` when a polling call moves nothing. Ordered ring publication also uses bounded
-spinning before yielding. RTS uses its configured head-to-tail distance wait. Channels park
-in the runtime. The mutex row waits for its lock and yields after full or empty calls.
-Workiva yields inside its library loop. xsync's try calls can return false after losing a
-compare-and-swap, so its harness also yields on contention.
+spinning before yielding. RTS uses its configured head-to-tail distance wait. Channels park in the
+runtime. The mutex row waits for its lock and yields after full or empty calls. Workiva yields
+inside its library loop. xsync's try calls can return false after losing a compare-and-swap,
+so its harness also yields on contention. Frontier SPMC and MPMC consumers, and frontier MPMC
+producers, call `runtime.Gosched` inside the queue after losing a compare-and-swap.
 
 xsync and Workiva use their MPMC algorithms in every topology. The ring selects an API for
 each topology. Batch-32 ring rows provide batching context because the other queues expose
-single-element operations. Compare `ring-single` with those rows when comparing single calls.
-The ring, xsync, Workiva, and mutex adapters clear dequeued slots.
+single-element operations. Compare `ring-single` with those rows when comparing single calls. The
+ring, frontier, xsync, Workiva, and mutex adapters clear dequeued slots.
 
 Workiva stores `interface{}` values. Its `int64` rows box nearly every value at about eight bytes
 each. Go rounds `allocs/op` down to a whole number per element, so read `B/op` as well.

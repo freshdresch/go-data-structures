@@ -25,8 +25,7 @@ type mpmcConfig[T any] struct {
 // compare-and-swap, copies, and records the interval's end on its own, and FIFO follows
 // reservation order. While an earlier producer is unfinished, a returned enqueue's values may not
 // be visible to consumers yet. While an earlier consumer is unfinished, a returned dequeue's slots
-// may not be reusable yet. Consumers call runtime.Gosched before every retry, and producers retry
-// at once.
+// may not be reusable yet. Producers and consumers call runtime.Gosched before every retry.
 //
 // A retry means another caller on that side moved its head, so the queue as a whole makes
 // progress, but a single caller's retries have no fixed bound, so the queue is not wait-free. A
@@ -273,8 +272,10 @@ func (r *MPMCQueue[T]) mpmcReserveProducer(
 		if !retry {
 			return start, count, remaining
 		}
-		// Producers retry at once. The yield consumers use made no measurable difference to
-		// MPSCQueue producers, and a measurement decides whether these should yield.
+		// Another producer moved the head first. Yielding takes the loser off the head's cache
+		// line while the winner finishes, as consumers do. Unlike in MPSCQueue, this measurably
+		// speeds up MPMC single-element transfers.
+		runtime.Gosched()
 	}
 }
 

@@ -12,6 +12,9 @@ The `ring` and `ring-exact` rows provide burst context at batches 1 and 32.
 
 The `ring-rts` row also measures relaxed tail synchronization on the concurrent sides.
 
+The `frontier` and `frontier-single` rows measure `frontier.MPMCQueue`, whose producers and
+consumers never wait for earlier callers on their side, through burst and single-element calls.
+
 See [the methodology](../README.md) for dependency versions, timing boundaries, waiting behavior,
 allocation caveats, capacity checks, and provenance requirements.
 

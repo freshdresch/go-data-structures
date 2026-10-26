@@ -8,11 +8,11 @@ publish their progress to the other side.
 | Model | DPDK's `rte_ring` | Concurrent callers publish completed ranges independently |
 | Concurrent callers | Publish in reservation order, or with RTS | Never wait for one another |
 | Returned call | Effect visible (ordered mode) | Visible once earlier reservations finish |
-| Topologies | `SPSCQueue`, `SPMCQueue`, `MPSCQueue`, `MPMCQueue` | `SPMCQueue`, `MPSCQueue` |
+| Topologies | `SPSCQueue`, `SPMCQueue`, `MPSCQueue`, `MPMCQueue` | `SPMCQueue`, `MPSCQueue`, `MPMCQueue` |
 | Options | Batches, clearing, exact counts, RTS, spins, distances | Batches, clearing, counts |
 
 `ring/frontier` has no SPSC queue. With one caller on each side there is nothing to wait for,
-so `dpdk.SPSCQueue` is already the right choice. MPMC is planned.
+so `dpdk.SPSCQueue` is already the right choice.
 
 The errors both packages share are defined in package `ring`, such as `ring.ErrFull` and
 `ring.ErrEmpty`. Each package re-exports them under the same names, so `errors.Is` matches them
@@ -61,6 +61,14 @@ slot released after it. A consumer that loses its compare-and-swap to another co
 to 33 ns. Retrying at once kept every losing consumer contending for the head's cache line.
 `SPMCQueue.Count` counts published values that no consumer has reserved yet, the backlog consumers
 can still claim, in two loads.
+
+`MPMCQueue` applies both mechanisms. Producers record completions and consumers record
+releases. Neither side has a single owner, so the completed and released frontiers are shared
+atomics that any caller advances with a compare-and-swap once it has followed the records past
+them. `MPMCQueue.Count` counts published values that no consumer has reserved, as
+`SPMCQueue.Count` does, and it can advance the completed frontier itself. Dequeue calls can
+advance the completed frontier and enqueue calls the released frontier, including zero-length
+and invalid-length calls.
 
 Ownership follows `ring/dpdk`: synchronize every handoff of a serialized role, and give `Reset`
 exclusive access against every operation and observer. Positions are 64-bit and must not overflow

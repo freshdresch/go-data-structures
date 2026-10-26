@@ -292,6 +292,17 @@ func newModeFrontier[T any](mode benchMode, state *runState, single bool) (queue
 			}, nil
 		}
 		return &frontierSPMCBurstQueue[T]{ring: created}, nil
+	case mode.producers > 1 && mode.consumers > 1:
+		created, err := frontier.NewMPMCQueue[T](ringCapacity)
+		if err != nil {
+			return nil, err
+		}
+		if single {
+			return &frontierMPMCSingleQueue[T]{
+				ring: created, ringSingleQueue: ringSingleQueue{state: state},
+			}, nil
+		}
+		return &frontierMPMCBurstQueue[T]{ring: created}, nil
 	default:
 		return nil, fmt.Errorf("frontier has no queue for mode %s", mode.name)
 	}
@@ -321,6 +332,38 @@ func (q *frontierSPMCSingleQueue[T]) enqueue(items []T) int {
 }
 
 func (q *frontierSPMCSingleQueue[T]) dequeue(dst []T) int {
+	elem, err := q.ring.Dequeue()
+	if q.movedOrFail(err, frontier.ErrEmpty) == 0 {
+		return 0
+	}
+	dst[0] = elem
+	return 1
+}
+
+type frontierMPMCBurstQueue[T any] struct {
+	ring *frontier.MPMCQueue[T]
+}
+
+func (q *frontierMPMCBurstQueue[T]) enqueue(items []T) int {
+	enqueued, _ := q.ring.EnqueueBurst(items)
+	return enqueued
+}
+
+func (q *frontierMPMCBurstQueue[T]) dequeue(dst []T) int {
+	dequeued, _ := q.ring.DequeueBurst(dst)
+	return dequeued
+}
+
+type frontierMPMCSingleQueue[T any] struct {
+	ringSingleQueue
+	ring *frontier.MPMCQueue[T]
+}
+
+func (q *frontierMPMCSingleQueue[T]) enqueue(items []T) int {
+	return q.movedOrFail(q.ring.Enqueue(items[0]), frontier.ErrFull)
+}
+
+func (q *frontierMPMCSingleQueue[T]) dequeue(dst []T) int {
 	elem, err := q.ring.Dequeue()
 	if q.movedOrFail(err, frontier.ErrEmpty) == 0 {
 		return 0

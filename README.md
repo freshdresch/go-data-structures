@@ -10,7 +10,7 @@ Import the packages you need. There is no Go package at the module root.
 |---|---|
 | [`buffer`](buffer/) | Reuse fixed-capacity storage and consume elements from either end. |
 | [`ring/dpdk`](ring/dpdk/README.md) | Transfer values or batches, modeled on DPDK's `rte_ring`. |
-| [`ring/frontier`](ring/README.md) | Transfer values or batches with non-waiting producers. |
+| [`ring/frontier`](ring/README.md) | Transfer values or batches with no wait for earlier callers. |
 | [`set`](set/) | Track membership and compute unions, intersections, and differences. |
 | [`xmaps`](xmaps/) | Collect keys or values, invert a map, or merge maps into a new result. |
 | [`xslices`](xslices/) | Remove duplicates, partition elements, and find or reverse elements. |
@@ -136,10 +136,10 @@ lifetimes and aliasing restrictions. After `Put`, stop using both the buffer and
 The [ring queues](ring/README.md) come in two packages with the same type names and methods.
 [`ring/dpdk`](ring/dpdk/README.md) is modeled on DPDK's `rte_ring`: a returned enqueue's values
 are visible to consumers, and DPDK's relaxed tail sync is available as an option.
-`ring/frontier` lets producers publish without waiting for one another, which is much faster
-for single-element transfers under contention, but a returned enqueue's values can stay invisible
-while an earlier producer is still copying. `ring/frontier` implements `MPSCQueue` and
-`SPMCQueue` so far.
+`ring/frontier` lets callers on a concurrent side publish without waiting for one another, which
+is much faster for single-element transfers under contention, but a returned call's effect can
+stay invisible to the other side while an earlier caller on its side is unfinished.
+`ring/frontier` implements `MPSCQueue`, `SPMCQueue`, and `MPMCQueue`.
 Choose a type according to which sides your application serializes:
 
 | Type | Producers | Consumers |

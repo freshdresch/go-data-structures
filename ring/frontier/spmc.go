@@ -1,6 +1,7 @@
 package frontier
 
 import (
+	"runtime"
 	"sync/atomic"
 
 	"github.com/freshdresch/go-data-structures/ring/internal/shared"
@@ -39,8 +40,9 @@ type spmcReleases struct {
 // copies out of it, and releases it on its own. The producer reuses slots up to the first
 // reservation that has not been released, so a returned dequeue does not mean its slots are
 // reusable yet: a consumer stalled mid-dequeue holds back reuse of every slot released after it
-// until it finishes. Consumer compare-and-swap retries have no fixed bound, so the queue is
-// neither wait-free nor formally lock-free.
+// until it finishes. A consumer that loses the compare-and-swap to another consumer calls
+// runtime.Gosched before retrying. Retries have no fixed bound, so the queue is neither
+// wait-free nor formally lock-free.
 //
 // Every producer call, including failed and zero-length calls, belongs to one serialized owner,
 // and handing that role to another goroutine needs a happens-before edge such as a channel or
@@ -308,6 +310,10 @@ func (r *SPMCQueue[T]) spmcReserveConsumer(
 		if !retry {
 			return start, count, remaining
 		}
+		// Another consumer moved the head first. Retrying at once keeps every losing consumer on
+		// the head's cache line, and with four consumers that roughly halved throughput. Yielding
+		// takes the loser off the line while the winner finishes.
+		runtime.Gosched()
 	}
 }
 

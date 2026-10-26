@@ -4,8 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"runtime"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -402,5 +404,38 @@ func TestSPMCConcurrentAccounting(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestSPMCSingleProcessorProgress checks that consumers yielding after a lost compare-and-swap
+// still let the producer and each other finish when they share one processor.
+func TestSPMCSingleProcessorProgress(t *testing.T) {
+	previous := runtime.GOMAXPROCS(1)
+	defer runtime.GOMAXPROCS(previous)
+	const total, consumers = 5000, 4
+	queue := spmcTestQueue[int](t, 8)
+	var received atomic.Int64
+	var workers sync.WaitGroup
+	for range consumers {
+		workers.Go(func() {
+			for received.Load() < total {
+				if _, err := queue.Dequeue(); err == nil {
+					received.Add(1)
+				} else {
+					runtime.Gosched()
+				}
+			}
+		})
+	}
+	for sent := 0; sent < total; {
+		if queue.Enqueue(sent) == nil {
+			sent++
+		} else {
+			runtime.Gosched()
+		}
+	}
+	workers.Wait()
+	if received.Load() != total || !queue.Empty() {
+		t.Fatal("received", received.Load())
 	}
 }

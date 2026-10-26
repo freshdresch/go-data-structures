@@ -24,9 +24,9 @@ example when a producer enqueues and then signals another goroutine that the val
 Choose `ring/frontier` for throughput on a concurrent side. On an AMD Ryzen 7 5800X, single-element
 transfers with four producers and one consumer measured about 31 to 34 ns per element through
 `frontier.MPSCQueue` and about 88 ns through ordered `dpdk.MPSCQueue`. With one producer and four
-consumers they measured about 43 to 49 ns through `frontier.SPMCQueue` and about 90 ns through
-ordered `dpdk.SPMCQueue`. Burst batches of 32 measured about 1.9 ns for `int64` in both topologies,
-against 2.7 and 3.0 ns.
+consumers they measured about 32 to 34 ns through `frontier.SPMCQueue` and about 90 ns through
+ordered `dpdk.SPMCQueue`. Burst batches of 32 measured about 1.7 to 1.9 ns for `int64` in both
+topologies, against 2.7 and 3.0 ns.
 
 ## Frontier
 
@@ -56,8 +56,11 @@ and `Empty` may run alongside both sides in every frontier queue.
 `SPMCQueue` mirrors this for consumers. Each consumer reserves with one compare-and-swap, copies
 out, and records the end of what it released, and the producer reuses slots up to the first
 reservation that has not been released. A consumer stalled mid-dequeue holds back reuse of every
-slot released after it. `SPMCQueue.Count` counts published values that no consumer has reserved
-yet, the backlog consumers can still claim, in two loads.
+slot released after it. A consumer that loses its compare-and-swap to another consumer calls
+`runtime.Gosched` before retrying, which took four-consumer single-element transfers from about 47
+to 33 ns. Retrying at once kept every losing consumer contending for the head's cache line.
+`SPMCQueue.Count` counts published values that no consumer has reserved yet, the backlog consumers
+can still claim, in two loads.
 
 Ownership follows `ring/dpdk`: synchronize every handoff of a serialized role, and give `Reset`
 exclusive access against every operation and observer. Positions are 64-bit and must not overflow

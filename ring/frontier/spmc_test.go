@@ -303,6 +303,67 @@ func TestSPMCCountsInvalidAndZero(t *testing.T) {
 	}
 }
 
+// TestSPMCFreshCounts checks that failed, invalid-length, and zero-length calls return counts
+// that include releases and publications the caller had not discovered yet.
+func TestSPMCFreshCounts(t *testing.T) {
+	for _, exact := range []bool{false, true} {
+		t.Run(fmt.Sprint(exact), func(t *testing.T) {
+			options := []Option{WithMaxBatch(4)}
+			if exact {
+				options = append(options, WithExactBatchCounts())
+			}
+			queue := spmcTestQueue[int](t, 8, options...)
+			for range 2 {
+				if _, err := queue.EnqueueBulk(make([]int, 4)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := queue.DequeueBulk(make([]int, 4)); err != nil {
+				t.Fatal(err)
+			}
+			if free, err := queue.EnqueueBulk(make([]int, 5)); free != 4 ||
+				!errors.Is(err, ErrExceedsMaxBatch) {
+				t.Fatal("invalid enqueue", free, err)
+			}
+			if _, err := queue.EnqueueBulk(make([]int, 4)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := queue.DequeueBulk(make([]int, 2)); err != nil {
+				t.Fatal(err)
+			}
+			if free, err := queue.EnqueueBulk(make([]int, 3)); free != 2 || err != ErrFull {
+				t.Fatal("full enqueue", free, err)
+			}
+			if _, err := queue.DequeueBulk(make([]int, 1)); err != nil {
+				t.Fatal(err)
+			}
+			if moved, free := queue.EnqueueBurst(nil); moved != 0 || free != 3 {
+				t.Fatal("zero burst", moved, free)
+			}
+			if available, err := queue.DequeueBulk(make([]int, 5)); available != 5 ||
+				!errors.Is(err, ErrExceedsMaxBatch) {
+				t.Fatal("invalid dequeue", available, err)
+			}
+			if available, err := queue.DequeueBulk(make([]int, 9)); available != 5 ||
+				!errors.Is(err, ErrExceedsCapacity) {
+				t.Fatal("dequeue capacity", available, err)
+			}
+			for _, length := range []int{4, 1} {
+				if _, err := queue.DequeueBulk(make([]int, length)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := queue.EnqueueBulk(make([]int, 2)); err != nil {
+				t.Fatal(err)
+			}
+			if available, err := queue.DequeueBulk(make([]int, 3)); available != 2 ||
+				err != ErrEmpty {
+				t.Fatal("empty dequeue", available, err)
+			}
+		})
+	}
+}
+
 func TestSPMCOptions(t *testing.T) {
 	for _, test := range []struct {
 		name     string
@@ -358,6 +419,17 @@ func TestSPMCClearingAndReset(t *testing.T) {
 		for index := range 3 {
 			if (queue.producer.entries[index] != nil) != keep {
 				t.Fatal("clearing", keep, index)
+			}
+		}
+		if _, err := queue.EnqueueBulk([]*int{&value, &value, &value}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := queue.DequeueBulk(make([]*int, 3)); err != nil {
+			t.Fatal(err)
+		}
+		for _, index := range []int{3, 0, 1} {
+			if (queue.producer.entries[index] != nil) != keep {
+				t.Fatal("wrapped clearing", keep, index)
 			}
 		}
 		queue.Reset()

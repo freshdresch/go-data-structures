@@ -1,28 +1,32 @@
 # Ring queues
 
-Two packages provide fixed-capacity FIFO queues with the same type names, constructors, and
-methods, so switching between them is a change of import. They differ in how concurrent
-producers publish what they enqueued.
+Two packages provide fixed-capacity FIFO queues. They differ in how concurrent producers
+publish what they enqueued.
 
 | | [`ring/dpdk`](dpdk/README.md) | [`ring/frontier`](#frontier) |
 |---|---|---|
 | Model | DPDK's `rte_ring` | Producers publish completed ranges independently |
 | Concurrent producers | Publish in reservation order, or with RTS | Never wait for one another |
 | Returned `Enqueue` | Value visible (ordered mode) | Visible once earlier reservations finish |
-| Topologies | `SPSCQueue`, `SPMCQueue`, `MPSCQueue`, `MPMCQueue` | `MPSCQueue` so far |
+| Topologies | `SPSCQueue`, `SPMCQueue`, `MPSCQueue`, `MPMCQueue` | `SPMCQueue`, `MPSCQueue` |
 | Options | Batches, clearing, exact counts, RTS, spins, distances | Batches, clearing, counts |
+
+`ring/frontier` has no SPSC queue. With one caller on each side there is nothing to wait for,
+so `dpdk.SPSCQueue` is already the right choice. MPMC is planned.
 
 The errors both packages share are defined in package `ring`, such as `ring.ErrFull` and
 `ring.ErrEmpty`. Each package re-exports them under the same names, so `errors.Is` matches them
 whichever package returned one. Options are per package. `ring/frontier` has no RTS, spin, or
 head-tail distance options, because it has no publication wait for them to configure.
 
-Choose `ring/dpdk` when a returned enqueue must mean its value is visible, for example when a
-producer enqueues and then signals another goroutine that the value is there. Choose
-`ring/frontier` for multi-producer throughput. With four producers and one consumer on an AMD
-Ryzen 7 5800X, single-element transfers measured about 31 to 34 ns per element through
-`frontier.MPSCQueue` and about 88 ns through ordered `dpdk.MPSCQueue`. Burst batches of 32 measured
-about 1.9 ns for `int64` and 2.1 ns for pointers, against 2.5 to 2.6 ns.
+Choose `ring/dpdk` when a returned call must mean its effect is visible to the other side, for
+example when a producer enqueues and then signals another goroutine that the value is there.
+Choose `ring/frontier` for throughput on a concurrent side. On an AMD Ryzen 7 5800X, single-element
+transfers with four producers and one consumer measured about 31 to 34 ns per element through
+`frontier.MPSCQueue` and about 88 ns through ordered `dpdk.MPSCQueue`. With one producer and four
+consumers they measured about 43 to 49 ns through `frontier.SPMCQueue` and about 90 ns through
+ordered `dpdk.SPMCQueue`. Burst batches of 32 measured about 1.9 ns for `int64` in both topologies,
+against 2.7 and 3.0 ns.
 
 ## Frontier
 
@@ -39,16 +43,23 @@ if err := queue.Enqueue(42); errors.Is(err, frontier.ErrFull) {
 value, err := queue.Dequeue()
 ```
 
-Each producer reserves an interval with one compare-and-swap, copies into it, and records where it
-ends. The consumer follows those records from its frontier and sees every value up to the first
-reservation that has not finished. FIFO follows reservation order. A producer stalled between its
-reservation and its record holds back every value reserved after it, so a returned `Enqueue` does
-not guarantee its value is visible. `Count`, `Free`, `Full`, and `Empty` report that contiguous
-completed prefix and may run alongside both sides. `Count` keeps the furthest frontier any call has
-proven, so repeated calls on a stable backlog stay cheap. The first call after many new
-single-element enqueues still reads one record per enqueue.
+In `MPSCQueue`, each producer reserves an interval with one compare-and-swap, copies into it, and
+records where it ends. The consumer follows those records from its frontier and sees every value up
+to the first reservation that has not finished. FIFO follows reservation order. A producer stalled
+between its reservation and its record holds back every value reserved after it, so a returned
+`Enqueue` does not guarantee its value is visible. `MPSCQueue.Count` reports values from the
+consumer's released position through that contiguous completed prefix, and keeps the furthest
+frontier any call has proven, so repeated calls on a stable backlog stay cheap. The first call
+after many new single-element enqueues still reads one record per enqueue. `Count`, `Free`, `Full`,
+and `Empty` may run alongside both sides in every frontier queue.
 
-Ownership follows `ring/dpdk`: synchronize every handoff of the consumer role, and give `Reset`
+`SPMCQueue` mirrors this for consumers. Each consumer reserves with one compare-and-swap, copies
+out, and records the end of what it released, and the producer reuses slots up to the first
+reservation that has not been released. A consumer stalled mid-dequeue holds back reuse of every
+slot released after it. `SPMCQueue.Count` counts published values that no consumer has reserved
+yet, the backlog consumers can still claim, in two loads.
+
+Ownership follows `ring/dpdk`: synchronize every handoff of a serialized role, and give `Reset`
 exclusive access against every operation and observer. Positions are 64-bit and must not overflow
 between construction or `Reset`, which takes centuries at these rates.
 

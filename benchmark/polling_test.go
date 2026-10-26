@@ -269,19 +269,64 @@ func newModeRing[T any](
 // newModeFrontier builds the ring/frontier queue for mode before timing starts, wrapped like
 // newModeRing's adapters. It supports only the modes in frontierModes.
 func newModeFrontier[T any](mode benchMode, state *runState, single bool) (queue[T], error) {
-	if mode.producers <= 1 || mode.consumers != 1 {
+	switch {
+	case mode.producers > 1 && mode.consumers == 1:
+		created, err := frontier.NewMPSCQueue[T](ringCapacity)
+		if err != nil {
+			return nil, err
+		}
+		if single {
+			return &frontierMPSCSingleQueue[T]{
+				ring: created, ringSingleQueue: ringSingleQueue{state: state},
+			}, nil
+		}
+		return &frontierMPSCBurstQueue[T]{ring: created}, nil
+	case mode.producers == 1 && mode.consumers > 1:
+		created, err := frontier.NewSPMCQueue[T](ringCapacity)
+		if err != nil {
+			return nil, err
+		}
+		if single {
+			return &frontierSPMCSingleQueue[T]{
+				ring: created, ringSingleQueue: ringSingleQueue{state: state},
+			}, nil
+		}
+		return &frontierSPMCBurstQueue[T]{ring: created}, nil
+	default:
 		return nil, fmt.Errorf("frontier has no queue for mode %s", mode.name)
 	}
-	created, err := frontier.NewMPSCQueue[T](ringCapacity)
-	if err != nil {
-		return nil, err
+}
+
+type frontierSPMCBurstQueue[T any] struct {
+	ring *frontier.SPMCQueue[T]
+}
+
+func (q *frontierSPMCBurstQueue[T]) enqueue(items []T) int {
+	enqueued, _ := q.ring.EnqueueBurst(items)
+	return enqueued
+}
+
+func (q *frontierSPMCBurstQueue[T]) dequeue(dst []T) int {
+	dequeued, _ := q.ring.DequeueBurst(dst)
+	return dequeued
+}
+
+type frontierSPMCSingleQueue[T any] struct {
+	ringSingleQueue
+	ring *frontier.SPMCQueue[T]
+}
+
+func (q *frontierSPMCSingleQueue[T]) enqueue(items []T) int {
+	return q.movedOrFail(q.ring.Enqueue(items[0]), frontier.ErrFull)
+}
+
+func (q *frontierSPMCSingleQueue[T]) dequeue(dst []T) int {
+	elem, err := q.ring.Dequeue()
+	if q.movedOrFail(err, frontier.ErrEmpty) == 0 {
+		return 0
 	}
-	if single {
-		return &frontierMPSCSingleQueue[T]{
-			ring: created, ringSingleQueue: ringSingleQueue{state: state},
-		}, nil
-	}
-	return &frontierMPSCBurstQueue[T]{ring: created}, nil
+	dst[0] = elem
+	return 1
 }
 
 type frontierMPSCBurstQueue[T any] struct {

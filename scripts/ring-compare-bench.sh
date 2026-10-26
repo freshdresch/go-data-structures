@@ -118,8 +118,8 @@ impl_table="ring SPSC,MPSC,SPMC,MPMC 1,32
 ring-exact SPSC,MPSC,SPMC,MPMC 1,32
 ring-single SPSC,MPSC,SPMC,MPMC 1
 ring-rts MPSC,SPMC,MPMC 1,32
-frontier MPSC 1,32
-frontier-single MPSC 1
+frontier MPSC,SPMC 1,32
+frontier-single MPSC,SPMC 1
 chan SPSC,MPSC,SPMC,MPMC 1
 mutex SPSC,MPSC,SPMC,MPMC 1
 xsync SPSC,MPSC,SPMC,MPMC 1

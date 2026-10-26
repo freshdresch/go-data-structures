@@ -46,7 +46,7 @@ tail synchronization on concurrent sides in MPSC, SPMC, and MPMC workloads.
 
 The `frontier` and `frontier-single` rows measure the `ring/frontier` queues the same way as
 `ring` and `ring-single`, burst calls at batches 1 and 32 and single-element calls. They run in
-the MPSC workload, the only topology `ring/frontier` implements so far.
+the MPSC and SPMC workloads, the topologies `ring/frontier` implements so far.
 
 The other rows are a buffered Go channel (`chan`), a slice guarded by `sync.Mutex` (`mutex`),
 `xsync.NewMPMCQueue` from `github.com/puzpuzpuz/xsync/v4` v4.5.0 (`xsync`), and

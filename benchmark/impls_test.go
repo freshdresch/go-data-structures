@@ -19,7 +19,7 @@ type compareRow struct {
 var multiModes = []benchMode{mpscMode, spmcMode, mpmcMode}
 
 // frontierModes are the modes ring/frontier implements so far.
-var frontierModes = []benchMode{mpscMode}
+var frontierModes = []benchMode{mpscMode, spmcMode}
 
 // compareRows lists every implementation, in the order the benchmark runs them. The benchmark,
 // the accounting test, and the runner script's table all follow it.

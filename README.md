@@ -138,7 +138,8 @@ The [ring queues](ring/README.md) come in two packages with the same type names 
 are visible to consumers, and DPDK's relaxed tail sync is available as an option.
 `ring/frontier` lets producers publish without waiting for one another, which is much faster
 for single-element transfers under contention, but a returned enqueue's values can stay invisible
-while an earlier producer is still copying. `ring/frontier` implements `MPSCQueue` so far.
+while an earlier producer is still copying. `ring/frontier` implements `MPSCQueue` and
+`SPMCQueue` so far.
 Choose a type according to which sides your application serializes:
 
 | Type | Producers | Consumers |

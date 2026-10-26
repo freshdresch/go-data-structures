@@ -362,82 +362,19 @@ func (r *mpscBase[T]) mpscPublishProducer(start uint64, count uint32) {
 	r.completion.records[uint32(start)&r.producerConfig.mask].Store(start + uint64(count))
 }
 
-// mpscLookahead is how many predicted records discovery loads at once.
-const mpscLookahead = 4
-
-// mpscLookaheadMinStride is the smallest record spacing, in positions, at which
-// predicted records lie on different 64-byte lines. Closer records share a line that the chained
-// load already brings in, and loading ahead of them only reads records producers are still
-// writing, so discovery predicts only from runs at least this far apart.
-const mpscLookaheadMinStride = 64 / 8
-
-// mpscDiscover extends frontier through contiguous completed records, stopping
-// at the first hole, the capacity window, or once requested fits when stopWhenRequestFits.
+// mpscDiscover extends frontier through contiguous completed records, stopping at the first
+// hole, the capacity window, or once requested fits when stopWhenRequestFits.
 func (r *mpscBase[T]) mpscDiscover(
 	cursor, frontier uint64,
 	stopWhenRequestFits bool,
 	requested uint32,
 ) uint64 {
 	capacity := uint64(r.consumer.mask + 1)
-	end := frontier
-	var stride uint64
-	for end-cursor < capacity {
-		if stopWhenRequestFits && end-cursor >= uint64(requested) {
-			break
-		}
-		if stride >= mpscLookaheadMinStride {
-			end = r.mpscDiscoverAhead(cursor, end, stride, stopWhenRequestFits, requested)
-			if end-cursor >= capacity || (stopWhenRequestFits && end-cursor >= uint64(requested)) {
-				break
-			}
-		}
-		recordEnd := r.completion.records[uint32(end)&r.consumer.mask].Load()
-		if recordEnd <= end || recordEnd-end > capacity-(end-cursor) {
-			break
-		}
-		stride = recordEnd - end
-		end = recordEnd
+	stopAt := capacity
+	if stopWhenRequestFits {
+		stopAt = uint64(requested)
 	}
-	return end
-}
-
-// mpscDiscoverAhead predicts that the records after end continue a run of
-// stride-length reservations, and loads the records at those predicted boundaries before
-// checking any of them. Each address is then known up front, so their cache misses overlap
-// instead of each load waiting for the previous one to supply its address. It accepts records
-// in order while each one is complete and exactly stride long, and returns the first boundary it
-// did not accept for the caller to load normally.
-//
-// An early load is as good as a chained one. It is an atomic load of the same record, and a
-// value counts only if it ends past its boundary and within the window, the same check chained
-// discovery applies. A record left over from an earlier lap ends at or before its boundary, so
-// a wrong prediction or an unpublished record costs only the wasted load.
-func (r *mpscBase[T]) mpscDiscoverAhead(
-	cursor, end, stride uint64,
-	stopWhenRequestFits bool,
-	requested uint32,
-) uint64 {
-	capacity := uint64(r.consumer.mask + 1)
-	var ahead [mpscLookahead]uint64
-	lanes := 0
-	for ; lanes < len(ahead); lanes++ {
-		position := end + uint64(lanes)*stride
-		if position-cursor >= capacity {
-			break
-		}
-		ahead[lanes] = r.completion.records[uint32(position)&r.consumer.mask].Load()
-	}
-	for lane := range lanes {
-		if stopWhenRequestFits && end-cursor >= uint64(requested) {
-			break
-		}
-		recordEnd := ahead[lane]
-		if recordEnd <= end || recordEnd-end != stride || stride > capacity-(end-cursor) {
-			break
-		}
-		end = recordEnd
-	}
-	return end
+	return discoverRecords(r.completion.records, r.consumer.mask, cursor, capacity, frontier, stopAt)
 }
 
 func (r *mpscBase[T]) mpscDequeueBatch(dst []T, fixed bool) (int, int) {

@@ -8,6 +8,8 @@ go_library(
         "mpsc.go",
         "mpsc_base.go",
         "options.go",
+        "records.go",
+        "spmc.go",
     ],
     importpath = "github.com/freshdresch/go-data-structures/ring/frontier",
     visibility = ["//visibility:public"],
@@ -28,6 +30,7 @@ go_test(
         "mpsc_count_test.go",
         "mpsc_model_test.go",
         "mpsc_test.go",
+        "spmc_test.go",
     ],
     # The source-ordering tests parse the implementation files.
     data = [

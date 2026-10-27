@@ -156,12 +156,15 @@ Capacity must be a power of two from 1 through `2^30`, and every slot is usable.
 
 `Enqueue` and `Dequeue` transfer one value or report `ErrFull` and `ErrEmpty`, respectively.
 Bulk methods transfer a whole batch or nothing. Burst methods transfer a prefix and report how
-many values moved. Construction options control batch limits, slot clearing, counts, and
-publication behavior on concurrent sides.
+many values moved. Construction options control batch limits, slot clearing, and counts.
+`ring/dpdk` adds options for publication behavior on concurrent sides.
 
-A call can wait internally for another call's progress. The queues have no close, cancellation,
-or notification API. Read the [`ring/dpdk` guide](ring/dpdk/README.md) for ownership rules,
-waiting behavior, options, and the limits of count snapshots before using a queue concurrently.
+A `ring/dpdk` call on a concurrent side can wait internally for another call's progress. A
+`ring/frontier` call never waits for another caller, but a stalled caller can hold back the other
+side's view of later calls. The queues have no close, cancellation, or notification API. Read the
+[ring queue guide](ring/README.md) and the [`ring/dpdk` guide](ring/dpdk/README.md) for ownership
+rules, waiting behavior, options, and the limits of count snapshots before using a queue
+concurrently.
 
 ## Sets
 

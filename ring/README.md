@@ -23,12 +23,12 @@ Choose `ring/dpdk` when a returned call must mean its effect is visible to the o
 example when a producer enqueues and then signals another goroutine that the value is there.
 Choose `ring/frontier` for throughput on a concurrent side. On an AMD Ryzen 7 5800X, single-element
 transfers with four producers and one consumer measured about 31 to 34 ns per element through
-`frontier.MPSCQueue` and about 88 ns through ordered `dpdk.MPSCQueue`. With one producer and four
-consumers they measured about 32 to 34 ns through `frontier.SPMCQueue` and about 90 ns through
-ordered `dpdk.SPMCQueue`. With four producers and four consumers they measured about 30 to 37
-ns through `frontier.MPMCQueue` and about 81 to 83 ns through ordered `dpdk.MPMCQueue`. Burst
-batches of 32 measured about 1.7 to 1.9 ns for `int64` in MPSC and SPMC, against 2.7 and 3.0 ns,
-and about 2.0 ns in MPMC, against 3.2 ns.
+`frontier.MPSCQueue` and about 77 to 88 ns through ordered `dpdk.MPSCQueue`. With one producer and
+four consumers they measured about 32 to 35 ns through `frontier.SPMCQueue` and about 89 ns through
+ordered `dpdk.SPMCQueue`. With four producers and four consumers they measured about 24 to 37 ns
+through `frontier.MPMCQueue` and about 80 to 81 ns through ordered `dpdk.MPMCQueue`. Burst batches
+of 32 measured about 1.7 to 1.9 ns for `int64` in MPSC and SPMC, against 2.7 and 3.0 ns, and about
+2.0 ns in MPMC, against 3.1 ns. These are medians of 10 rounds on WSL2 with Go 1.27.3.
 
 ## Frontier
 

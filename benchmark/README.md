@@ -43,6 +43,10 @@ It calls `EnqueueBurst` and `DequeueBurst` with batches of 1 and 32. The `ring-e
 single-element comparison with the other queues. The `ring-rts` row selects relaxed tail
 synchronization on concurrent sides in MPSC, SPMC, and MPMC workloads.
 
+The `frontier` and `frontier-single` rows measure the `ring/frontier` queues the same way as
+`ring` and `ring-single`, burst calls at batches 1 and 32 and single-element calls. They run in
+the MPSC workload, the only topology `ring/frontier` implements so far.
+
 The other rows are a buffered Go channel (`chan`), a slice guarded by `sync.Mutex` (`mutex`),
 `xsync.NewMPMCQueue` from `github.com/puzpuzpuz/xsync/v4` v4.5.0 (`xsync`), and
 `queue.NewRingBuffer` from `github.com/Workiva/go-datastructures` v1.1.8 (`workiva`).
@@ -91,7 +95,7 @@ within the same campaign. Do not combine the two modules' tables.
 
 ## Provenance and local evidence
 
-Before timing, `TestBenchmarkManifest` exports all 84 workload contracts. The runner checks
+Before timing, `TestBenchmarkManifest` exports every workload contract. The runner checks
 names, multiplicity, CPU suffixes, and required metadata. Ordinary, padded, and race builds
 have separate source snapshots and independent postbuild discovery. Changes to selected inputs
 stop finalization. Snapshots include dirty and untracked compiled inputs, correctness tests,

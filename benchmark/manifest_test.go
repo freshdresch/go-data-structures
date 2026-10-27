@@ -45,6 +45,12 @@ type benchmarkManifestRow struct {
 
 func manifestPointer[T any](value T) *T { return &value }
 
+// manifestQueueRow reports whether implementation is one of this repository's ring queues, from
+// ring or ring/frontier, whose rows record the queue type and options.
+func manifestQueueRow(implementation string) bool {
+	return strings.HasPrefix(implementation, "ring") || strings.HasPrefix(implementation, "frontier")
+}
+
 func manifestRingType(mode benchMode) string {
 	switch {
 	case mode.producers > 1 && mode.consumers > 1:
@@ -147,7 +153,7 @@ func TestBenchmarkManifestRows(t *testing.T) {
 
 func TestBenchmarkManifestRingConfiguration(t *testing.T) {
 	for _, row := range buildBenchmarkManifest().Rows {
-		if !strings.HasPrefix(row.Implementation, "ring") {
+		if !manifestQueueRow(row.Implementation) {
 			if row.RingType != nil {
 				t.Errorf("%s has ring type %q", row.Name, *row.RingType)
 			}
@@ -192,9 +198,9 @@ func buildBenchmarkManifest() benchmarkManifest {
 					row := manifestRow(name, implementation.name, mode, batch)
 					row.Family, row.Element = "Compare", element
 					row.Storage = "typed " + element
-					if strings.HasPrefix(implementation.name, "ring") {
+					if manifestQueueRow(implementation.name) {
 						api := "burst"
-						if implementation.name == "ring-single" {
+						if strings.HasSuffix(implementation.name, "-single") {
 							api = "single"
 						}
 						row.API, row.APIReason = manifestPointer(api), ""
@@ -233,8 +239,8 @@ func buildBenchmarkManifest() benchmarkManifest {
 
 func checkManifestExamples(t *testing.T, rows []benchmarkManifestRow) {
 	t.Helper()
-	if len(rows) != 84 {
-		t.Fatalf("got %d rows, want 84", len(rows))
+	if len(rows) != 90 {
+		t.Fatalf("got %d rows, want 90", len(rows))
 	}
 	var mpsc, spmc, exact, single bool
 	for _, row := range rows {

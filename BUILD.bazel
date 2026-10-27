@@ -10,6 +10,7 @@ go_library(
     deps = [
         "//buffer",
         "//ring",
+        "//ring/frontier",
         "//set",
         "//xmaps",
         "//xslices",

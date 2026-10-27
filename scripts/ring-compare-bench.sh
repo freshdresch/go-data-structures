@@ -118,8 +118,8 @@ impl_table="ring SPSC,MPSC,SPMC,MPMC 1,32
 ring-exact SPSC,MPSC,SPMC,MPMC 1,32
 ring-single SPSC,MPSC,SPMC,MPMC 1
 ring-rts MPSC,SPMC,MPMC 1,32
-frontier MPSC 1,32
-frontier-single MPSC 1
+frontier MPSC,SPMC,MPMC 1,32
+frontier-single MPSC,SPMC,MPMC 1
 chan SPSC,MPSC,SPMC,MPMC 1
 mutex SPSC,MPSC,SPMC,MPMC 1
 xsync SPSC,MPSC,SPMC,MPMC 1
@@ -569,10 +569,10 @@ fi
 metrics='.unit:(sec/op OR B/s OR allocs/op OR B/op)'
 status="rounds complete, comparison failed"
 (cd "$results" && benchstat -filter "$metrics" \
-	-col '/impl@(ring ring-exact ring-single ring-rts chan mutex xsync workiva)' results.txt) \
+	-col '/impl@(ring ring-exact ring-single ring-rts frontier frontier-single chan mutex xsync workiva)' results.txt) \
 	>"$results/comparison.txt"
 (cd "$results" && benchstat -filter "$metrics" \
-	-col '/impl@(ring-single ring ring-exact ring-rts chan mutex xsync workiva)' results.txt) \
+	-col '/impl@(ring-single ring ring-exact ring-rts frontier frontier-single chan mutex xsync workiva)' results.txt) \
 	>"$results/comparison-single.txt"
 cat "$results/comparison.txt"
 echo

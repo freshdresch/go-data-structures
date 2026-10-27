@@ -5,9 +5,12 @@ go_library(
     srcs = [
         "doc.go",
         "errors.go",
+        "mpmc.go",
         "mpsc.go",
         "mpsc_base.go",
         "options.go",
+        "records.go",
+        "spmc.go",
     ],
     importpath = "github.com/freshdresch/go-data-structures/ring/frontier",
     visibility = ["//visibility:public"],
@@ -20,6 +23,7 @@ go_library(
 go_test(
     name = "frontier_test",
     srcs = [
+        "mpmc_test.go",
         "mpsc_base_concurrency_test.go",
         "mpsc_base_count_test.go",
         "mpsc_base_model_test.go",
@@ -28,6 +32,7 @@ go_test(
         "mpsc_count_test.go",
         "mpsc_model_test.go",
         "mpsc_test.go",
+        "spmc_test.go",
     ],
     # The source-ordering tests parse the implementation files.
     data = [

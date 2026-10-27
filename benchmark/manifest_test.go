@@ -239,8 +239,8 @@ func buildBenchmarkManifest() benchmarkManifest {
 
 func checkManifestExamples(t *testing.T, rows []benchmarkManifestRow) {
 	t.Helper()
-	if len(rows) != 90 {
-		t.Fatalf("got %d rows, want 90", len(rows))
+	if len(rows) != 102 {
+		t.Fatalf("got %d rows, want 102", len(rows))
 	}
 	var mpsc, spmc, exact, single bool
 	for _, row := range rows {

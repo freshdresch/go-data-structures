@@ -73,12 +73,13 @@ func WithoutDequeueClearing() Option {
 // WithExactBatchCounts returns an Option that makes EnqueueBulk, EnqueueBurst, DequeueBulk, and
 // DequeueBurst return fresh counts on every call.
 //
-// By default a batch call checks its request against a cached copy of the other side's progress
-// and refreshes it only when the cache says the request does not fit. A call never fails or moves
-// fewer elements because of the cache, but its returned free or available count can be stale and
-// low, so counts must not drive blocking or wakeup decisions. A call that returned ErrFull or
-// ErrEmpty, a Burst that moved less than its clamped request, and a zero-length call always return
-// a fresh count under either setting.
+// By default a batch call checks its request against the other side's last discovered progress,
+// which is a cached copy or, in MPMCQueue, the shared frontier. It refreshes that progress only
+// when the request does not fit. A call never fails or moves fewer elements because of a stale
+// count, but its returned free or available count can be stale and low, so counts must not drive
+// blocking or wakeup decisions. A call that returned ErrFull or ErrEmpty, a Burst that moved less
+// than its clamped request, and a zero-length call always return a fresh count under either
+// setting.
 func WithExactBatchCounts() Option {
 	return func(cfg *config) {
 		cfg.exactBatchCounts = true

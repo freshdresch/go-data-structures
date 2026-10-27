@@ -139,7 +139,7 @@ type consTailLine struct {
 	consTail    atomic.Uint32
 }
 
-// Ring is a fixed-size, lock-free ring buffer modeled on DPDK's rte_ring. It works as a FIFO queue
+// Ring is a fixed-size, lockless ring buffer modeled on DPDK's rte_ring. It works as a FIFO queue
 // anywhere between single-producer single-consumer and multi-producer multi-consumer.
 //
 // Without options, a ring allows one producer and one consumer at a time. WithMultiProdEnqueue

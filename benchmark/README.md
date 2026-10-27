@@ -3,7 +3,7 @@
 The benchmark module compares this repository's data structures with other implementations.
 It is a separate Go module, so third-party benchmark dependencies stay outside the root module.
 The current comparison covers the four [`ring/dpdk` queues](../ring/dpdk/README.md) and
-[`frontier.MPSCQueue`](../ring/README.md#frontier).
+the three [`ring/frontier` queues](../ring/README.md#frontier).
 
 | Queue | Comparison report |
 |---|---|
@@ -12,8 +12,9 @@ The current comparison covers the four [`ring/dpdk` queues](../ring/dpdk/README.
 | MPSCQueue | [Multiple producers, single consumer](ring/mpsc.md) |
 | MPMCQueue | [Multiple producers, multiple consumers](ring/mpmc.md) |
 
-No third-party measurements for the current queue APIs are published yet. Crossbeam comparisons
-are future work. The reports will describe measured workloads and their limits when results exist.
+Each report lists the results of one 10-round campaign, including xsync and Workiva. The
+[ring queue guide](../ring/README.md#choosing-a-queue) discusses what they mean for choosing a
+queue. Crossbeam comparisons are future work.
 
 ## Run the comparison
 
@@ -46,7 +47,7 @@ tail synchronization on concurrent sides in MPSC, SPMC, and MPMC workloads.
 
 The `frontier` and `frontier-single` rows measure the `ring/frontier` queues the same way as
 `ring` and `ring-single`, burst calls at batches 1 and 32 and single-element calls. They run in
-the MPSC workload, the only topology `ring/frontier` implements so far.
+the MPSC, SPMC, and MPMC workloads, the topologies `ring/frontier` implements.
 
 The other rows are a buffered Go channel (`chan`), a slice guarded by `sync.Mutex` (`mutex`),
 `xsync.NewMPMCQueue` from `github.com/puzpuzpuz/xsync/v4` v4.5.0 (`xsync`), and
@@ -69,15 +70,16 @@ The root module's bulk benchmarks require all-or-nothing batches and measure ano
 
 A row measures the queue together with its callers' waiting behavior. The harness calls
 `runtime.Gosched` when a polling call moves nothing. Ordered ring publication also uses bounded
-spinning before yielding. RTS uses its configured head-to-tail distance wait. Channels park
-in the runtime. The mutex row waits for its lock and yields after full or empty calls.
-Workiva yields inside its library loop. xsync's try calls can return false after losing a
-compare-and-swap, so its harness also yields on contention.
+spinning before yielding. RTS uses its configured head-to-tail distance wait. Channels park in the
+runtime. The mutex row waits for its lock and yields after full or empty calls. Workiva yields
+inside its library loop. xsync's try calls can return false after losing a compare-and-swap,
+so its harness also yields on contention. Frontier SPMC and MPMC consumers, and frontier MPMC
+producers, call `runtime.Gosched` inside the queue after losing a compare-and-swap.
 
 xsync and Workiva use their MPMC algorithms in every topology. The ring selects an API for
 each topology. Batch-32 ring rows provide batching context because the other queues expose
-single-element operations. Compare `ring-single` with those rows when comparing single calls.
-The ring, xsync, Workiva, and mutex adapters clear dequeued slots.
+single-element operations. Compare `ring-single` with those rows when comparing single calls. The
+ring, frontier, xsync, Workiva, and mutex adapters clear dequeued slots.
 
 Workiva stores `interface{}` values. Its `int64` rows box nearly every value at about eight bytes
 each. Go rounds `allocs/op` down to a whole number per element, so read `B/op` as well.

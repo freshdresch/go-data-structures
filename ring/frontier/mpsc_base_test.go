@@ -234,13 +234,13 @@ func TestMPSCBaseStaleHeadAndCache(t *testing.T) {
 	queue := baseTestQueue[int](t, 8)
 	baseTestSeed(queue, 16)
 	queue.producerReservation.cachedConsumer.Store(8)
-	_, count, remaining, retry := queue.mpscAttemptProducer(15, 1, true, true)
-	if count != 0 || remaining != 8 || !retry {
-		t.Fatalf("stale count=%d remaining=%d retry=%t", count, remaining, retry)
+	_, count, _, retry := queue.mpscAttemptProducer(15, 1, true, true)
+	if count != 0 || !retry {
+		t.Fatalf("stale count=%d retry=%t", count, retry)
 	}
-	_, count, remaining, retry = queue.mpscAttemptProducer(15, 0, true, true)
-	if count != 0 || remaining != 8 || retry {
-		t.Fatal("zero stale snapshot")
+	_, count, _, retry = queue.mpscAttemptProducer(15, 0, true, true)
+	if count != 0 || !retry {
+		t.Fatalf("zero-length stale count=%d retry=%t", count, retry)
 	}
 	// A delayed refresh can move the shared cache backward within its documented lifetime.
 	queue.producerReservation.cachedConsumer.Store(12)

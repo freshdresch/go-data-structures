@@ -10,7 +10,7 @@ Import the packages you need. There is no Go package at the module root.
 |---|---|
 | [`buffer`](buffer/) | Reuse fixed-capacity storage and consume elements from either end. |
 | [`ring/dpdk`](ring/dpdk/README.md) | Transfer values or batches, modeled on DPDK's `rte_ring`. |
-| [`ring/frontier`](ring/README.md) | Transfer values or batches with non-waiting producers. |
+| [`ring/frontier`](ring/README.md) | Transfer values or batches with no wait for earlier callers. |
 | [`set`](set/) | Track membership and compute unions, intersections, and differences. |
 | [`xmaps`](xmaps/) | Collect keys or values, invert a map, or merge maps into a new result. |
 | [`xslices`](xslices/) | Remove duplicates, partition elements, and find or reverse elements. |
@@ -136,9 +136,18 @@ lifetimes and aliasing restrictions. After `Put`, stop using both the buffer and
 The [ring queues](ring/README.md) come in two packages with the same type names and methods.
 [`ring/dpdk`](ring/dpdk/README.md) is modeled on DPDK's `rte_ring`: a returned enqueue's values
 are visible to consumers, and DPDK's relaxed tail sync is available as an option.
-`ring/frontier` lets producers publish without waiting for one another, which is much faster
-for single-element transfers under contention, but a returned enqueue's values can stay invisible
-while an earlier producer is still copying. `ring/frontier` implements `MPSCQueue` so far.
+`ring/frontier` lets callers on a concurrent side publish without waiting for one another, which
+is much faster for single-element transfers under contention, but a returned call's effect can
+stay invisible to the other side while an earlier caller on its side is unfinished.
+`ring/frontier` implements `MPSCQueue`, `SPMCQueue`, and `MPMCQueue`.
+
+`ring/frontier` is the best all-round choice for a concurrent side. It moves a batch of 32 values
+at about 2 to 3 ns per value. Vyukov-style queues such as xsync's `MPMCQueue` are faster for
+single values, but they have no batch API. Choose `ring/dpdk` when a returned call must mean its
+effect is visible, when you need its tuning options, or for SPSC. The
+[ring queue guide](ring/README.md#choosing-a-queue) compares the queues with xsync, Workiva, and
+channels.
+
 Choose a type according to which sides your application serializes:
 
 | Type | Producers | Consumers |
@@ -155,12 +164,15 @@ Capacity must be a power of two from 1 through `2^30`, and every slot is usable.
 
 `Enqueue` and `Dequeue` transfer one value or report `ErrFull` and `ErrEmpty`, respectively.
 Bulk methods transfer a whole batch or nothing. Burst methods transfer a prefix and report how
-many values moved. Construction options control batch limits, slot clearing, counts, and
-publication behavior on concurrent sides.
+many values moved. Construction options control batch limits, slot clearing, and counts.
+`ring/dpdk` adds options for publication behavior on concurrent sides.
 
-A call can wait internally for another call's progress. The queues have no close, cancellation,
-or notification API. Read the [`ring/dpdk` guide](ring/dpdk/README.md) for ownership rules,
-waiting behavior, options, and the limits of count snapshots before using a queue concurrently.
+A `ring/dpdk` call on a concurrent side can wait internally for another call's progress. A
+`ring/frontier` call never waits for another caller, but a stalled caller can hold back the other
+side's view of later calls. The queues have no close, cancellation, or notification API. Read the
+[ring queue guide](ring/README.md) and the [`ring/dpdk` guide](ring/dpdk/README.md) for ownership
+rules, waiting behavior, options, and the limits of count snapshots before using a queue
+concurrently.
 
 ## Sets
 
@@ -234,6 +246,7 @@ bazelisk test //buffer/... //ring/... //set/... //xmaps/... //xslices/...
 
 The [benchmark methodology](benchmark/README.md) describes workloads and comparison limits.
 The [scripts guide](scripts/README.md) covers benchmark runners and their requirements.
-No third-party measurements or performance rankings for the current queue APIs are published yet.
+The [ring comparison reports](benchmark/README.md) list measurements against channels, a mutex
+queue, xsync, and Workiva.
 
 Licensed under the [Apache License 2.0](LICENSE).

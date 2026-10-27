@@ -4,8 +4,11 @@
 // It derives from crossbeam-rs/crossbeam crossbeam-channel/benchmarks/go.go at commit 099d046,
 // which is licensed under the MIT license. Copyright (c) 2019 The Crossbeam Project Developers.
 // The changes are: the topologies take the channel and the message count, the message count
-// and thread count come from the workloads package, the select variants are dropped, and the
-// program times one workload per run.
+// and thread count come from the workloads package, the select variants are dropped, the
+// program times one workload per run, the channel is built and warmed and runtime.GC runs before
+// the timer starts, the capacities are 1, 2^10, 2^18, and 2^23 in place of 0, 1, 5,000,000, and
+// unbounded, seconds print with six decimals, and bad arguments print usage to stderr and exit
+// with status 2.
 //
 // Usage: gochan <workload>
 package main
@@ -24,7 +27,7 @@ import (
 func main() { os.Exit(run(os.Args[1:], workloads.Messages, os.Stdout, os.Stderr)) }
 
 // run runs the workload that args name with messages in total and returns the exit status: 0
-// on success, and 2 for bad arguments or a bad message count.
+// on success, 1 if the topology is unknown, and 2 for bad arguments or a bad message count.
 func run(args []string, messages int, stdout, stderr io.Writer) int {
 	if len(args) != 1 {
 		printUsage(stderr)
@@ -50,8 +53,12 @@ func run(args []string, messages int, stdout, stderr io.Writer) int {
 	runtime.GC()
 
 	start := time.Now()
-	runTopology(workload.Topology, c, messages)
+	err := runTopology(workload.Topology, c, messages)
 	elapsed := time.Since(start)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		return 1
+	}
 	workloads.Print(stdout, workload.Name, "Go chan", elapsed)
 	return 0
 }
@@ -73,17 +80,24 @@ func warm(c chan uintptr, capacity int) {
 	}
 }
 
-// runTopology runs the topology on c with messages in total.
-func runTopology(topology workloads.Topology, c chan uintptr, messages int) {
+// runTopology runs the topology on c with messages in total. It returns an error if the
+// topology is unknown.
+func runTopology(topology workloads.Topology, c chan uintptr, messages int) error {
 	switch topology {
 	case workloads.Seq:
 		seq(c, messages)
+		return nil
 	case workloads.SPSC:
 		spsc(c, messages)
+		return nil
 	case workloads.MPSC:
 		mpsc(c, messages)
+		return nil
 	case workloads.MPMC:
 		mpmc(c, messages)
+		return nil
+	default:
+		return fmt.Errorf("gochan: unknown topology %v", topology)
 	}
 }
 

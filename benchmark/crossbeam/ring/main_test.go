@@ -46,8 +46,17 @@ func TestRunRejectsArguments(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			require.Equal(t, 2, run(args, 1_000, &stdout, &stderr))
 			require.Empty(t, stdout.String())
+			require.Contains(t, stderr.String(), "usage:")
 		})
 	}
+}
+
+func TestRunRejectsMessageCount(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	require.Equal(t, 2, run([]string{"dpdk", "bounded1024_mpmc"}, 0, &stdout, &stderr))
+	require.Empty(t, stdout.String())
+	require.Contains(t, stderr.String(), "not a positive multiple")
+	require.NotContains(t, stderr.String(), "usage:")
 }
 
 func TestRunAcceptsDPDKMPMCWithMPMC(t *testing.T) {

@@ -1,0 +1,36 @@
+# Derived from crossbeam-rs/crossbeam crossbeam-channel/benchmarks/Cargo.toml at commit 099d046,
+# which is licensed under the MIT license. Copyright (c) 2019 The Crossbeam Project Developers.
+# The changes are: the package is named crossbeam-bench, the crossbeam crates come from
+# crates.io in place of path dependencies, the dependencies of the other benchmarks are dropped,
+# a library target holds the program logic, the binaries are crossbeam-channel, arrayqueue, and
+# arrayqueue-backoff, and [lints] workspace = true is dropped.
+
+[package]
+name = "crossbeam-bench"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+crossbeam = "0.8"
+crossbeam-channel = "0.5"
+crossbeam-queue = "0.3"
+crossbeam-utils = "0.8"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "crossbeam-channel"
+path = "src/bin/crossbeam-channel.rs"
+doc = false
+
+[[bin]]
+name = "arrayqueue"
+path = "src/bin/arrayqueue.rs"
+doc = false
+
+[[bin]]
+name = "arrayqueue-backoff"
+path = "src/bin/arrayqueue-backoff.rs"
+doc = false

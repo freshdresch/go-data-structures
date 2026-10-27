@@ -300,6 +300,12 @@ func checkCompareCapacity(t *testing.T, name string, mode benchMode) int {
 		target = newTestRing[int64](t, mode, state, false, options...)
 	case "ring-single":
 		target = newTestRing[int64](t, mode, state, true)
+	case "frontier", "frontier-single":
+		created, err := newModeFrontier[int64](mode, state, name == "frontier-single")
+		if err != nil {
+			t.Fatal(err)
+		}
+		target = created
 	case "mutex":
 		target = newMutexQueue[int64]()
 	case "xsync":

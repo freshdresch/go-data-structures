@@ -9,6 +9,7 @@ import (
 	"github.com/puzpuzpuz/xsync/v4"
 
 	"github.com/freshdresch/go-data-structures/ring"
+	"github.com/freshdresch/go-data-structures/ring/frontier"
 )
 
 // queue is the shape the harness drives. Each method moves as many elements as it can right
@@ -263,6 +264,56 @@ func newModeRing[T any](
 		}
 		return &spscBurstQueue[T]{ring: created}, nil
 	}
+}
+
+// newModeFrontier builds the ring/frontier queue for mode before timing starts, wrapped like
+// newModeRing's adapters. It supports only the modes in frontierModes.
+func newModeFrontier[T any](mode benchMode, state *runState, single bool) (queue[T], error) {
+	if mode.producers <= 1 || mode.consumers != 1 {
+		return nil, fmt.Errorf("frontier has no queue for mode %s", mode.name)
+	}
+	created, err := frontier.NewMPSCQueue[T](ringCapacity)
+	if err != nil {
+		return nil, err
+	}
+	if single {
+		return &frontierMPSCSingleQueue[T]{
+			ring: created, ringSingleQueue: ringSingleQueue{state: state},
+		}, nil
+	}
+	return &frontierMPSCBurstQueue[T]{ring: created}, nil
+}
+
+type frontierMPSCBurstQueue[T any] struct {
+	ring *frontier.MPSCQueue[T]
+}
+
+func (q *frontierMPSCBurstQueue[T]) enqueue(items []T) int {
+	enqueued, _ := q.ring.EnqueueBurst(items)
+	return enqueued
+}
+
+func (q *frontierMPSCBurstQueue[T]) dequeue(dst []T) int {
+	dequeued, _ := q.ring.DequeueBurst(dst)
+	return dequeued
+}
+
+type frontierMPSCSingleQueue[T any] struct {
+	ringSingleQueue
+	ring *frontier.MPSCQueue[T]
+}
+
+func (q *frontierMPSCSingleQueue[T]) enqueue(items []T) int {
+	return q.movedOrFail(q.ring.Enqueue(items[0]), frontier.ErrFull)
+}
+
+func (q *frontierMPSCSingleQueue[T]) dequeue(dst []T) int {
+	elem, err := q.ring.Dequeue()
+	if q.movedOrFail(err, frontier.ErrEmpty) == 0 {
+		return 0
+	}
+	dst[0] = elem
+	return 1
 }
 
 // rtsMode returns a copy of mode whose multi sides use relaxed tail sync.

@@ -18,6 +18,9 @@ type compareRow struct {
 // multiModes are the modes with a multi side.
 var multiModes = []benchMode{mpscMode, spmcMode, mpmcMode}
 
+// frontierModes are the modes ring/frontier implements so far.
+var frontierModes = []benchMode{mpscMode}
+
 // compareRows lists every implementation, in the order the benchmark runs them. The benchmark,
 // the accounting test, and the runner script's table all follow it.
 var compareRows = []compareRow{
@@ -25,6 +28,8 @@ var compareRows = []compareRow{
 	{name: "ring-exact", modes: benchModes, batches: []int{1, 32}},
 	{name: "ring-single", modes: benchModes, batches: []int{1}},
 	{name: "ring-rts", modes: multiModes, batches: []int{1, 32}},
+	{name: "frontier", modes: frontierModes, batches: []int{1, 32}},
+	{name: "frontier-single", modes: frontierModes, batches: []int{1}},
 	{name: "chan", modes: benchModes, batches: []int{1}},
 	{name: "mutex", modes: benchModes, batches: []int{1}},
 	{name: "xsync", modes: benchModes, batches: []int{1}},
@@ -137,6 +142,31 @@ func compareImpls[T any, S sink[T]]() map[string]compareImpl[T, S] {
 			}),
 			checkCapacity: func(t *testing.T, mode benchMode) int {
 				return checkCompareCapacity(t, "ring-rts", mode)
+			},
+		},
+		"frontier": {
+			run: pollingRun[T, S](func(mode benchMode) (queue[T], *runState, error) {
+				created, err := newModeFrontier[T](mode, nil, false)
+				if err != nil {
+					return nil, nil, err
+				}
+				return created, newRunState(nil), nil
+			}),
+			checkCapacity: func(t *testing.T, mode benchMode) int {
+				return checkCompareCapacity(t, "frontier", mode)
+			},
+		},
+		"frontier-single": {
+			run: pollingRun[T, S](func(mode benchMode) (queue[T], *runState, error) {
+				state := newRunState(nil)
+				created, err := newModeFrontier[T](mode, state, true)
+				if err != nil {
+					return nil, nil, err
+				}
+				return created, state, nil
+			}),
+			checkCapacity: func(t *testing.T, mode benchMode) int {
+				return checkCompareCapacity(t, "frontier-single", mode)
 			},
 		},
 		"chan": {

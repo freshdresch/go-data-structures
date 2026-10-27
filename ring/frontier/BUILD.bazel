@@ -1,0 +1,39 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "frontier",
+    srcs = [
+        "doc.go",
+        "errors.go",
+        "mpsc.go",
+        "mpsc_base.go",
+        "options.go",
+    ],
+    importpath = "github.com/freshdresch/go-data-structures/ring/frontier",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//ring",
+        "//ring/internal/shared",
+    ],
+)
+
+go_test(
+    name = "frontier_test",
+    srcs = [
+        "mpsc_base_concurrency_test.go",
+        "mpsc_base_count_test.go",
+        "mpsc_base_model_test.go",
+        "mpsc_base_test.go",
+        "mpsc_concurrency_test.go",
+        "mpsc_count_test.go",
+        "mpsc_model_test.go",
+        "mpsc_test.go",
+    ],
+    # The source-ordering tests parse the implementation files.
+    data = [
+        "mpsc.go",
+        "mpsc_base.go",
+    ],
+    embed = [":frontier"],
+    visibility = ["//:__subpackages__"],
+)

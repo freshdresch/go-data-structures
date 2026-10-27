@@ -218,6 +218,16 @@ of its values until copying finishes. A large consumer batch delays reuse of its
 reading and optional clearing finish. On concurrent sides, earlier batches can also delay later
 reservations' publication or slot release.
 
+Clearing costs throughput when producers keep the ring full. The consumer then sets the transfer
+rate, and clearing adds a store to every consumed slot before its release. For
+`frontier.MPSCQueue`, four producers moving Bulk batches of 32 pointers through a full 1024-slot
+ring measured about 2.9 ns per element with clearing and 2.1 ns without it, which matches this
+package's ordered `MPSCQueue`. Pointer Burst batches of 32
+went from 2.0 to 1.6 ns, and int64 elements changed by about 5%. These were measured on an AMD
+Ryzen 7 5800X under WSL2 with Go 1.27.3. For pointer elements against a full ring, consider
+`WithoutDequeueClearing`. Its retention cost matters mostly once the queue drains, because
+producers overwrite drained slots almost immediately while the ring stays full.
+
 ### Publication and waiting
 
 Concurrent sides use ordered publication by default:

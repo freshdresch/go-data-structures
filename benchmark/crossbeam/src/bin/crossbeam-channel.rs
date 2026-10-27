@@ -11,5 +11,7 @@ fn main() {
         &args,
         MESSAGES,
         "Rust crossbeam-channel",
+        &mut std::io::stdout().lock(),
+        &mut std::io::stderr(),
     ));
 }

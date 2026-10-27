@@ -10,6 +10,7 @@
 
 //! The `crossbeam-channel` program: a bounded crossbeam-channel channel.
 
+use std::io::Write;
 use std::time::Instant;
 
 use ::crossbeam_channel::{bounded, Receiver, Sender};
@@ -113,16 +114,23 @@ fn warm(tx: &Sender<Message>, rx: &Receiver<Message>, capacity: usize) {
     }
 }
 
-/// Runs the workload that `args` name with `messages` in total, prints one result line labeled
-/// `kind`, and returns the exit status: 0 on success, and 2 for bad arguments or a bad message
-/// count.
-pub fn main(args: &[String], messages: usize, kind: &str) -> i32 {
-    let Ok((name, capacity, topology)) = parse_args(args) else {
-        print_usage(kind);
+/// Runs the workload that `args` name with `messages` in total, writes one result line labeled
+/// `kind` to `stdout`, and returns the exit status: 0 on success, and 2 for bad arguments or a
+/// bad message count, which it reports on `stderr`.
+pub fn main(
+    args: &[String],
+    messages: usize,
+    kind: &str,
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+) -> i32 {
+    let Some((name, capacity, topology)) = parse_args(args) else {
+        print_usage(stderr, kind);
         return 2;
     };
     if let Err(line) = check_messages(kind, messages) {
-        eprintln!("{line}");
+        // A program that cannot write to stderr has nowhere to report that.
+        let _ = writeln!(stderr, "{line}");
         return 2;
     }
 
@@ -132,7 +140,7 @@ pub fn main(args: &[String], messages: usize, kind: &str) -> i32 {
     let start = Instant::now();
     run_topology(&tx, &rx, topology, messages);
     let elapsed = start.elapsed();
-    print(&name, kind, elapsed);
+    print(stdout, &name, kind, elapsed);
 
     // Freeing a large channel takes milliseconds, so it happens after the timer stops.
     drop((tx, rx));

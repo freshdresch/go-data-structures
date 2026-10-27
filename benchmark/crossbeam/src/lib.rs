@@ -2,6 +2,7 @@
 //! topologies, argument handling, and the output format. Each program is a thin binary that
 //! calls the `main` of one module here.
 
+use std::io::Write;
 use std::time::Duration;
 
 use message::Message;
@@ -23,7 +24,7 @@ pub(crate) const RECORDING: bool = cfg!(test);
 
 /// How many threads send and receive, and whether sending and receiving overlap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Topology {
+pub(crate) enum Topology {
     /// Sends every message and then receives them all, on one thread.
     Seq,
     /// One sender and one receiver.
@@ -71,7 +72,7 @@ fn workloads() -> Vec<(String, usize, Topology)> {
 
 /// Returns the capacity and topology of the workload with the given name, or `None` if it is
 /// not one of the 13 workloads.
-pub fn lookup(name: &str) -> Option<(usize, Topology)> {
+pub(crate) fn lookup(name: &str) -> Option<(usize, Topology)> {
     workloads()
         .into_iter()
         .find(|(workload, _, _)| workload == name)
@@ -93,19 +94,20 @@ fn result_line(name: &str, kind: &str, elapsed: Duration) -> String {
     format!("{:25} {:15} {:7.6} sec", name, kind, elapsed.as_secs_f64())
 }
 
-/// Prints one result line to stdout.
-pub(crate) fn print(name: &str, kind: &str, elapsed: Duration) {
-    println!("{}", result_line(name, kind, elapsed));
+/// Writes one result line to `stdout`. A program that cannot write its output has nowhere to
+/// report that, so a write error is discarded.
+pub(crate) fn print(stdout: &mut impl Write, name: &str, kind: &str, elapsed: Duration) {
+    let _ = writeln!(stdout, "{}", result_line(name, kind, elapsed));
 }
 
-/// Returns the workload name, capacity, and topology that `args` name. `args` must hold exactly
-/// one workload name that `lookup` accepts.
-pub(crate) fn parse_args(args: &[String]) -> Result<(String, usize, Topology), ()> {
+/// Returns the workload name, capacity, and topology, or `None` unless `args` is exactly one
+/// name that `lookup` accepts.
+pub(crate) fn parse_args(args: &[String]) -> Option<(String, usize, Topology)> {
     let [name] = args else {
-        return Err(());
+        return None;
     };
-    let (capacity, topology) = lookup(name).ok_or(())?;
-    Ok((name.clone(), capacity, topology))
+    let (capacity, topology) = lookup(name)?;
+    Some((name.clone(), capacity, topology))
 }
 
 /// Returns the program name in `kind`, such as `arrayqueue` for `Rust arrayqueue`.
@@ -113,11 +115,12 @@ fn program_name(kind: &str) -> &str {
     kind.strip_prefix("Rust ").unwrap_or(kind)
 }
 
-/// Prints the usage text of the program that `kind` names to stderr.
-pub(crate) fn print_usage(kind: &str) {
+/// Writes the usage text of the program that `kind` names to `stderr`. A program that cannot
+/// write to stderr has nowhere to report that, so write errors are discarded.
+pub(crate) fn print_usage(stderr: &mut impl Write, kind: &str) {
     let names: Vec<String> = workloads().into_iter().map(|(name, _, _)| name).collect();
-    eprintln!("usage: {} <workload>", program_name(kind));
-    eprintln!("workloads: {}", names.join(", "));
+    let _ = writeln!(stderr, "usage: {} <workload>", program_name(kind));
+    let _ = writeln!(stderr, "workloads: {}", names.join(", "));
 }
 
 /// Returns the one-line error that the program `kind` names prints if `messages` is not a
@@ -358,22 +361,108 @@ mod tests {
             .collect()
     }
 
+    /// Asserts that a run wrote nothing to `stderr` and exactly one result line for `name` and
+    /// `kind` to `stdout`.
+    fn assert_result_line(stdout: Vec<u8>, stderr: Vec<u8>, name: &str, kind: &str) {
+        let stderr = String::from_utf8(stderr).unwrap();
+        assert_eq!(stderr, "", "{kind} {name}");
+        let stdout = String::from_utf8(stdout).unwrap();
+        assert!(
+            is_result_line(&stdout, name, kind),
+            "{kind} {name}: {stdout:?}"
+        );
+    }
+
+    /// Returns whether `stdout` is exactly `<name> +<kind> +<digits>.<six digits> sec\n`.
+    fn is_result_line(stdout: &str, name: &str, kind: &str) -> bool {
+        let Some(line) = stdout.strip_suffix(" sec\n") else {
+            return false;
+        };
+        let Some((labels, seconds)) = line.rsplit_once(' ') else {
+            return false;
+        };
+        let Some(padded_kind) = labels.strip_prefix(name) else {
+            return false;
+        };
+        padded_kind.starts_with(' ') && padded_kind.trim_matches(' ') == kind && is_seconds(seconds)
+    }
+
+    /// Returns whether `seconds` is one or more digits, a point, and six digits.
+    fn is_seconds(seconds: &str) -> bool {
+        let Some((whole, fraction)) = seconds.split_once('.') else {
+            return false;
+        };
+        let all_digits = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
+        !whole.is_empty() && all_digits(whole) && fraction.len() == 6 && all_digits(fraction)
+    }
+
+    /// Runs `crossbeam_channel::main` and returns its exit status, stdout, and stderr.
+    fn run_channel(args: &[String], messages: usize) -> (i32, Vec<u8>, Vec<u8>) {
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        let status = crossbeam_channel::main(
+            args,
+            messages,
+            "Rust crossbeam-channel",
+            &mut stdout,
+            &mut stderr,
+        );
+        (status, stdout, stderr)
+    }
+
+    /// Runs `arrayqueue::main` waiting with `W` and returns its exit status, stdout, and stderr.
+    fn run_arrayqueue<W: Wait>(
+        args: &[String],
+        messages: usize,
+        kind: &str,
+    ) -> (i32, Vec<u8>, Vec<u8>) {
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        let status = arrayqueue::main::<W>(args, messages, kind, &mut stdout, &mut stderr);
+        (status, stdout, stderr)
+    }
+
     #[test]
     fn smoke() {
         let names = smoke_workloads();
         assert_eq!(names.len(), 6);
         for name in names {
-            let status = within({
+            let (status, stdout, stderr) = within({
                 let name = name.clone();
-                move || crossbeam_channel::main(&[name], 1_000, "Rust crossbeam-channel")
+                move || run_channel(&[name], 1_000)
             });
             assert_eq!(status, 0, "crossbeam-channel {name}");
-            let status = within({
+            assert_result_line(stdout, stderr, &name, "Rust crossbeam-channel");
+            let (status, stdout, stderr) = within({
                 let name = name.clone();
-                move || arrayqueue::main::<Yield>(&[name], 1_000, "Rust arrayqueue")
+                move || run_arrayqueue::<Yield>(&[name], 1_000, "Rust arrayqueue")
             });
             assert_eq!(status, 0, "arrayqueue {name}");
+            assert_result_line(stdout, stderr, &name, "Rust arrayqueue");
+            let (status, stdout, stderr) = within({
+                let name = name.clone();
+                move || run_arrayqueue::<Snooze>(&[name], 1_000, "Rust arrayqueue-backoff")
+            });
+            assert_eq!(status, 0, "arrayqueue-backoff {name}");
+            assert_result_line(stdout, stderr, &name, "Rust arrayqueue-backoff");
         }
+    }
+
+    /// Asserts that a run rejected its arguments: exit status 2, nothing on stdout, and the usage
+    /// text on stderr.
+    fn assert_usage((status, stdout, stderr): (i32, Vec<u8>, Vec<u8>), args: &[String]) {
+        assert_eq!(status, 2, "{args:?}");
+        assert!(stdout.is_empty(), "{args:?}");
+        let stderr = String::from_utf8(stderr).unwrap();
+        assert!(stderr.contains("usage:"), "{args:?}: {stderr:?}");
+    }
+
+    /// Asserts that a run rejected its message count: exit status 2, nothing on stdout, and the
+    /// message-count error on stderr without the usage text.
+    fn assert_message_count_error((status, stdout, stderr): (i32, Vec<u8>, Vec<u8>)) {
+        assert_eq!(status, 2);
+        assert!(stdout.is_empty());
+        let stderr = String::from_utf8(stderr).unwrap();
+        assert!(stderr.contains("not a positive multiple"), "{stderr:?}");
+        assert!(!stderr.contains("usage:"), "{stderr:?}");
     }
 
     #[test]
@@ -387,25 +476,16 @@ mod tests {
         ];
         for case in cases {
             let args: Vec<String> = case.iter().map(|arg| arg.to_string()).collect();
-            assert_eq!(
-                crossbeam_channel::main(&args, 1_000, "Rust crossbeam-channel"),
-                2
-            );
-            assert_eq!(
-                arrayqueue::main::<Yield>(&args, 1_000, "Rust arrayqueue"),
-                2
+            assert_usage(run_channel(&args, 1_000), &args);
+            assert_usage(
+                run_arrayqueue::<Yield>(&args, 1_000, "Rust arrayqueue"),
+                &args,
             );
         }
         let args = ["bounded1024_mpmc".to_string()];
         for messages in [0, 1, THREADS + 1] {
-            assert_eq!(
-                crossbeam_channel::main(&args, messages, "Rust crossbeam-channel"),
-                2
-            );
-            assert_eq!(
-                arrayqueue::main::<Yield>(&args, messages, "Rust arrayqueue"),
-                2
-            );
+            assert_message_count_error(run_channel(&args, messages));
+            assert_message_count_error(run_arrayqueue::<Yield>(&args, messages, "Rust arrayqueue"));
         }
     }
 

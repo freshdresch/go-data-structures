@@ -13,6 +13,7 @@
 //! The `arrayqueue` and `arrayqueue-backoff` programs: crossbeam's `ArrayQueue`, polled with
 //! one of two waiting strategies.
 
+use std::io::Write;
 use std::thread;
 use std::time::Instant;
 
@@ -160,16 +161,23 @@ pub(crate) fn warm<W: Wait>(q: &ArrayQueue<Message>) {
     recv::<W>(q, q.capacity(), &mut discard);
 }
 
-/// Runs the workload that `args` name with `messages` in total, waiting with `W`, prints one
-/// result line labeled `kind`, and returns the exit status: 0 on success, and 2 for bad
-/// arguments or a bad message count.
-pub fn main<W: Wait>(args: &[String], messages: usize, kind: &str) -> i32 {
-    let Ok((name, capacity, topology)) = parse_args(args) else {
-        print_usage(kind);
+/// Runs the workload that `args` name with `messages` in total, waiting with `W`, writes one
+/// result line labeled `kind` to `stdout`, and returns the exit status: 0 on success, and 2 for
+/// bad arguments or a bad message count, which it reports on `stderr`.
+pub fn main<W: Wait>(
+    args: &[String],
+    messages: usize,
+    kind: &str,
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+) -> i32 {
+    let Some((name, capacity, topology)) = parse_args(args) else {
+        print_usage(stderr, kind);
         return 2;
     };
     if let Err(line) = check_messages(kind, messages) {
-        eprintln!("{line}");
+        // A program that cannot write to stderr has nowhere to report that.
+        let _ = writeln!(stderr, "{line}");
         return 2;
     }
 
@@ -179,7 +187,7 @@ pub fn main<W: Wait>(args: &[String], messages: usize, kind: &str) -> i32 {
     let start = Instant::now();
     let received = run_topology::<W>(&q, topology, messages);
     let elapsed = start.elapsed();
-    print(&name, kind, elapsed);
+    print(stdout, &name, kind, elapsed);
 
     // Freeing a large queue takes milliseconds, so it happens after the timer stops.
     drop(received);

@@ -14,5 +14,7 @@ fn main() {
         &args,
         MESSAGES,
         "Rust arrayqueue-backoff",
+        &mut std::io::stdout().lock(),
+        &mut std::io::stderr(),
     ));
 }

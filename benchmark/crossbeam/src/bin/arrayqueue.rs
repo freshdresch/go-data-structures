@@ -14,5 +14,7 @@ fn main() {
         &args,
         MESSAGES,
         "Rust arrayqueue",
+        &mut std::io::stdout().lock(),
+        &mut std::io::stderr(),
     ));
 }

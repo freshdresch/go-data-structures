@@ -19,6 +19,12 @@ import (
 const schemaVersion = 1
 const ringPackage = "github.com/freshdresch/go-data-structures/ring"
 
+// isRingPackage reports whether importPath holds queue implementation code: the ring package of
+// older commits, or any package under it, such as ring/dpdk, ring/frontier, and ring/internal.
+func isRingPackage(importPath string) bool {
+	return importPath == ringPackage || strings.HasPrefix(importPath, ringPackage+"/")
+}
+
 var environmentKeys = []string{
 	"GOOS", "GOARCH", "GOAMD64", "GOARM64", "CGO_ENABLED", "CC", "CXX", "GOEXPERIMENT",
 	"GOTOOLCHAIN", "GOROOT", "GOWORK", "GOFLAGS",
@@ -136,7 +142,7 @@ func validateRequest(request snapshotRequest) error {
 		request.Variant == "" || request.RunnerKind == "" || len(request.RunnerBundle) == 0 {
 		return fmt.Errorf("missing required snapshot identity")
 	}
-	if request.PackageTarget != "./ring" && request.PackageTarget != "." {
+	if !slices.Contains([]string{"./ring", "./ring/dpdk", "."}, request.PackageTarget) {
 		return fmt.Errorf("unsupported package target %q", request.PackageTarget)
 	}
 	if !within(request.SourceRoot, request.PackageDir) {
@@ -379,7 +385,7 @@ func recordsFromPackages(
 				}
 				class := "measurement"
 				canonicalPackage := strings.Split(entry.ImportPath, " [")[0]
-				if canonicalPackage == ringPackage && !strings.HasSuffix(file, "_test.go") {
+				if isRingPackage(canonicalPackage) && !strings.HasSuffix(file, "_test.go") {
 					class = "implementation"
 				}
 				if group == len(selected)-1 {

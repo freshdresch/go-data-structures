@@ -1,3 +1,6 @@
+// Package ring defines the errors shared by the queue packages ring/dpdk and ring/frontier. Each
+// package re-exports these values under the same names, so errors.Is(err, ring.ErrFull) matches
+// dpdk.ErrFull and frontier.ErrFull alike.
 package ring
 
 import "errors"
@@ -24,26 +27,8 @@ var ErrExceedsCapacity = errors.New("ring: requested count exceeds the ring's ca
 // count.
 var ErrInvalidMaxBatch = errors.New("ring: max batch must be between 1 and the ring's count")
 
-// ErrInvalidSpinsBeforeYield is returned by constructors, wrapped, when the bound set with
-// WithSpinsBeforeYield is below 0 or above math.MaxInt32.
-var ErrInvalidSpinsBeforeYield = errors.New(
-	"ring: spins before yield must be between 0 and math.MaxInt32",
-)
-
 // ErrExceedsMaxBatch is returned wrapped by EnqueueBulk when len(items) exceeds the ring's maximum
 // enqueue batch size, and by DequeueBulk when len(dst) exceeds its maximum dequeue batch size,
 // while still fitting the capacity. Such a request can never succeed, so retrying it is
 // pointless.
 var ErrExceedsMaxBatch = errors.New("ring: requested count exceeds the ring's maximum batch size")
-
-// ErrInvalidMaxHeadTailDistance is wrapped when an explicit distance is negative or exceeds
-// math.MaxUint32. Inputs must also be representable as int on the target platform.
-var ErrInvalidMaxHeadTailDistance = errors.New("ring: invalid maximum head-to-tail distance")
-
-// ErrHeadTailDistanceRequiresRelaxed is wrapped when an explicit distance targets a side
-// whose final mode is not relaxed tail sync.
-var ErrHeadTailDistanceRequiresRelaxed = errors.New("ring: head-to-tail distance requires RTS")
-
-// ErrUnsupportedOption is wrapped when a final option conflicts with a queue's fixed topology,
-// or when SPSCQueue receives an explicit spin option.
-var ErrUnsupportedOption = errors.New("ring: option unsupported by queue topology")

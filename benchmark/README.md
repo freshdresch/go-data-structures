@@ -2,7 +2,8 @@
 
 The benchmark module compares this repository's data structures with other implementations.
 It is a separate Go module, so third-party benchmark dependencies stay outside the root module.
-The current comparison covers the four [ring queues](../ring/README.md).
+The current comparison covers the four [`ring/dpdk` queues](../ring/dpdk/README.md) and
+[`frontier.MPSCQueue`](../ring/README.md#frontier).
 
 | Queue | Comparison report |
 |---|---|
@@ -37,11 +38,11 @@ between macOS and Linux.
 
 ## Implementations and workloads
 
-The `ring` row selects `SPSCQueue`, `MPSCQueue`, `SPMCQueue`, or `MPMCQueue` for its topology.
-It calls `EnqueueBurst` and `DequeueBurst` with batches of 1 and 32. The `ring-exact` row adds
-`WithExactBatchCounts`. The `ring-single` row calls `Enqueue` and `Dequeue` and is the
-single-element comparison with the other queues. The `ring-rts` row selects relaxed tail
-synchronization on concurrent sides in MPSC, SPMC, and MPMC workloads.
+The `ring` row selects the `ring/dpdk` `SPSCQueue`, `MPSCQueue`, `SPMCQueue`, or `MPMCQueue` for
+its topology. It calls `EnqueueBurst` and `DequeueBurst` with batches of 1 and 32. The
+`ring-exact` row adds `WithExactBatchCounts`. The `ring-single` row calls `Enqueue` and `Dequeue`
+and is the single-element comparison with the other queues. The `ring-rts` row selects relaxed
+tail synchronization on concurrent sides in MPSC, SPMC, and MPMC workloads.
 
 The `frontier` and `frontier-single` rows measure the `ring/frontier` queues the same way as
 `ring` and `ring-single`, burst calls at batches 1 and 32 and single-element calls. They run in

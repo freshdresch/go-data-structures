@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/freshdresch/go-data-structures/ring"
+	"github.com/freshdresch/go-data-structures/ring/dpdk"
 )
 
 // abortTotal is how many elements each abort test sends, far more than any implementation holds,
@@ -248,10 +248,10 @@ func waitForGoroutines(t *testing.T, limit int) {
 }
 
 func TestRingAdapterOutcomes(t *testing.T) {
-	for _, expected := range []error{ring.ErrFull, ring.ErrEmpty} {
-		opposite := ring.ErrFull
+	for _, expected := range []error{dpdk.ErrFull, dpdk.ErrEmpty} {
+		opposite := dpdk.ErrFull
 		if expected == opposite {
-			opposite = ring.ErrEmpty
+			opposite = dpdk.ErrEmpty
 		}
 		for _, original := range []error{nil, expected, opposite, errors.New("unexpected"),
 			fmt.Errorf("wrapped: %w", expected)} {
@@ -290,9 +290,9 @@ func checkCompareCapacity(t *testing.T, name string, mode benchMode) int {
 	var target queue[int64]
 	switch name {
 	case "ring", "ring-exact", "ring-rts":
-		var options []ring.Option
+		var options []dpdk.Option
 		if name == "ring-exact" {
-			options = append(options, ring.WithExactBatchCounts())
+			options = append(options, dpdk.WithExactBatchCounts())
 		}
 		if name == "ring-rts" {
 			mode = rtsMode(mode)

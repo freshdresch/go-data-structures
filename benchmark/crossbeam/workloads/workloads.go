@@ -12,6 +12,10 @@ import (
 // Threads is the number of senders in the mpsc and mpmc topologies, and of receivers in mpmc.
 const Threads = 4
 
+// Messages is the number of messages in a timed run, upstream's MESSAGES. Every Go program and
+// the wrapper's conversion to nanoseconds per message use it.
+const Messages = 5_000_000
+
 // Topology is how many goroutines send and receive, and whether sending and receiving overlap.
 type Topology int
 
@@ -43,9 +47,13 @@ func (t Topology) String() string {
 
 // Workload is one named benchmark: a queue capacity and a topology.
 type Workload struct {
-	Name     string
-	Prefix   string
+	// Name is the full workload name, such as bounded1024_mpsc.
+	Name string
+	// Prefix is the capacity part of Name, such as bounded1024.
+	Prefix string
+	// Capacity is the number of slots the queue gets.
 	Capacity int
+	// Topology is the part of Name after the prefix.
 	Topology Topology
 }
 
@@ -74,6 +82,9 @@ func newWorkload(p prefix, topology Topology) Workload {
 
 // message returns the i-th value that sender sends. Recording tags it with the sender, so the
 // tests can check each sender's order. Timed builds send i, as upstream does.
+//
+// The recording encoding puts the sender in bits 32 and up of a uintptr, so it assumes a 64-bit
+// platform, which the benchmark requires.
 func message(sender, i int) uintptr {
 	if recording {
 		return uintptr(sender)<<32 | uintptr(i)
@@ -116,7 +127,9 @@ type SendFunc func(sender, count int) error
 type RecvFunc func(count int, got *[]uintptr) error
 
 // Run runs topology with messages in total and returns what each receiver got. The slices are
-// empty unless recording is on. Messages must be a positive multiple of Threads.
+// empty unless recording is on. Messages must be a positive multiple of Threads. For Seq,
+// messages must not exceed the queue's capacity. One goroutine sends everything before
+// receiving, so a larger count blocks forever.
 //
 // Run joins every goroutine it starts and returns the first error, senders before receivers.
 // An error on one side does not stop the other, so a failing queue can leave Run waiting.
@@ -138,8 +151,17 @@ func Run(topology Topology, send SendFunc, recv RecvFunc, messages int) ([][]uin
 type Queue struct {
 	Value    any // the queue itself, so tests can check its type
 	Capacity int
-	Send     SendFunc
-	Recv     RecvFunc
+	// Send may run on several goroutines at once only when the topology has several senders.
+	// The queue built for a topology supports only that many senders.
+	Send SendFunc
+	// Recv may run on several goroutines at once only when the topology has several receivers.
+	// The queue built for a topology supports only that many receivers.
+	Recv RecvFunc
+}
+
+// Families returns the queue families Build accepts, in a new slice on every call.
+func Families() []string {
+	return []string{"dpdk", "frontier", "dpdk-mpmc", "frontier-mpmc"}
 }
 
 // ErrUnsupported reports a family and topology pair that has no queue.

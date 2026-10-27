@@ -33,7 +33,8 @@ func runSeq(send SendFunc, recv RecvFunc, messages int) ([][]uintptr, error) {
 	return got, nil
 }
 
-// runConcurrent splits messages evenly over senders sender goroutines and receivers receivers.
+// runConcurrent starts senders sender goroutines and receivers receiver goroutines and splits
+// the messages evenly between them.
 // A single receiver runs on the calling goroutine, as upstream's does.
 func runConcurrent(
 	send SendFunc,

@@ -13,8 +13,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var families = []string{"dpdk", "frontier", "dpdk-mpmc", "frontier-mpmc"}
-
 var topologies = []Topology{Seq, SPSC, MPSC, MPMC}
 
 // expectedType returns the %T of the queue family uses for topology, or "" if it has none.
@@ -80,7 +78,7 @@ func TestAllNames(t *testing.T) {
 }
 
 func TestBuildCapacityAndType(t *testing.T) {
-	for _, family := range families {
+	for _, family := range Families() {
 		for _, w := range All() {
 			t.Run(family+"/"+w.Name, func(t *testing.T) {
 				queue, err := Build(family, w)
@@ -100,9 +98,18 @@ func TestBuildCapacityAndType(t *testing.T) {
 	}
 }
 
+func TestBuildEveryFamily(t *testing.T) {
+	w, ok := Lookup("bounded1024_mpsc")
+	require.True(t, ok)
+	for _, family := range Families() {
+		_, err := Build(family, w)
+		require.NoError(t, err, family)
+	}
+}
+
 func TestDelivery(t *testing.T) {
 	const messages = 100_000
-	for _, family := range families {
+	for _, family := range Families() {
 		for _, topology := range topologies {
 			// seq sends everything before receiving, so it runs only where every message fits.
 			capacities := []int{1, 1 << 10, 1 << 18}

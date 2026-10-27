@@ -27,7 +27,7 @@ func build(family string, w Workload) (Queue, error) {
 	if err != nil {
 		return Queue{}, err
 	}
-	queue := Queue{Capacity: w.Capacity}
+	var queue Queue
 	switch chosen {
 	case dpdkSPSC:
 		q, err := dpdk.NewSPSCQueue[uintptr](w.Capacity)
@@ -35,6 +35,7 @@ func build(family string, w Workload) (Queue, error) {
 			return Queue{}, constructorError(family, w, err)
 		}
 		queue.Value = q
+		queue.Capacity = q.Capacity()
 		queue.Send = func(sender, count int) error { return sendDPDKSPSC(q, sender, count) }
 		queue.Recv = func(count int, got *[]uintptr) error { return recvDPDKSPSC(q, count, got) }
 	case dpdkMPSC:
@@ -43,6 +44,7 @@ func build(family string, w Workload) (Queue, error) {
 			return Queue{}, constructorError(family, w, err)
 		}
 		queue.Value = q
+		queue.Capacity = q.Capacity()
 		queue.Send = func(sender, count int) error { return sendDPDKMPSC(q, sender, count) }
 		queue.Recv = func(count int, got *[]uintptr) error { return recvDPDKMPSC(q, count, got) }
 	case dpdkMPMC:
@@ -51,6 +53,7 @@ func build(family string, w Workload) (Queue, error) {
 			return Queue{}, constructorError(family, w, err)
 		}
 		queue.Value = q
+		queue.Capacity = q.Capacity()
 		queue.Send = func(sender, count int) error { return sendDPDKMPMC(q, sender, count) }
 		queue.Recv = func(count int, got *[]uintptr) error { return recvDPDKMPMC(q, count, got) }
 	case frontierMPSC:
@@ -59,6 +62,7 @@ func build(family string, w Workload) (Queue, error) {
 			return Queue{}, constructorError(family, w, err)
 		}
 		queue.Value = q
+		queue.Capacity = q.Capacity()
 		queue.Send = func(sender, count int) error { return sendFrontierMPSC(q, sender, count) }
 		queue.Recv = func(count int, got *[]uintptr) error {
 			return recvFrontierMPSC(q, count, got)
@@ -69,6 +73,7 @@ func build(family string, w Workload) (Queue, error) {
 			return Queue{}, constructorError(family, w, err)
 		}
 		queue.Value = q
+		queue.Capacity = q.Capacity()
 		queue.Send = func(sender, count int) error { return sendFrontierMPMC(q, sender, count) }
 		queue.Recv = func(count int, got *[]uintptr) error {
 			return recvFrontierMPMC(q, count, got)

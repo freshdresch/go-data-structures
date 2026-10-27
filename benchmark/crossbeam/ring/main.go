@@ -17,22 +17,28 @@ import (
 	"github.com/freshdresch/go-data-structures/benchmark/crossbeam/workloads"
 )
 
-// families are the queue families workloads.Build accepts.
-var families = []string{"dpdk", "frontier", "dpdk-mpmc", "frontier-mpmc"}
-
-func main() { os.Exit(run(os.Args[1:], 5_000_000, os.Stdout, os.Stderr)) }
+func main() { os.Exit(run(os.Args[1:], workloads.Messages, os.Stdout, os.Stderr)) }
 
 // run runs the workload that args name with messages in total and returns the exit status: 0
-// on success, 1 if the queue fails, and 2 for bad arguments.
+// on success, 1 if the queue fails, and 2 for bad arguments or a bad message count.
 func run(args []string, messages int, stdout, stderr io.Writer) int {
-	if len(args) != 2 || !slices.Contains(families, args[0]) {
+	if len(args) != 2 || !slices.Contains(workloads.Families(), args[0]) {
 		printUsage(stderr)
 		return 2
 	}
 	family := args[0]
 	workload, ok := workloads.Lookup(args[1])
-	if !ok || messages <= 0 || messages%workloads.Threads != 0 {
+	if !ok {
 		printUsage(stderr)
+		return 2
+	}
+	if messages <= 0 || messages%workloads.Threads != 0 {
+		_, _ = fmt.Fprintf(
+			stderr,
+			"ring: %d messages is not a positive multiple of %d\n",
+			messages,
+			workloads.Threads,
+		)
 		return 2
 	}
 
@@ -71,6 +77,6 @@ func printUsage(w io.Writer) {
 		names = append(names, workload.Name)
 	}
 	_, _ = fmt.Fprintln(w, "usage: ring <family> <workload>")
-	_, _ = fmt.Fprintln(w, "families:", strings.Join(families, ", "))
+	_, _ = fmt.Fprintln(w, "families:", strings.Join(workloads.Families(), ", "))
 	_, _ = fmt.Fprintln(w, "workloads:", strings.Join(names, ", "))
 }

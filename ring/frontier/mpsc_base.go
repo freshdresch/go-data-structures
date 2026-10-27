@@ -320,8 +320,10 @@ func (r *mpscBase[T]) mpscAttemptProducer(
 		released = mpscReleased(r.consumerPublished.Load())
 	}
 	free := capacity + released - headLow
+	// A head loaded before other producers advanced it past a lap of reuse sees more than a
+	// capacity of room, so it reloads, even for a zero-length request.
 	if free > capacity {
-		return head, 0, capacity, requested != 0
+		return head, 0, 0, true
 	}
 	if fixed && free < requested {
 		return head, 0, free, false

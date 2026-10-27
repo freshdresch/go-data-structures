@@ -327,7 +327,8 @@ avoiding the ordered wait for earlier reservations. Measure that tradeoff for yo
 
 Comparison reports cover [SPSCQueue](../../benchmark/ring/spsc.md),
 [SPMCQueue](../../benchmark/ring/spmc.md), [MPSCQueue](../../benchmark/ring/mpsc.md), and
-[MPMCQueue](../../benchmark/ring/mpmc.md). They currently publish no third-party measurements or
-performance ranking. The [methodology](../../benchmark/README.md) describes workloads, waiting
-behavior, timing boundaries, and measurement limits. Compare results from the same campaign
+[MPMCQueue](../../benchmark/ring/mpmc.md), including xsync and Workiva. The
+[ring queue guide](../README.md#choosing-a-queue) discusses when to choose `ring/dpdk`. The
+[methodology](../../benchmark/README.md) describes workloads, waiting behavior, timing boundaries,
+and measurement limits. Compare results from the same campaign
 and record the machine, toolchain, batch sizes, and configuration.

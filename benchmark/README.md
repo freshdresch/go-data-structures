@@ -12,8 +12,9 @@ the three [`ring/frontier` queues](../ring/README.md#frontier).
 | MPSCQueue | [Multiple producers, single consumer](ring/mpsc.md) |
 | MPMCQueue | [Multiple producers, multiple consumers](ring/mpmc.md) |
 
-No third-party measurements for the current queue APIs are published yet. Crossbeam comparisons
-are future work. The reports will describe measured workloads and their limits when results exist.
+Each report lists the results of one 10-round campaign, including xsync and Workiva. The
+[ring queue guide](../ring/README.md#choosing-a-queue) discusses what they mean for choosing a
+queue. Crossbeam comparisons are future work.
 
 ## Run the comparison
 

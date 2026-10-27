@@ -569,10 +569,10 @@ fi
 metrics='.unit:(sec/op OR B/s OR allocs/op OR B/op)'
 status="rounds complete, comparison failed"
 (cd "$results" && benchstat -filter "$metrics" \
-	-col '/impl@(ring ring-exact ring-single ring-rts chan mutex xsync workiva)' results.txt) \
+	-col '/impl@(ring ring-exact ring-single ring-rts frontier frontier-single chan mutex xsync workiva)' results.txt) \
 	>"$results/comparison.txt"
 (cd "$results" && benchstat -filter "$metrics" \
-	-col '/impl@(ring-single ring ring-exact ring-rts chan mutex xsync workiva)' results.txt) \
+	-col '/impl@(ring-single ring ring-exact ring-rts frontier frontier-single chan mutex xsync workiva)' results.txt) \
 	>"$results/comparison-single.txt"
 cat "$results/comparison.txt"
 echo

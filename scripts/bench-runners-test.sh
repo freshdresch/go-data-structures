@@ -473,7 +473,12 @@ timeout_elapsed=$((SECONDS - timeout_start))
 	echo "invocation-timeout: took ${timeout_elapsed}s, want under 20s" >&2
 	exit 1
 }
-timeout_state="$(sed -n 's/^results: //p' "$fixture/invocation-timeout.log")/state.txt"
+timeout_results=$(sed -n 's/^results: //p' "$fixture/invocation-timeout.log")
+[ -n "$timeout_results" ] || {
+	echo "invocation-timeout: the log has no results: line" >&2
+	exit 1
+}
+timeout_state="$timeout_results/state.txt"
 grep -q '^status: complete with findings$' "$timeout_state"
 timeout_findings=$(awk '/^## findings$/ { p = 1; next } /^## / { p = 0 } p' "$timeout_state")
 [ "$(printf '%s\n' "$timeout_findings" | wc -l)" -eq 1 ] || {

@@ -38,17 +38,20 @@ check_positive_integer() {
 	[ $((10#$value)) -gt 0 ] || usage_error "$flag must be a positive integer, got '$value'"
 }
 
-# Prints the names read on stdin in an order fixed by seed. The order repeats only on the same
-# platform, because awk's srand differs between them.
+# Prints the names read on stdin in an order fixed by seed. The order repeats only with the same
+# awk implementation, because each awk's srand and rand differ.
 shuffle() {
 	awk -v seed="$1" 'BEGIN { srand(seed) } { printf "%.9f %s\n", rand(), $0 }' |
-		sort -n | cut -d' ' -f2-
+		LC_ALL=C sort -n | cut -d' ' -f2-
 }
 
 # Sends first_signal to pid after limit seconds, then KILL 10 seconds later, and creates marker
-# when the limit passes. It sleeps in the background and waits on it, because bash runs the TERM
-# trap during wait but not during a foreground sleep, and the trap must kill the sleep so stopping
-# leaves none behind.
+# when the limit passes. first_signal is QUIT for Go programs, which print their stacks, or TERM
+# for Rust programs, because under WSL's crash-capture core_pattern a QUIT would send a Rust core
+# dump to the collector. The caller runs watchdog in the background, because it installs its own
+# TERM trap, and stops it with TERM. It sleeps in the background and waits on it, because bash
+# runs the TERM trap during wait but not during a foreground sleep, and the trap must kill the
+# sleep so stopping leaves none behind.
 watchdog() {
 	local pid=$1
 	local marker=$2
@@ -56,12 +59,23 @@ watchdog() {
 	local first_signal=$4
 	local sleep_pid=""
 
-	trap 'kill $sleep_pid 2>/dev/null || true; exit 0' TERM
+	case "$first_signal" in
+	QUIT | TERM) ;;
+	*)
+		# The watchdog runs in the background, so exiting alone would leave the invocation
+		# without a time limit. Killing the invocation makes the mistake fail it visibly.
+		echo "$prog: watchdog: unsupported signal $first_signal" >&2
+		kill -KILL "$pid" 2>/dev/null || true
+		exit 1
+		;;
+	esac
+	# Kills every background job, so a TERM that arrives before sleep_pid is set still kills
+	# the sleep.
+	trap 'kill $(jobs -p) 2>/dev/null || true; exit 0' TERM
 	sleep "$limit" &
 	sleep_pid=$!
 	wait "$sleep_pid"
 	: >"$marker"
-	# SIGQUIT makes a Go program print every goroutine's stack before it exits.
 	kill "-$first_signal" "$pid" 2>/dev/null || exit 0
 	sleep 10 &
 	sleep_pid=$!

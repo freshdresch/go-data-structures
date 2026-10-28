@@ -23,7 +23,8 @@ usage() {
 	echo "  -pad N        rebuild with N padding pointers, Mac only; without it the Mac pads"
 	echo "                with 4 only when runtime.sched lands at offset 96"
 	echo "  -seed N       shuffle seed, default the script's pid; a seed repeats an order only"
-	echo "                on the same platform, because awk's srand differs between them"
+	echo "                with the same awk implementation, because each awk's srand and rand"
+	echo "                differ"
 }
 
 usage_error() {
@@ -63,6 +64,7 @@ check_positive_integer -rounds "$rounds"
 rounds=$((10#$rounds))
 check_positive_integer -seed "$seed"
 seed=$((10#$seed))
+check_positive_integer RING_COMPARE_INVOCATION_LIMIT "$invocation_limit"
 if [ -n "$pad" ]; then
 	check_positive_integer -pad "$pad"
 	pad=$((10#$pad))
@@ -444,6 +446,8 @@ run_invocation() {
 	local invocation_pid
 	local watchdog_pid
 	local difference
+	# SIGQUIT makes a Go program print every goroutine's stack before it exits.
+	local first_signal=QUIT
 
 	while IFS= read -r arg; do
 		flags+=("$arg")
@@ -454,14 +458,14 @@ run_invocation() {
 	(cd "$results" && exec ${pin[@]+"${pin[@]}"} "$results/compare.test" "${flags[@]}") \
 		>"$out" 2>&1 &
 	invocation_pid=$!
-	watchdog "$invocation_pid" "$marker" "$invocation_limit" QUIT &
+	watchdog "$invocation_pid" "$marker" "$invocation_limit" "$first_signal" &
 	watchdog_pid=$!
 	wait "$invocation_pid" || exit_status=$?
 	kill "$watchdog_pid" 2>/dev/null || true
 	wait "$watchdog_pid" 2>/dev/null || true
 
 	if [ -e "$marker" ]; then
-		add_finding "round $round $impl timed out after ${invocation_limit}s, sent SIGQUIT,\
+		add_finding "round $round $impl timed out after ${invocation_limit}s, sent SIG$first_signal,\
  exit status $exit_status, output in $out"
 		return
 	fi

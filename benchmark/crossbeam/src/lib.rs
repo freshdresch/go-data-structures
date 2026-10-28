@@ -15,7 +15,7 @@ mod message;
 pub const MESSAGES: usize = 5_000_000;
 
 /// The number of senders in the mpsc and mpmc topologies, and of receivers in mpmc.
-pub const THREADS: usize = 4;
+pub(crate) const THREADS: usize = 4;
 
 /// Whether senders tag each message with their index and receivers keep what they got. Tests
 /// turn it on to check delivery. Timed builds leave it off, so they send upstream's values with

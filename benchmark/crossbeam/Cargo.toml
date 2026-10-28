@@ -3,7 +3,8 @@
 # The changes are: the package is named crossbeam-bench, the crossbeam crates come from
 # crates.io in place of path dependencies, the dependencies of the other benchmarks are dropped,
 # a library target holds the program logic, the binaries are crossbeam-channel, arrayqueue, and
-# arrayqueue-backoff, and [lints] workspace = true is dropped.
+# arrayqueue-backoff, [lints] workspace = true is dropped, and an explicit [profile.release] with
+# Cargo's defaults is added.
 
 [package]
 name = "crossbeam-bench"
@@ -34,3 +35,13 @@ doc = false
 name = "arrayqueue-backoff"
 path = "src/bin/arrayqueue-backoff.rs"
 doc = false
+
+[profile.release]
+opt-level = 3
+debug = false
+debug-assertions = false
+overflow-checks = false
+lto = false
+panic = "unwind"
+incremental = false
+codegen-units = 16

@@ -35,3 +35,6 @@ implementation-plans/
 /benchmark/results/
 /benchmark/baselines/
 /benchmark/.local/
+benchmark/crossbeam/target/
+benchmark/crossbeam/__pycache__/
+benchmark/.venv/

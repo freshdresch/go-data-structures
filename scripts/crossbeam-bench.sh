@@ -252,21 +252,32 @@ rust_messages=$(awk '
 	die "MESSAGES in $crate/src/lib.rs is '$rust_messages', workloads.Messages is $messages"
 
 status="aborted at the build checks"
-# Requires the expected flags rather than only rejecting bad ones, because a Cargo config's
-# [profile.release] overrides the manifest's, and opt-level = 0 emits no flag at all. Requiring
-# the sysroot's rustc as every line's program catches a rustc-wrapper or a swapped compiler from
-# any source.
+# Accepts only the codegen options cargo's release profile produces, each exactly once, because
+# cargo appends a config's build.rustflags after its own flags and rustc takes the last value of
+# a repeated option, so merely finding the expected flags proves nothing. Requiring the
+# sysroot's rustc as every line's program catches a rustc-wrapper or a swapped compiler from any
+# source.
 sysroot=$(cd "$crate" && rustc --print sysroot) || die "rustc --print sysroot failed in $crate"
 expected_rustc="$sysroot/bin/rustc"
 rustc_lines=$(grep -F 'Running `' "$cargo_build_log" | grep -F -- '--crate-name' || true)
 build_problem=$(printf '%s\n' "$rustc_lines" | awk -v rustc="$expected_rustc" '
+	# An entry ending in "=" accepts any value.
 	BEGIN {
-		forbidden_count = split("-C lto,overflow-checks=on,debug-assertions=on," \
-			"panic=abort,target-cpu,target-feature", forbidden, ",")
+		allowed_count = split("codegen-units=16 embed-bitcode=no extra-filename= metadata= " \
+			"opt-level=3 strip=debuginfo", allowed, " ")
+	}
+	function allowed_index(option,    a) {
+		for (a = 1; a <= allowed_count; a++) {
+			if (allowed[a] ~ /=$/ && index(option, allowed[a]) == 1) return a
+			if (option == allowed[a]) return a
+		}
+		return 0
 	}
 	NF == 0 { next }
 	{
-		split(substr($0, index($0, "Running `") + length("Running `")), word, " ")
+		command = substr($0, index($0, "Running `") + length("Running `"))
+		sub(/`$/, "", command)
+		word_count = split(command, word, " ")
 		if (word[1] != rustc) {
 			problem = "a rustc command line runs " word[1] ", want " rustc
 			exit
@@ -275,17 +286,30 @@ build_problem=$(printf '%s\n' "$rustc_lines" | awk -v rustc="$expected_rustc" '
 	/--crate-name build_script_build / { next }
 	{
 		crate_lines++
-		if ($0 !~ / -C opt-level=3[ `]/) {
-			problem = "a crate rustc command line lacks -C opt-level=3"
-			exit
+		delete seen
+		for (w = 2; w <= word_count; w++) {
+			if (word[w] == "-O") {
+				problem = "a crate rustc command line sets -O"
+				exit
+			}
+			if (word[w] == "-C" || word[w] == "--codegen") option = word[++w]
+			else if (word[w] ~ /^-C./) option = substr(word[w], 3)
+			else if (word[w] ~ /^--codegen=/) option = substr(word[w], length("--codegen=") + 1)
+			else continue
+			a = allowed_index(option)
+			if (a == 0) {
+				problem = "a crate rustc command line sets unexpected codegen option " option
+				exit
+			}
+			if (a in seen) {
+				problem = "a crate rustc command line repeats codegen option " option
+				exit
+			}
+			seen[a] = 1
 		}
-		if ($0 !~ / -C codegen-units=16[ `]/) {
-			problem = "a crate rustc command line lacks -C codegen-units=16"
-			exit
-		}
-		for (f = 1; f <= forbidden_count; f++) {
-			if (index($0, forbidden[f]) > 0) {
-				problem = "a crate rustc command line sets " forbidden[f]
+		for (a = 1; a <= allowed_count; a++) {
+			if (!(a in seen)) {
+				problem = "a crate rustc command line lacks codegen option " allowed[a]
 				exit
 			}
 		}

@@ -2,11 +2,13 @@
 # Derived from crossbeam-rs/crossbeam crossbeam-channel/benchmarks/plot.py at commit 099d046,
 # which is licensed under the MIT license. Copyright (c) 2019 The Crossbeam Project Developers.
 # The changes are: the subplots are the capacities bounded1, bounded1024, bounded2p18, and
-# bounded2p23, groups of bars are spaced by the number of implementations and bar i is offset by
-# i - (n - 1) / 2 bar widths, because up to 8 bars share a group, and the program reads the file
-# named by its first argument and writes plot.png next to it.
+# bounded2p23, groups of bars are spaced by one more than the number of implementations and bar i
+# is offset by i - (n - 1) / 2 bar widths, because up to 8 bars share a group and one empty bar
+# width separates neighboring groups, a capacity with no rows leaves its subplot empty with its
+# title, the unused import and commented-out code are removed, and the program reads the file
+# named by its first argument, printing a usage message without one, and writes plot.png next to
+# it.
 import os
-import random
 import sys
 import matplotlib.pyplot as plt
 
@@ -14,8 +16,8 @@ import matplotlib.pyplot as plt
 def read_data(files):
     results = []
     for f in files:
-        with open(f) as f:
-            for line in f.readlines():
+        with open(f) as data:
+            for line in data.readlines():
                 test, lang, impl, secs, _ = line.split()
                 splt = test.split('_')
                 results.append((splt[0], '_'.join(splt[1:]), lang, impl, float(secs)))
@@ -103,10 +105,12 @@ def plot(results, fig, subplot, title, prefix):
             scores[name][find(runs, test)] = secs
 
     n = len(scores)
-    ys = [n * (i + 1) for i in range(len(runs))]
+    ys = [(n + 1) * (i + 1) for i in range(len(runs))]
 
     ax = fig.add_subplot(subplot)
     ax.set_title(title)
+    if not scores:
+        return
     ax.set_yticks(ys)
     ax.set_yticklabels(runs)
     ax.tick_params(which='major', length=0)
@@ -124,7 +128,6 @@ def plot(results, fig, subplot, title, prefix):
 
 def plot_all(results, descriptions, labels, output):
     fig = plt.figure(figsize=(10, 10))
-    # TODO support more subplots
     subplot = [221, 222, 223, 224]
     for p, d, l in zip(subplot, descriptions, labels):
         plot(results, fig, p, d, l)
@@ -137,10 +140,12 @@ def plot_all(results, descriptions, labels, output):
         hspace=0.2,
     )
     plt.savefig(output)
-    # plt.show()
 
 
 def main():
+    if len(sys.argv) < 2:
+        print('usage: plot.py <median.txt>', file=sys.stderr)
+        sys.exit(2)
     path = sys.argv[1]
     results = read_data([path])
     descriptions = [

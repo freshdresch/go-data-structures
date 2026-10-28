@@ -157,12 +157,12 @@ esac
 # Each changes one language's rows at run time or how the Rust programs are compiled, and leaves
 # no trace that the build checks can catch.
 for name in GOMAXPROCS GOGC GODEBUG GOMEMLIMIT GOTRACEBACK GLIBC_TUNABLES LD_PRELOAD RUSTFLAGS \
-	CARGO_BUILD_RUSTFLAGS CARGO_ENCODED_RUSTFLAGS RUSTC_WRAPPER; do
+	CARGO_BUILD_RUSTFLAGS CARGO_ENCODED_RUSTFLAGS RUSTC RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER; do
 	[ -z "${!name+x}" ] || die "$name is set, unset it before timing"
 done
-cargo_profile_names=$(compgen -e | grep '^CARGO_PROFILE_' || true)
-[ -z "$cargo_profile_names" ] ||
-	die "unset these before timing: $(printf '%s\n' "$cargo_profile_names" | tr '\n' ' ')"
+refused_names=$(compgen -e | grep -E '^(CARGO_PROFILE_|CARGO_BUILD_RUSTC|MALLOC_)' || true)
+[ -z "$refused_names" ] ||
+	die "unset these before timing: $(printf '%s\n' "$refused_names" | tr '\n' ' ')"
 
 # mpmc runs 8 workers, so every invocation gets 8 CPUs.
 needed_cpus=8
@@ -239,19 +239,63 @@ case "$messages" in
 	die "could not read a positive integer from workloads.Messages, got '$messages'"
 	;;
 esac
+rust_messages=$(awk '
+	/^pub const MESSAGES: usize = [0-9_]+;$/ {
+		value = $6
+		sub(/;$/, "", value)
+		gsub(/_/, "", value)
+		print value
+		exit
+	}
+' "$crate/src/lib.rs") || die "awk could not read $crate/src/lib.rs"
+[ "$rust_messages" = "$messages" ] ||
+	die "MESSAGES in $crate/src/lib.rs is '$rust_messages', workloads.Messages is $messages"
 
 status="aborted at the build checks"
+# Requires the expected flags rather than only rejecting bad ones, because a Cargo config's
+# [profile.release] overrides the manifest's, and opt-level = 0 emits no flag at all. Requiring
+# the sysroot's rustc as every line's program catches a rustc-wrapper or a swapped compiler from
+# any source.
+sysroot=$(cd "$crate" && rustc --print sysroot) || die "rustc --print sysroot failed in $crate"
+expected_rustc="$sysroot/bin/rustc"
 rustc_lines=$(grep -F 'Running `' "$cargo_build_log" | grep -F -- '--crate-name' || true)
-if printf '%s\n' "$rustc_lines" | grep -q -E 'target-cpu|target-feature'; then
-	die "a rustc command line in $cargo_build_log sets target-cpu or target-feature"
-fi
-# Build-script lines set no opt-level, so only the lines that set one are checked.
-bad_opt_level=$(printf '%s\n' "$rustc_lines" | grep -o 'opt-level=[^ ]*' |
-	grep -v -x 'opt-level=3' || true)
-if [ -n "$bad_opt_level" ]; then
-	die "a rustc command line in $cargo_build_log sets" \
-		"$(printf '%s\n' "$bad_opt_level" | head -n 1)"
-fi
+build_problem=$(printf '%s\n' "$rustc_lines" | awk -v rustc="$expected_rustc" '
+	BEGIN {
+		forbidden_count = split("-C lto,overflow-checks=on,debug-assertions=on," \
+			"panic=abort,target-cpu,target-feature", forbidden, ",")
+	}
+	NF == 0 { next }
+	{
+		split(substr($0, index($0, "Running `") + length("Running `")), word, " ")
+		if (word[1] != rustc) {
+			problem = "a rustc command line runs " word[1] ", want " rustc
+			exit
+		}
+	}
+	/--crate-name build_script_build / { next }
+	{
+		crate_lines++
+		if ($0 !~ / -C opt-level=3[ `]/) {
+			problem = "a crate rustc command line lacks -C opt-level=3"
+			exit
+		}
+		if ($0 !~ / -C codegen-units=16[ `]/) {
+			problem = "a crate rustc command line lacks -C codegen-units=16"
+			exit
+		}
+		for (f = 1; f <= forbidden_count; f++) {
+			if (index($0, forbidden[f]) > 0) {
+				problem = "a crate rustc command line sets " forbidden[f]
+				exit
+			}
+		}
+	}
+	END {
+		if (problem == "" && crate_lines == 0) problem = "no crate rustc command line"
+		if (problem != "") print problem
+	}
+')
+[ -z "$build_problem" ] || die "$build_problem, see $cargo_build_log"
 for program in gochan ring; do
 	bad_setting=$(go version -m "$results/bin/$program" | awk -F'\t' '
 		$2 != "build" { next }
@@ -297,16 +341,26 @@ cargo_info() {
 	(cd "$crate" && cargo -V)
 }
 
+# Untracked files outside benchmark/ and scripts/, such as design/ and plans/, cannot change the
+# build, as in ring-compare-bench.sh.
 tree_status() {
-	local changes
+	local tracked
+	local untracked
 
-	changes=$(git -C "$repo" status --porcelain)
-	if [ -z "$changes" ]; then
+	tracked=$(git -C "$repo" status --porcelain --untracked-files=no) || return
+	untracked=$(git -C "$repo" status --porcelain --untracked-files=all -- benchmark/ scripts/ |
+		awk '$1 == "??"') || return
+	if [ -z "$tracked" ] && [ -z "$untracked" ]; then
 		echo clean
 		return
 	fi
 	echo dirty
-	printf '%s\n' "$changes"
+	if [ -n "$tracked" ]; then
+		printf '%s\n' "$tracked"
+	fi
+	if [ -n "$untracked" ]; then
+		printf '%s\n' "$untracked"
+	fi
 }
 
 write_state() {
@@ -340,6 +394,7 @@ write_state() {
 	record "rustc -Vv" rustc_info
 	record "cargo -V" cargo_info
 	record crossbeam crossbeam_versions
+	record benchstat benchstat_module
 	for program in gochan ring; do
 		record "$program runtime.sched offset" sched_offset "$results/bin/$program"
 	done
@@ -353,6 +408,7 @@ write_state() {
 	printf '%s\n' "$rustc_lines"
 }
 
+status="aborted writing the state"
 write_state >>"$state"
 
 # Rounds.
@@ -396,8 +452,6 @@ run_invocation() {
 	while IFS= read -r arg; do
 		command+=("$arg")
 	done < <(invocation_command "$kind" "$workload")
-	# SIGQUIT makes a Go program print every goroutine's stack before it exits. Under WSL's
-	# crash-capture core_pattern, it would send a Rust core dump to the collector.
 	case "$lang" in
 	Go) first_signal=QUIT ;;
 	*) first_signal=TERM ;;
@@ -617,8 +671,8 @@ while read -r kind; do
 	fi
 	if ! (cd "$results" &&
 		benchstat -format csv -row "$summary_rows" -col "$columns" samples.txt) \
-		>"$scratch/summary-$kind.csv" 2>/dev/null; then
-		add_finding "benchstat -format csv failed for $kind"
+		>"$scratch/summary-$kind.csv" 2>"$results/benchstat-$kind.err"; then
+		add_finding "benchstat -format csv failed for $kind, see $results/benchstat-$kind.err"
 		continue
 	fi
 	significant_pairs "$scratch/summary-$kind.csv" "$scratch/bad-cells.txt" >>"$scratch/pairs.txt"

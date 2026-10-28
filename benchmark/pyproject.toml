@@ -1,8 +1,7 @@
 [project]
 name = "benchmark"
 version = "0.1.0"
-description = "A library to benchmark data structures from the go-data-structures repo"
-readme = "README.md"
+description = "The Python environment for the benchmark plots"
 authors = [
     { name = "Adam Drescher", email = "adam.r.drescher@gmail.com" }
 ]

@@ -224,6 +224,13 @@ case "$0" in
 esac
 if [ -n "$bench" ]; then
 	echo "$(basename "$0") $bench" >>"$FIXTURE_MARKER"
+	if [ -n "${FIXTURE_SLEEP_IMPL:-}" ] && [[ "$bench" == *"impl=$FIXTURE_SLEEP_IMPL\$" ]]; then
+		sleep 30 &
+		sleep_pid=$!
+		echo "$sleep_pid" >>"$FIXTURE_DATA/sleep-pids"
+		trap 'kill "$sleep_pid"; exit 1' QUIT
+		wait "$sleep_pid"
+	fi
 	[ "${FIXTURE_FAIL_TIMING:-false}" = false ] || exit 7
 	awk -v cpu="$cpu" -v kind="$kind" -v bench="$bench" '
   kind == "quick" && bench ~ /api=seq/ && $0 !~ /api=seq/ { next }
@@ -314,7 +321,7 @@ cat >"$FIXTURE_TOOLS/lscpu" <<'LSCPU'
 if [ "$#" = 0 ]; then
 	echo 'Model name: fixture'
 else
-	printf '0,0,0\n1,1,0\n'
+	printf '0,0,0\n1,1,0\n2,2,0\n3,3,0\n4,4,0\n5,5,0\n6,6,0\n7,7,0\n'
 fi
 LSCPU
 cat >"$FIXTURE_TOOLS/taskset" <<'TASKSET'
@@ -457,6 +464,36 @@ run_case diagnostic-no-methodology rejected env FIXTURE_OS=Darwin FIXTURE_GOOS=d
 	FIXTURE_ARCH=arm64 FIXTURE_METHODOLOGY=true FIXTURE_AFTER_OFFSET=96 bash "$quick" \
 	-allow-layout-confounded -rounds 1 before after
 run_case comparison accepted bash "$compare" -rounds 1
+rm -f "$FIXTURE_DATA/sleep-pids"
+timeout_start=$SECONDS
+run_case invocation-timeout accepted env RING_COMPARE_INVOCATION_LIMIT=1 FIXTURE_SLEEP_IMPL=chan \
+	bash "$compare" -rounds 1
+timeout_elapsed=$((SECONDS - timeout_start))
+[ "$timeout_elapsed" -lt 20 ] || {
+	echo "invocation-timeout: took ${timeout_elapsed}s, want under 20s" >&2
+	exit 1
+}
+timeout_state="$(sed -n 's/^results: //p' "$fixture/invocation-timeout.log")/state.txt"
+grep -q '^status: complete with findings$' "$timeout_state"
+timeout_findings=$(awk '/^## findings$/ { p = 1; next } /^## / { p = 0 } p' "$timeout_state")
+[ "$(printf '%s\n' "$timeout_findings" | wc -l)" -eq 1 ] || {
+	printf 'invocation-timeout: want one finding, got:\n%s\n' "$timeout_findings" >&2
+	exit 1
+}
+[[ "$timeout_findings" == *"chan timed out after 1s"* ]] || {
+	echo "invocation-timeout: unexpected finding: $timeout_findings" >&2
+	exit 1
+}
+[ -s "$FIXTURE_DATA/sleep-pids" ] || {
+	echo "invocation-timeout: the stub never started its sleep" >&2
+	exit 1
+}
+while read -r sleep_pid; do
+	! kill -0 "$sleep_pid" 2>/dev/null || {
+		echo "invocation-timeout: sleep $sleep_pid is still running" >&2
+		exit 1
+	}
+done <"$FIXTURE_DATA/sleep-pids"
 run_case failed-gate rejected env FIXTURE_FAIL_GATE=true bash "$compare" -rounds 1
 run_case apple-padding accepted env FIXTURE_OS=Darwin FIXTURE_GOOS=darwin \
 	FIXTURE_ARCH=arm64 FIXTURE_OFFSET=96 bash "$compare" -rounds 1

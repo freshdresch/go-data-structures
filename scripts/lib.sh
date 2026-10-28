@@ -1,10 +1,11 @@
 # shellcheck shell=bash
 # shellcheck disable=SC2154
 #
-# Helpers shared by the benchmark scripts. This file defines functions only, and nothing runs when
-# it is sourced. The sourcing script sets prog and platform first. The file-wide SC2154 disable
-# lets shellcheck accept those two names, but also hides any other unassigned name in this file,
-# typos included.
+# Helpers shared by the benchmark scripts. This file defines functions and the go_env array, and
+# nothing runs when it is sourced. The sourcing script sets prog and platform first. The file-wide
+# SC2154 disable lets shellcheck accept those two names, but also hides any other unassigned name
+# in this file, typos included. add_finding appends to the caller's global findings array, and
+# check_positive_integer calls the sourcing script's usage_error.
 
 die() {
 	echo "$prog: $*" >&2
@@ -13,6 +14,59 @@ die() {
 
 warn() {
 	echo "$prog: warning: $*" >&2
+}
+
+# The sourcing script reads go_env.
+# shellcheck disable=SC2034
+go_env=(env GOTOOLCHAIN=local GOWORK=off GOFLAGS=-mod=readonly)
+
+add_finding() {
+	findings+=("$1")
+	warn "$1"
+}
+
+check_positive_integer() {
+	local flag=$1
+	local value=$2
+
+	case "$value" in
+	'' | *[!0-9]*) usage_error "$flag must be a positive integer, got '$value'" ;;
+	esac
+	# Bash arithmetic wraps on 20 or more digits.
+	[ ${#value} -le 9 ] || usage_error "$flag must be a positive integer, got '$value'"
+	# Forces base 10, so a leading zero such as 08 is not read as octal.
+	[ $((10#$value)) -gt 0 ] || usage_error "$flag must be a positive integer, got '$value'"
+}
+
+# Prints the names read on stdin in an order fixed by seed. The order repeats only on the same
+# platform, because awk's srand differs between them.
+shuffle() {
+	awk -v seed="$1" 'BEGIN { srand(seed) } { printf "%.9f %s\n", rand(), $0 }' |
+		sort -n | cut -d' ' -f2-
+}
+
+# Sends first_signal to pid after limit seconds, then KILL 10 seconds later, and creates marker
+# when the limit passes. It sleeps in the background and waits on it, because bash runs the TERM
+# trap during wait but not during a foreground sleep, and the trap must kill the sleep so stopping
+# leaves none behind.
+watchdog() {
+	local pid=$1
+	local marker=$2
+	local limit=$3
+	local first_signal=$4
+	local sleep_pid=""
+
+	trap 'kill $sleep_pid 2>/dev/null || true; exit 0' TERM
+	sleep "$limit" &
+	sleep_pid=$!
+	wait "$sleep_pid"
+	: >"$marker"
+	# SIGQUIT makes a Go program print every goroutine's stack before it exits.
+	kill "-$first_signal" "$pid" 2>/dev/null || exit 0
+	sleep 10 &
+	sleep_pid=$!
+	wait "$sleep_pid"
+	kill -KILL "$pid" 2>/dev/null || true
 }
 
 # Prints "label: value" from a command, or "label: unknown" with a warning when it fails.

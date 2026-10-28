@@ -3,4 +3,7 @@
 //
 // Its harness is adapted from ring/bench_test.go and ring/bench_adapters_test.go, so a change
 // there should be carried over here. Run it with scripts/ring-compare-bench.sh.
+//
+// The package also holds the workq benchmarks, BenchmarkWorkq and BenchmarkWorkqTuning, which
+// run with go test and not with scripts/ring-compare-bench.sh.
 package benchmark

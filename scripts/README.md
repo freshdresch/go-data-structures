@@ -213,3 +213,21 @@ The parent's protocol also measures unchanged Ring with the original quick corpu
 after this harness extension. Label this a harness/build control. Its compiled-test hashes differ.
 Do not overlay SPSC tests on the old baseline or attribute this control's differences to a Ring
 algorithm change. Existing quick and compare runners retain their selections and admission rules.
+
+## Crossbeam suite comparison
+
+`crossbeam-bench.sh` runs the ring queues and Go channels beside crossbeam's Rust channels in
+crossbeam's benchmark suite. It runs shuffled rounds and summarizes them with `benchstat`. The
+method, the decision rule, and the caveats are in the
+[crossbeam comparison](../benchmark/crossbeam/README.md).
+
+```bash
+scripts/crossbeam-bench.sh [-rounds N] [-seed N] [-timeout S]
+```
+
+The script needs `go`, `benchstat`, `cargo`, and `rustc`. On Linux it also needs `lscpu` and
+`taskset`. It stops unless `rustc -V` in `benchmark/crossbeam/` prints 1.99.1, and it needs at
+least 8 CPUs. Results go to `~/crossbeam-compare/<timestamp>-<pid>/`.
+
+The script sources `lib.sh`. Changing `lib.sh` changes the runner bundle that `prepare_benchmeta`
+records, so `ring-quick-bench.sh -reuse` rejects results made before the change.

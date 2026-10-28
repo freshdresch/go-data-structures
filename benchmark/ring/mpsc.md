@@ -1,7 +1,7 @@
 # MPSCQueue comparisons
 
-The [results](#results) below come from one 10-round campaign. Crossbeam comparisons are future
-work.
+The [results](#results) below come from one 10-round campaign. For crossbeam's channels, see the
+[crossbeam comparison](../crossbeam/README.md).
 
 ## Workload
 

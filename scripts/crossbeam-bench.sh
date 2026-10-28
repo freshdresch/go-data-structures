@@ -686,17 +686,34 @@ scratch=$(mktemp -d)
 	incomplete_cells
 	excluded_cells
 } >"$scratch/bad-cells.txt"
+
+# Runs benchstat in the results directory with the given arguments, writing its output to out
+# and its full stderr to err. benchstat exits 0 when it cannot open its input or rejects its
+# arguments, printing the error on stderr, so the exit status alone does not show a failure.
+# Its per-cell warnings, such as "B3: need >= 6 samples ...", are normal and also go to stderr.
+# The call fails on a non-zero exit status, no output, or a stderr line that is not a cell
+# warning.
+run_benchstat() {
+	local out=$1
+	local err=$2
+	shift 2
+
+	(cd "$results" && benchstat "$@") >"$out" 2>"$err" || return
+	[ -s "$out" ] && ! grep -qvE '^[A-Z]+[0-9]+: ' "$err"
+}
+
 while read -r kind; do
 	columns=$(summary_columns "$kind")
-	if ! (cd "$results" && benchstat -row "$summary_rows" -col "$columns" samples.txt) \
-		>"$results/summary-$kind.txt"; then
-		add_finding "benchstat failed for summary-$kind.txt"
+	text_err="$results/benchstat-$kind-text.err"
+	if ! run_benchstat "$results/summary-$kind.txt" "$text_err" \
+		-row "$summary_rows" -col "$columns" samples.txt; then
+		add_finding "benchstat failed for summary-$kind.txt, see $text_err"
 		continue
 	fi
-	if ! (cd "$results" &&
-		benchstat -format csv -row "$summary_rows" -col "$columns" samples.txt) \
-		>"$scratch/summary-$kind.csv" 2>"$results/benchstat-$kind.err"; then
-		add_finding "benchstat -format csv failed for $kind, see $results/benchstat-$kind.err"
+	csv_err="$results/benchstat-$kind.err"
+	if ! run_benchstat "$scratch/summary-$kind.csv" "$csv_err" \
+		-format csv -row "$summary_rows" -col "$columns" samples.txt; then
+		add_finding "benchstat -format csv failed for $kind, see $csv_err"
 		continue
 	fi
 	significant_pairs "$scratch/summary-$kind.csv" "$scratch/bad-cells.txt" >>"$scratch/pairs.txt"

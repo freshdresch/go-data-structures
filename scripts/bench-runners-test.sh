@@ -4,8 +4,15 @@ set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
 real_go=$(command -v go)
 fixture=$(mktemp -d)
+# The crossbeam signal cases add the pids they start, so a failing case leaves none running.
+case_pids=()
 on_exit() {
 	local status=$?
+	local pid
+
+	for pid in "${case_pids[@]}"; do
+		kill -KILL "$pid" 2>/dev/null || true
+	done
 	if [ "$status" -eq 0 ]; then
 		rm -rf "$fixture"
 	else
@@ -342,7 +349,8 @@ if [ "$#" = 0 ]; then
 elif [ -n "${FIXTURE_LSCPU_SMT:-}" ]; then
 	awk 'BEGIN { for (c = 0; c < 24; c++) printf "%d,%d,0\n", c, int(c / 2) }'
 else
-	printf '0,0,0\n1,1,0\n2,2,0\n3,3,0\n4,4,0\n5,5,0\n6,6,0\n7,7,0\n'
+	awk -v cores="${FIXTURE_LSCPU_CORES:-8}" \
+		'BEGIN { for (c = 0; c < cores; c++) printf "%d,%d,0\n", c, c }'
 fi
 LSCPU
 cat >"$FIXTURE_TOOLS/taskset" <<'TASKSET'
@@ -367,11 +375,21 @@ cat >"$FIXTURE_TOOLS/pmset" <<'PMSET'
 echo 'Now drawing from AC Power'
 PMSET
 # In CSV mode, prints the real benchstat -format csv output saved for the first kind in -col.
+# Exits 1 with a message on stderr for an unknown flag or a flag after the file name.
 cat >"$FIXTURE_TOOLS/benchstat" <<'BENCHSTAT'
 #!/bin/sh
 csv=false
 columns=''
+file=''
 while [ $# -gt 0 ]; do
+	case "$1" in
+	-*)
+		if [ -n "$file" ]; then
+			echo "benchstat: flag $1 after the file name $file" >&2
+			exit 1
+		fi
+		;;
+	esac
 	case "$1" in
 	-format)
 		[ "$2" != csv ] || csv=true
@@ -381,6 +399,12 @@ while [ $# -gt 0 ]; do
 		columns=$2
 		shift
 		;;
+	-row | -filter) shift ;;
+	-*)
+		echo "benchstat: unknown flag $1" >&2
+		exit 1
+		;;
+	*) file=$1 ;;
 	esac
 	shift
 done
@@ -446,6 +470,9 @@ two-lines)
 	echo "$line"
 	;;
 wrong-name) echo "wrong_workload $lang $impl $secs sec" ;;
+wrong-impl) echo "$workload $lang wrong-impl $secs sec" ;;
+ms) echo "$workload $lang $impl $secs ms" ;;
+bad-number) echo "$workload $lang $impl x.y sec" ;;
 sleep)
 	# The sleep replaces this process, so a KILL to the invocation's pid leaves nothing
 	# behind, as with the real single-process programs.
@@ -461,8 +488,9 @@ esac
 PROGRAM
 
 # The -v output has one build-script line, which sets no opt-level, and three crate lines with
-# exactly the release profile's codegen options. FIXTURE_RUSTC_FLAGS, FIXTURE_OPT_LEVEL, and
-# FIXTURE_RUSTC_PATH change the last crate line.
+# exactly the release profile's codegen options. FIXTURE_RUSTC_FLAGS, FIXTURE_OPT_LEVEL,
+# FIXTURE_RUSTC_NO_OPT_LEVEL, and FIXTURE_RUSTC_PATH change the last crate line.
+# FIXTURE_CARGO_NO_RUNNING leaves out every Running line.
 cat >"$FIXTURE_TOOLS/cargo" <<'CARGO'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -491,19 +519,26 @@ build)
 	rustc="$(rustc --print sysroot)/bin/rustc"
 	naming='-C metadata=x -C extra-filename=-x'
 	echo '   Compiling crossbeam-utils v0.8.23'
+	if [ -n "${FIXTURE_CARGO_NO_RUNNING:-}" ]; then
+		echo '    Finished `release` profile [optimized] target(s) in 0.01s'
+		exit 0
+	fi
 	echo "     Running \`$rustc --crate-name build_script_build --crate-type bin" \
 		"-C embed-bitcode=no -C debug-assertions=off $naming\`"
 	for crate in crossbeam_utils crossbeam_bench arrayqueue; do
 		program=$rustc
-		opt_level=3
+		opt_level='-C opt-level=3 '
 		extra=''
 		if [ "$crate" = arrayqueue ]; then
 			program=${FIXTURE_RUSTC_PATH:-$rustc}
-			opt_level=${FIXTURE_OPT_LEVEL:-3}
+			opt_level="-C opt-level=${FIXTURE_OPT_LEVEL:-3} "
+			if [ -n "${FIXTURE_RUSTC_NO_OPT_LEVEL:-}" ]; then
+				opt_level=''
+			fi
 			extra=${FIXTURE_RUSTC_FLAGS:+ $FIXTURE_RUSTC_FLAGS}
 		fi
 		echo "     Running \`$program --crate-name $crate --crate-type lib" \
-			"-C opt-level=$opt_level -C embed-bitcode=no -C codegen-units=16 $naming" \
+			"${opt_level}-C embed-bitcode=no -C codegen-units=16 $naming" \
 			"-C strip=debuginfo$extra\`"
 	done
 	echo '    Finished `release` profile [optimized] target(s) in 0.01s'
@@ -517,7 +552,7 @@ CARGO
 cat >"$FIXTURE_TOOLS/rustc" <<'RUSTC'
 #!/bin/sh
 case "$*" in
--V) echo 'rustc 1.99.1 (fixture)' ;;
+-V) echo "${FIXTURE_RUSTC_VERSION:-rustc 1.99.1 (fixture)}" ;;
 '--print sysroot') echo "$FIXTURE_DATA/sysroot" ;;
 *)
 	echo "unexpected fixture rustc: $*" >&2
@@ -767,6 +802,16 @@ echo "failed-invocation: exit=$status raw failure retained"
 
 crossbeam="$FIXTURE_ROOT/scripts/crossbeam-bench.sh"
 
+# The wrapper refuses these names, so the suite unsets them to pass in a shell that exports them.
+# The preflight cases set their variable explicitly.
+for name in GOMAXPROCS GOGC GODEBUG GOMEMLIMIT GOTRACEBACK GLIBC_TUNABLES LD_PRELOAD RUSTFLAGS \
+	CARGO_BUILD_RUSTFLAGS CARGO_ENCODED_RUSTFLAGS RUSTC RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER; do
+	unset "$name"
+done
+while read -r name; do
+	unset "$name"
+done < <(compgen -e | grep -E '^(CARGO_PROFILE_|CARGO_BUILD_RUSTC|MALLOC_)' || true)
+
 fail() {
 	echo "$*" >&2
 	exit 1
@@ -800,6 +845,17 @@ expect_status() {
 	[ "$last" = "$want" ] || {
 		cat "$fixture/$name.log" >&2
 		fail "$name: state.txt ends with '$last', want '$want'"
+	}
+}
+
+# Fails unless the log of the case holds message.
+expect_log() {
+	local name=$1
+	local message=$2
+
+	grep -qF -- "$message" "$fixture/$name.log" || {
+		cat "$fixture/$name.log" >&2
+		fail "$name: the log lacks '$message'"
 	}
 }
 
@@ -841,6 +897,54 @@ TABLE
 significant_pair='bounded1024 spsc Go-dpdk Rust-arrayqueue Go-dpdk'
 go_pair='bounded2p18 mpmc Go-dpdk Go-frontier Go-frontier'
 
+# Seconds and their nanoseconds per message for 5_000_000 messages, one pair per round. The
+# values around each median have one and two integer digits, so a lexical sort misorders them.
+sample_values=(12:2400.0000 2:400.0000 10:2000.0000 4:800.0000 8:1600.0000 6:1200.0000
+	14:2800.0000)
+fixture_seconds=$(printf '%s\n' "${sample_values[@]}" | cut -d: -f1 | paste -sd' ' -)
+
+# Prints, sorted, the samples.txt lines that the first rounds of sample_values give every
+# invocation, except that skipped_cell, "<kind> <workload>", has no round 1 sample.
+expected_samples() {
+	local rounds=$1
+	local skipped_cell=${2:-}
+	local kind
+	local workload
+	local value
+	local round
+
+	expected_invocations | while read -r kind workload; do
+		round=0
+		for value in $(printf '%s\n' "${sample_values[@]}" | head -n "$rounds"); do
+			round=$((round + 1))
+			if [ "$round" -eq 1 ] && [ "$kind $workload" = "$skipped_cell" ]; then
+				continue
+			fi
+			printf 'BenchmarkSuite/cap=%s/topo=%s/impl=%s 5000000 %s ns/op\n' \
+				"${workload%_*}" "${workload#*_}" "$kind" "${value#*:}"
+		done
+	done | sort
+}
+
+# Prints the median.txt that has median for every cell except other_cell, which has
+# other_median.
+expected_medians() {
+	local median=$1
+	local other_cell=${2:-}
+	local other_median=${3:-}
+	local kind
+	local workload
+	local value
+
+	expected_invocations | while read -r kind workload; do
+		value=$median
+		if [ "$kind $workload" = "$other_cell" ]; then
+			value=$other_median
+		fi
+		printf '%-25s %-15s %s sec\n' "$workload" "${kind%%-*} ${kind#*-}" "$value"
+	done
+}
+
 crossbeam_one_round() {
 	local name=crossbeam-one-round
 	local log="$FIXTURE_DATA/crossbeam-calls"
@@ -865,12 +969,14 @@ crossbeam_rejections() {
 	local timeout
 	local findings
 
-	for mode in exit stderr two-lines wrong-name sleep; do
+	for mode in exit stderr two-lines wrong-name wrong-impl ms bad-number sleep; do
 		case "$mode" in
 		exit) reason='exited with status 3' ;;
 		stderr) reason='wrote to stderr' ;;
-		two-lines | wrong-name) reason='did not write one result line' ;;
-		sleep) reason='timed out after 1s' ;;
+		two-lines | wrong-name | wrong-impl | ms | bad-number)
+			reason='did not write one result line'
+			;;
+		sleep) reason='timed out after 1s, sent SIGTERM' ;;
 		esac
 		timeout=120
 		if [ "$mode" = sleep ]; then
@@ -901,13 +1007,18 @@ crossbeam_all_fail() {
 		cat "$fixture/$name.log" >&2
 		fail "$name: want a stop with 'no invocation succeeded'"
 	fi
+	expect_status "$name" "aborted at the summary"
+	[ "$(state_section findings | wc -l)" -eq 91 ] || fail "$name: want 91 findings"
 }
 
 crossbeam_complete() {
 	local name=crossbeam-complete
 	local file
+	local log="$FIXTURE_DATA/crossbeam-calls"
+	local round_1="$fixture/$name-round-1.txt"
+	local round_2="$fixture/$name-round-2.txt"
 
-	run_wrapper "$name" bash "$crossbeam" -rounds 6
+	run_wrapper "$name" env FIXTURE_SECONDS="$fixture_seconds" bash "$crossbeam" -rounds 6
 	[ "$wrapper_status" -eq 0 ] || fail "$name: want exit status 0"
 	expect_status "$name" complete
 	for file in samples.txt summary-Go-chan.txt summary-Go-dpdk.txt summary-Go-frontier.txt \
@@ -916,43 +1027,17 @@ crossbeam_complete() {
 	done
 	diff "$wrapper_results/significant.txt" <(printf '%s\n' "$significant_pair" "$go_pair") ||
 		fail "$name: significant.txt differs"
-}
-
-# Seconds and their nanoseconds per message for 5_000_000 messages, one pair per round.
-sample_values=(0.6:120.0000 0.1:20.0000 0.5:100.0000 0.2:40.0000 0.4:80.0000 0.3:60.0000
-	0.7:140.0000)
-
-crossbeam_known_seconds() {
-	local rounds
-	local median
-	local name
-	local seconds
-	local kind
-	local workload
-	local value
-
-	seconds=$(printf '%s\n' "${sample_values[@]}" | cut -d: -f1 | paste -sd' ' -)
-	for rounds in 6 7; do
-		median=0.350000
-		if [ "$rounds" -eq 7 ]; then
-			median=0.400000
-		fi
-		name="crossbeam-known-seconds-$rounds"
-		run_wrapper "$name" env FIXTURE_SECONDS="$seconds" bash "$crossbeam" -rounds "$rounds"
-		expected_invocations | while read -r kind workload; do
-			for value in $(printf '%s\n' "${sample_values[@]}" | head -n "$rounds"); do
-				printf 'BenchmarkSuite/cap=%s/topo=%s/impl=%s 5000000 %s ns/op\n' \
-					"${workload%_*}" "${workload#*_}" "$kind" "${value#*:}"
-			done
-		done | sort >"$fixture/$name-samples.txt"
-		diff <(sort "$wrapper_results/samples.txt") "$fixture/$name-samples.txt" ||
-			fail "$name: samples.txt differs"
-		expected_invocations | while read -r kind workload; do
-			printf '%-25s %-15s %s sec\n' "$workload" "${kind%%-*} ${kind#*-}" "$median"
-		done >"$fixture/$name-median.txt"
-		diff "$wrapper_results/median.txt" "$fixture/$name-median.txt" ||
-			fail "$name: median.txt differs"
-	done
+	diff <(sort "$wrapper_results/samples.txt") <(expected_samples 6) ||
+		fail "$name: samples.txt differs"
+	diff "$wrapper_results/median.txt" <(expected_medians 7.000000) ||
+		fail "$name: median.txt differs"
+	[ -e "$wrapper_results/plot.png" ] || fail "$name: plot.png is missing next to median.txt"
+	grep -qF -- "$wrapper_results/median.txt" "$FIXTURE_DATA/uv-args" ||
+		fail "$name: the uv arguments do not name $wrapper_results/median.txt"
+	sed -n '1,91p' "$log" >"$round_1"
+	sed -n '92,182p' "$log" >"$round_2"
+	! cmp -s "$round_1" <(expected_invocations) || fail "$name: round 1 runs in table order"
+	! cmp -s "$round_1" "$round_2" || fail "$name: rounds 1 and 2 run in the same order"
 }
 
 crossbeam_preflight_environment() {
@@ -970,6 +1055,51 @@ crossbeam_preflight_environment() {
 	done
 }
 
+# Fails unless the case stopped before making its results directory, with message in its log.
+expect_preflight_stop() {
+	local name=$1
+	local message=$2
+
+	if [ "$wrapper_status" -eq 0 ] || [ -n "$wrapper_results" ]; then
+		cat "$fixture/$name.log" >&2
+		fail "$name: want a stop in preflight"
+	fi
+	expect_log "$name" "$message"
+}
+
+crossbeam_preflight_checks() {
+	local name
+	local no_cargo_tools="$fixture/tools-no-cargo"
+	local lib="$FIXTURE_ROOT/benchmark/crossbeam/src/lib.rs"
+	local original_lib
+
+	name="crossbeam-preflight-rustc-version"
+	run_wrapper "$name" env FIXTURE_RUSTC_VERSION='rustc 1.98.0 (fixture)' \
+		bash "$crossbeam" -rounds 1
+	expect_preflight_stop "$name" "prints 'rustc 1.98.0 (fixture)', want 1.99.1"
+
+	name="crossbeam-preflight-no-cargo"
+	cp -R "$FIXTURE_TOOLS" "$no_cargo_tools"
+	rm "$no_cargo_tools/cargo"
+	run_wrapper "$name" env PATH="$no_cargo_tools:/usr/bin:/bin" bash "$crossbeam" -rounds 1
+	expect_preflight_stop "$name" "missing tools: cargo"
+
+	name="crossbeam-preflight-cores"
+	run_wrapper "$name" env FIXTURE_LSCPU_CORES=7 bash "$crossbeam" -rounds 1
+	expect_preflight_stop "$name" "the one-thread-per-core set has 7 CPUs, need at least 8"
+
+	# The wrapper compares the message counts after the build, so this case stops there.
+	name="crossbeam-preflight-messages"
+	original_lib=$(cat "$lib")
+	printf 'pub const MESSAGES: usize = 4_000_000;\n' >"$lib"
+	run_wrapper "$name" bash "$crossbeam" -rounds 1
+	printf '%s\n' "$original_lib" >"$lib"
+	[ "$wrapper_status" -ne 0 ] || fail "$name: want a stop"
+	expect_status "$name" "aborted at the build"
+	expect_log "$name" "is '4000000', workloads.Messages is 5000000"
+	[ ! -s "$FIXTURE_DATA/crossbeam-calls" ] || fail "$name: an invocation ran"
+}
+
 crossbeam_real_benchstat() {
 	local name=crossbeam-real-benchstat
 	local real_benchstat
@@ -980,6 +1110,8 @@ crossbeam_real_benchstat() {
 	local prefix
 	local topology
 	local invocations
+	local findings
+	local file
 
 	real_benchstat=$(PATH=$FIXTURE_ORIGINAL_PATH command -v benchstat || true)
 	if [ -z "$real_benchstat" ]; then
@@ -992,6 +1124,19 @@ crossbeam_real_benchstat() {
 	run_wrapper "$name" env PATH="$real_tools:$FIXTURE_ORIGINAL_PATH" \
 		FIXTURE_MISBEHAVE=Go-dpdk:bounded1_spsc:exit bash "$crossbeam" -rounds 1
 	expect_status "$name" "complete with findings"
+	findings=$(state_section findings)
+	if [ "$(printf '%s\n' "$findings" | wc -l)" -ne 1 ] ||
+		[[ "$findings" != "round 1 Go-dpdk bounded1_spsc exited with status 3"* ]]; then
+		fail "$name: want only the Go-dpdk rejection, got: $findings"
+	fi
+	for file in "$wrapper_results"/summary-*.txt; do
+		[ -s "$file" ] || fail "$name: $file is missing or empty"
+	done
+	# Per-cell warnings such as "B3: need >= 6 samples ..." are normal.
+	for file in "$wrapper_results"/benchstat-*.err; do
+		! grep -vE '^[A-Z]+[0-9]+: ' "$file" >&2 ||
+			fail "$name: $file has a line that is not a cell warning"
+	done
 	summary="$wrapper_results/summary-Go-dpdk.txt"
 	want_columns=(Go-dpdk Rust-crossbeam-channel Rust-arrayqueue Rust-arrayqueue-backoff Go-chan
 		Go-frontier Go-dpdk-mpmc Go-frontier-mpmc)
@@ -1012,20 +1157,23 @@ crossbeam_real_benchstat() {
 crossbeam_excluded_cell() {
 	local rounds
 	local name
-	local cell='Rust-arrayqueue bounded1024_spsc'
+	local cell
 	local want_incomplete
 	local want_excluded
 
 	for rounds in 7 6; do
+		# Go-dpdk is the base column of the Go-dpdk summary, and Rust-arrayqueue is not.
+		cell='Go-dpdk bounded1024_spsc'
 		want_incomplete=none
 		want_excluded=$cell
 		if [ "$rounds" -eq 6 ]; then
+			cell='Rust-arrayqueue bounded1024_spsc'
 			want_incomplete=$cell
 			want_excluded=none
 		fi
 		name="crossbeam-excluded-$rounds"
-		run_wrapper "$name" env FIXTURE_MISBEHAVE=Rust-arrayqueue:bounded1024_spsc:exit \
-			bash "$crossbeam" -rounds "$rounds"
+		run_wrapper "$name" env FIXTURE_SECONDS="$fixture_seconds" \
+			FIXTURE_MISBEHAVE="${cell/ /:}:exit" bash "$crossbeam" -rounds "$rounds"
 		expect_status "$name" "complete with findings"
 		if [ "$(state_section 'incomplete cells')" != "$want_incomplete" ] ||
 			[ "$(state_section 'excluded cells')" != "$want_excluded" ]; then
@@ -1033,6 +1181,13 @@ crossbeam_excluded_cell() {
 		fi
 		diff "$wrapper_results/significant.txt" <(echo "$go_pair") ||
 			fail "$name: significant.txt differs"
+		if [ "$rounds" -eq 7 ]; then
+			diff <(sort "$wrapper_results/samples.txt") <(expected_samples 7 "$cell") ||
+				fail "$name: samples.txt differs"
+			# The excluded cell keeps rounds 2 to 7, whose median is 7.
+			diff "$wrapper_results/median.txt" <(expected_medians 8.000000 "$cell" 7.000000) ||
+				fail "$name: median.txt differs"
+		fi
 	done
 }
 
@@ -1059,11 +1214,30 @@ wait_for() {
 	"$@"
 }
 
+# Prints the pid of the watchdog's sleep, the grandchild of the wrapper that runs "sleep <limit>".
+watchdog_sleep_pid() {
+	local wrapper_pid=$1
+	local limit=$2
+	local child
+	local grandchild
+
+	for child in $(pgrep -P "$wrapper_pid"); do
+		for grandchild in $(pgrep -P "$child"); do
+			if [ "$(ps -o args= -p "$grandchild")" = "sleep $limit" ]; then
+				echo "$grandchild"
+				return 0
+			fi
+		done
+	done
+	return 1
+}
+
 crossbeam_signals() {
 	local signal
 	local name
 	local pid
 	local stub_pid
+	local sleep_pid
 	local results
 
 	for signal in TERM INT HUP; do
@@ -1077,42 +1251,64 @@ crossbeam_signals() {
 			-timeout 97 >"$fixture/$name.log" 2>&1 &
 		pid=$!
 		set +m
+		case_pids+=("$pid")
 		wait_for 60 test -s "$FIXTURE_DATA/sleeping-pid" ||
 			fail "$name: the sleeping stub never started"
 		stub_pid=$(cat "$FIXTURE_DATA/sleeping-pid")
+		case_pids+=("$stub_pid")
+		sleep_pid=$(wait_for 5 watchdog_sleep_pid "$pid" 97) ||
+			fail "$name: found no watchdog sleep under the wrapper"
+		case_pids+=("$sleep_pid")
 		kill "-$signal" "$pid"
-		wait_for 5 process_exited "$pid" || fail "$name: the wrapper is running 5 s after SIG$signal"
+		wait_for 5 process_exited "$pid" ||
+			fail "$name: the wrapper is running 5 s after SIG$signal"
 		wait "$pid" || true
 		results=$(find "$HOME/crossbeam-compare" -mindepth 1 -maxdepth 1 -name "*-$pid")
 		[ "$(tail -n 1 "$results/state.txt")" = 'status: interrupted' ] ||
 			fail "$name: state.txt does not end with 'status: interrupted'"
 		! kill -0 "$stub_pid" 2>/dev/null || fail "$name: the stub $stub_pid is still running"
-		! pgrep -fx 'sleep 97' >/dev/null || fail "$name: a watchdog sleep is still running"
+		process_exited "$sleep_pid" || fail "$name: the watchdog sleep $sleep_pid is still running"
 		echo "$name: interrupted"
 	done
 }
 
 crossbeam_build_checks() {
 	local setting
+	local problem
+	local name
 	local index=0
 
-	for setting in 'FIXTURE_RUSTC_FLAGS=-C target-cpu=native' \
-		'FIXTURE_RUSTC_FLAGS=-C target-feature=+avx2' FIXTURE_OPT_LEVEL=2 \
-		FIXTURE_GOEXPERIMENT=x FIXTURE_GOAMD64=v3 'FIXTURE_RUSTC_FLAGS=-C lto=fat' \
-		FIXTURE_RUSTC_PATH=/usr/bin/sccache; do
+	# Each line is a setting and the problem the wrapper must report for it.
+	while IFS='|' read -r -u 3 setting problem; do
 		index=$((index + 1))
-		run_wrapper "crossbeam-build-check-$index" env "$setting" bash "$crossbeam" -rounds 1
-		[ "$wrapper_status" -ne 0 ] || fail "crossbeam-build-check-$index: want a stop"
-		expect_status "crossbeam-build-check-$index" "aborted at the build checks"
-	done
+		name="crossbeam-build-check-$index"
+		run_wrapper "$name" env "$setting" bash "$crossbeam" -rounds 1
+		[ "$wrapper_status" -ne 0 ] || fail "$name: want a stop"
+		expect_status "$name" "aborted at the build checks"
+		expect_log "$name" "$problem"
+	done 3<<'CASES'
+FIXTURE_RUSTC_FLAGS=-C target-cpu=native|unexpected codegen option target-cpu=native
+FIXTURE_RUSTC_FLAGS=-C target-feature=+avx2|unexpected codegen option target-feature=+avx2
+FIXTURE_OPT_LEVEL=2|unexpected codegen option opt-level=2
+FIXTURE_GOEXPERIMENT=x|was built with GOEXPERIMENT=x
+FIXTURE_GOAMD64=v3|was built with GOAMD64=v3
+FIXTURE_RUSTC_FLAGS=-C lto=fat|unexpected codegen option lto=fat
+FIXTURE_RUSTC_PATH=/usr/bin/sccache|runs /usr/bin/sccache, want
+FIXTURE_RUSTC_FLAGS=-O|sets -O
+FIXTURE_RUSTC_FLAGS=-C opt-level=3|repeats codegen option opt-level=3
+FIXTURE_RUSTC_FLAGS=-Copt-level=2|unexpected codegen option opt-level=2
+FIXTURE_RUSTC_FLAGS=--codegen=opt-level=2|unexpected codegen option opt-level=2
+FIXTURE_RUSTC_NO_OPT_LEVEL=1|lacks codegen option opt-level=3
+FIXTURE_CARGO_NO_RUNNING=1|no crate rustc command line
+CASES
 }
 
 crossbeam_one_round
 crossbeam_rejections
 crossbeam_all_fail
 crossbeam_complete
-crossbeam_known_seconds
 crossbeam_preflight_environment
+crossbeam_preflight_checks
 crossbeam_real_benchstat
 crossbeam_excluded_cell
 crossbeam_signals

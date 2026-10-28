@@ -1,7 +1,7 @@
 # MPMCQueue comparisons
 
-The [results](#results) below come from one 10-round campaign. For crossbeam's channels, see the
-[crossbeam comparison](../crossbeam/README.md).
+The [results](#results) below come from one 10-round campaign. For a comparison with crossbeam
+in its own benchmark suite, see the [crossbeam comparison](../crossbeam/README.md).
 
 ## Workload
 

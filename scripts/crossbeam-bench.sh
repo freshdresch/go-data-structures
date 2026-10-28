@@ -704,15 +704,14 @@ run_benchstat() {
 
 while read -r kind; do
 	columns=$(summary_columns "$kind")
+	args=(-row "$summary_rows" -col "$columns" samples.txt)
 	text_err="$results/benchstat-$kind-text.err"
-	if ! run_benchstat "$results/summary-$kind.txt" "$text_err" \
-		-row "$summary_rows" -col "$columns" samples.txt; then
+	if ! run_benchstat "$results/summary-$kind.txt" "$text_err" "${args[@]}"; then
 		add_finding "benchstat failed for summary-$kind.txt, see $text_err"
 		continue
 	fi
 	csv_err="$results/benchstat-$kind.err"
-	if ! run_benchstat "$scratch/summary-$kind.csv" "$csv_err" \
-		-format csv -row "$summary_rows" -col "$columns" samples.txt; then
+	if ! run_benchstat "$scratch/summary-$kind.csv" "$csv_err" -format csv "${args[@]}"; then
 		add_finding "benchstat -format csv failed for $kind, see $csv_err"
 		continue
 	fi

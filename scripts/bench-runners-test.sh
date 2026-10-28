@@ -376,6 +376,9 @@ echo 'Now drawing from AC Power'
 PMSET
 # In CSV mode, prints the real benchstat -format csv output saved for the first kind in -col.
 # Exits 1 with a message on stderr for an unknown flag or a flag after the file name.
+# FIXTURE_BENCHSTAT makes the call that FIXTURE_BENCHSTAT_FORMAT names, text or csv, print an
+# error and no output (error), print nothing (empty), or add a cell warning (warning), each with
+# exit status 0, as real benchstat does.
 cat >"$FIXTURE_TOOLS/benchstat" <<'BENCHSTAT'
 #!/bin/sh
 csv=false
@@ -408,6 +411,20 @@ while [ $# -gt 0 ]; do
 	esac
 	shift
 done
+format=text
+[ "$csv" = false ] || format=csv
+mode=''
+if [ "${FIXTURE_BENCHSTAT_FORMAT:-}" = "$format" ]; then
+	mode=${FIXTURE_BENCHSTAT:-}
+fi
+case "$mode" in
+error)
+	echo "benchstat: open samples.txt: no such file or directory" >&2
+	exit 0
+	;;
+empty) exit 0 ;;
+warning) echo 'B3: need >= 6 samples for confidence interval at level 0.95' >&2 ;;
+esac
 if [ "$csv" = false ]; then
 	echo fixture-benchstat
 	exit 0
@@ -470,7 +487,9 @@ two-lines)
 	echo "$line"
 	;;
 wrong-name) echo "wrong_workload $lang $impl $secs sec" ;;
+wrong-lang) echo "$workload Wrong $impl $secs sec" ;;
 wrong-impl) echo "$workload $lang wrong-impl $secs sec" ;;
+extra-field) echo "$line extra" ;;
 ms) echo "$workload $lang $impl $secs ms" ;;
 bad-number) echo "$workload $lang $impl x.y sec" ;;
 sleep)
@@ -479,6 +498,16 @@ sleep)
 	echo "$$" >"$FIXTURE_DATA/sleeping-pid.tmp"
 	mv "$FIXTURE_DATA/sleeping-pid.tmp" "$FIXTURE_DATA/sleeping-pid"
 	exec sleep 300
+	;;
+trap-sleep)
+	# Records the signal the watchdog sends first. The trap kills the sleep, so the stub leaves
+	# nothing behind.
+	sleep 300 &
+	sleep_pid=$!
+	echo "$sleep_pid" >"$FIXTURE_DATA/trap-sleep-pid"
+	trap 'kill "$sleep_pid"; echo QUIT >"$FIXTURE_DATA/trap-signal"; exit 1' QUIT
+	trap 'kill "$sleep_pid"; echo TERM >"$FIXTURE_DATA/trap-signal"; exit 1' TERM
+	wait "$sleep_pid"
 	;;
 *)
 	echo "unknown FIXTURE_MISBEHAVE mode $mode" >&2
@@ -804,8 +833,9 @@ crossbeam="$FIXTURE_ROOT/scripts/crossbeam-bench.sh"
 
 # The wrapper refuses these names, so the suite unsets them to pass in a shell that exports them.
 # The preflight cases set their variable explicitly.
-for name in GOMAXPROCS GOGC GODEBUG GOMEMLIMIT GOTRACEBACK GLIBC_TUNABLES LD_PRELOAD RUSTFLAGS \
-	CARGO_BUILD_RUSTFLAGS CARGO_ENCODED_RUSTFLAGS RUSTC RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER; do
+refused_names=(GOMAXPROCS GOGC GODEBUG GOMEMLIMIT GOTRACEBACK GLIBC_TUNABLES LD_PRELOAD RUSTFLAGS
+	CARGO_BUILD_RUSTFLAGS CARGO_ENCODED_RUSTFLAGS RUSTC RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER)
+for name in "${refused_names[@]}"; do
 	unset "$name"
 done
 while read -r name; do
@@ -834,17 +864,27 @@ run_wrapper() {
 	printf '%s: exit=%s\n' "$name" "$wrapper_status"
 }
 
+# Fails unless state.txt ends with the status and the wrapper exited 0 for complete and 1
+# otherwise.
 expect_status() {
 	local name=$1
 	local want="status: $2"
+	local want_exit=1
 	local last=''
 
+	if [ "$2" = complete ]; then
+		want_exit=0
+	fi
 	if [ -n "$wrapper_results" ]; then
 		last=$(tail -n 1 "$wrapper_results/state.txt")
 	fi
 	[ "$last" = "$want" ] || {
 		cat "$fixture/$name.log" >&2
 		fail "$name: state.txt ends with '$last', want '$want'"
+	}
+	[ "$wrapper_status" -eq "$want_exit" ] || {
+		cat "$fixture/$name.log" >&2
+		fail "$name: the wrapper exited with status $wrapper_status, want $want_exit"
 	}
 }
 
@@ -969,11 +1009,12 @@ crossbeam_rejections() {
 	local timeout
 	local findings
 
-	for mode in exit stderr two-lines wrong-name wrong-impl ms bad-number sleep; do
+	for mode in exit stderr two-lines wrong-name wrong-lang wrong-impl extra-field ms bad-number \
+		sleep; do
 		case "$mode" in
 		exit) reason='exited with status 3' ;;
 		stderr) reason='wrote to stderr' ;;
-		two-lines | wrong-name | wrong-impl | ms | bad-number)
+		two-lines | wrong-name | wrong-lang | wrong-impl | extra-field | ms | bad-number)
 			reason='did not write one result line'
 			;;
 		sleep) reason='timed out after 1s, sent SIGTERM' ;;
@@ -998,6 +1039,69 @@ crossbeam_rejections() {
 	done
 }
 
+# A Go program gets SIGQUIT first when it runs past the time limit.
+crossbeam_go_timeout() {
+	local name=crossbeam-go-timeout
+	local findings
+
+	rm -f "$FIXTURE_DATA/trap-signal" "$FIXTURE_DATA/trap-sleep-pid"
+	# Job control keeps the wrapper from starting with QUIT ignored, as a background job
+	# otherwise would, and bash cannot trap a signal ignored when it started.
+	set -m
+	run_wrapper "$name" env FIXTURE_MISBEHAVE=Go-dpdk:bounded1_spsc:trap-sleep \
+		bash "$crossbeam" -rounds 1 -timeout 1
+	set +m
+	if [ -s "$FIXTURE_DATA/trap-sleep-pid" ]; then
+		case_pids+=("$(cat "$FIXTURE_DATA/trap-sleep-pid")")
+	fi
+	expect_status "$name" "complete with findings"
+	findings=$(state_section findings)
+	if [ "$(printf '%s\n' "$findings" | wc -l)" -ne 1 ] ||
+		[[ "$findings" != *"timed out after 1s, sent SIGQUIT"* ]]; then
+		fail "$name: want one finding with 'timed out after 1s, sent SIGQUIT', got: $findings"
+	fi
+	[ "$(cat "$FIXTURE_DATA/trap-signal" 2>/dev/null)" = QUIT ] ||
+		fail "$name: the stub did not get SIGQUIT"
+	case_pids=()
+}
+
+# Each benchstat failure that exits 0 becomes a finding naming the call's stderr file, and a cell
+# warning does not.
+crossbeam_benchstat_failures() {
+	local format
+	local mode
+	local name
+	local kind
+	local finding
+	local findings
+
+	for format in text csv; do
+		for mode in error empty; do
+			name="crossbeam-benchstat-$format-$mode"
+			run_wrapper "$name" env FIXTURE_BENCHSTAT="$mode" FIXTURE_BENCHSTAT_FORMAT="$format" \
+				bash "$crossbeam" -rounds 1
+			expect_status "$name" "complete with findings"
+			findings=$(state_section findings)
+			for kind in Go-chan Go-dpdk Go-frontier Go-dpdk-mpmc Go-frontier-mpmc; do
+				finding="benchstat failed for summary-$kind.txt,\
+ see $wrapper_results/benchstat-$kind-text.err"
+				if [ "$format" = csv ]; then
+					finding="benchstat -format csv failed for $kind,\
+ see $wrapper_results/benchstat-$kind.err"
+				fi
+				grep -qxF -- "$finding" <<<"$findings" ||
+					fail "$name: want the finding '$finding', got: $findings"
+			done
+		done
+	done
+	name="crossbeam-benchstat-csv-warning"
+	run_wrapper "$name" env FIXTURE_BENCHSTAT=warning FIXTURE_BENCHSTAT_FORMAT=csv \
+		bash "$crossbeam" -rounds 1
+	expect_status "$name" "complete with findings"
+	findings=$(state_section findings)
+	! grep -q benchstat <<<"$findings" || fail "$name: want no benchstat finding, got: $findings"
+}
+
 crossbeam_all_fail() {
 	local name=crossbeam-all-fail
 
@@ -1018,9 +1122,10 @@ crossbeam_complete() {
 	local round_1="$fixture/$name-round-1.txt"
 	local round_2="$fixture/$name-round-2.txt"
 
-	run_wrapper "$name" env FIXTURE_SECONDS="$fixture_seconds" bash "$crossbeam" -rounds 6
-	[ "$wrapper_status" -eq 0 ] || fail "$name: want exit status 0"
+	run_wrapper "$name" env FIXTURE_SECONDS="$fixture_seconds" bash "$crossbeam" -seed 5 \
+		-rounds 6
 	expect_status "$name" complete
+	grep -qx 'seed: 5' "$wrapper_results/state.txt" || fail "$name: state.txt lacks 'seed: 5'"
 	for file in samples.txt summary-Go-chan.txt summary-Go-dpdk.txt summary-Go-frontier.txt \
 		summary-Go-dpdk-mpmc.txt summary-Go-frontier-mpmc.txt significant.txt median.txt; do
 		[ -s "$wrapper_results/$file" ] || fail "$name: $file is missing or empty"
@@ -1038,13 +1143,27 @@ crossbeam_complete() {
 	sed -n '92,182p' "$log" >"$round_2"
 	! cmp -s "$round_1" <(expected_invocations) || fail "$name: round 1 runs in table order"
 	! cmp -s "$round_1" "$round_2" || fail "$name: rounds 1 and 2 run in the same order"
+
+	# Round r uses seed + r, so round 2 of seed 5 runs in the order of round 1 of seed 6.
+	name="crossbeam-seed"
+	run_wrapper "$name" bash "$crossbeam" -seed 6 -rounds 1
+	expect_status "$name" "complete with findings"
+	grep -qx 'seed: 6' "$wrapper_results/state.txt" || fail "$name: state.txt lacks 'seed: 6'"
+	cmp -s "$round_2" "$log" ||
+		fail "$name: round 1 of seed 6 differs from round 2 of seed 5"
 }
 
 crossbeam_preflight_environment() {
 	local setting
 	local name
+	local settings=()
 
-	for setting in GOGC= LD_PRELOAD=x RUSTFLAGS= CARGO_PROFILE_RELEASE_LTO=true; do
+	for name in "${refused_names[@]}"; do
+		settings+=("$name=")
+	done
+	# One name for each refused prefix.
+	settings+=(CARGO_PROFILE_RELEASE_LTO=true CARGO_BUILD_RUSTC=x MALLOC_ARENA_MAX=1)
+	for setting in "${settings[@]}"; do
 		name="crossbeam-environment-${setting%%=*}"
 		run_wrapper "$name" env "$setting" bash "$crossbeam" -rounds 1
 		if [ "$wrapper_status" -eq 0 ] || [ -n "$wrapper_results" ] ||
@@ -1268,6 +1387,7 @@ crossbeam_signals() {
 			fail "$name: state.txt does not end with 'status: interrupted'"
 		! kill -0 "$stub_pid" 2>/dev/null || fail "$name: the stub $stub_pid is still running"
 		process_exited "$sleep_pid" || fail "$name: the watchdog sleep $sleep_pid is still running"
+		case_pids=()
 		echo "$name: interrupted"
 	done
 }
@@ -1305,6 +1425,8 @@ CASES
 
 crossbeam_one_round
 crossbeam_rejections
+crossbeam_go_timeout
+crossbeam_benchstat_failures
 crossbeam_all_fail
 crossbeam_complete
 crossbeam_preflight_environment

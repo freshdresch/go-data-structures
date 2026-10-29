@@ -115,10 +115,21 @@ func TestMPMCCompletionHole(t *testing.T) {
 	if completed := queue.completed.Load(); completed != 0 {
 		t.Fatal("completed frontier past a hole", completed)
 	}
+	for _, dst := range [][]int{nil, make([]int, 2)} {
+		if moved, available := queue.DequeueBurst(dst); moved != 0 || available != 0 {
+			t.Fatalf("publication hole: moved=%d available=%d", moved, available)
+		}
+	}
+	if moved, reusable := queue.EnqueueBurst(nil); moved != 0 || reusable != 0 {
+		t.Fatalf("reserved capacity: moved=%d reusable=%d", moved, reusable)
+	}
 	queue.mpmcWriteProducer(first, []int{1, 2, 3})
 	queue.mpmcPublishCompletion(first, firstCount)
 	if queue.Count() != 8 {
 		t.Fatal("Count after the hole", queue.Count())
+	}
+	if moved, available := queue.DequeueBurst(nil); moved != 0 || available != 8 {
+		t.Fatalf("completed publication: moved=%d available=%d", moved, available)
 	}
 	for want := 1; want <= 8; want++ {
 		got, err := queue.Dequeue()
@@ -149,7 +160,14 @@ func TestMPMCReleaseHole(t *testing.T) {
 	if err := queue.Enqueue(9); err != ErrFull {
 		t.Fatal("reused slots behind an unreleased reservation", err)
 	}
-	queue.EnqueueBurst(nil)
+	for _, items := range [][]int{nil, {9, 10}} {
+		if moved, reusable := queue.EnqueueBurst(items); moved != 0 || reusable != 0 {
+			t.Fatalf("release hole: moved=%d reusable=%d", moved, reusable)
+		}
+	}
+	if moved, available := queue.DequeueBurst(nil); moved != 0 || available != 0 {
+		t.Fatalf("reserved work: moved=%d available=%d", moved, available)
+	}
 	if released := queue.released.Load(); released != 0 {
 		t.Fatal("released frontier past a hole", released)
 	}
@@ -158,6 +176,9 @@ func TestMPMCReleaseHole(t *testing.T) {
 	queue.mpmcPublishRelease(first, firstCount)
 	if !slices.Equal(got, []int{1, 2, 3}) {
 		t.Fatal(got)
+	}
+	if moved, reusable := queue.EnqueueBurst(nil); moved != 0 || reusable != 8 {
+		t.Fatalf("completed release: moved=%d reusable=%d", moved, reusable)
 	}
 	if _, err := queue.EnqueueBulk([]int{9, 10, 11, 12, 13, 14, 15, 16}); err != nil {
 		t.Fatal("refill after both releases", err)

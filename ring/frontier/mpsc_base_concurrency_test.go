@@ -262,7 +262,18 @@ func baseTestReverse[T comparable](t *testing.T, values []T) {
 		if _, err := queue.DequeueBulk(dst); err != ErrEmpty || !slices.Equal(dst, before) {
 			t.Fatal("Bulk bridged hole or changed destination")
 		}
+		for _, buffer := range [][]T{nil, make([]T, 2)} {
+			if moved, available := queue.DequeueBurst(buffer); moved != 0 || available != 0 {
+				t.Fatalf("publication hole: moved=%d available=%d", moved, available)
+			}
+		}
+		if moved, reusable := queue.EnqueueBurst(nil); moved != 0 || reusable != 1 {
+			t.Fatalf("reserved capacity: moved=%d reusable=%d", moved, reusable)
+		}
 		baseTestComplete(queue, first, values[:4])
+		if moved, available := queue.DequeueBurst(nil); moved != 0 || available != 7 {
+			t.Fatalf("completed publication: moved=%d available=%d", moved, available)
+		}
 		value, err := queue.Dequeue()
 		if err != nil || value != values[0] {
 			t.Fatal("scalar FIFO", err)
@@ -289,6 +300,11 @@ func TestMPSCBaseBlockedBeforeRelease(t *testing.T) {
 		}
 		blocked := func() {
 			t.Helper()
+			for _, items := range [][]*int{nil, pointers[:1]} {
+				if moved, reusable := queue.EnqueueBurst(items); moved != 0 || reusable != 0 {
+					t.Fatalf("before release: moved=%d reusable=%d", moved, reusable)
+				}
+			}
 			if _, moved, _ := queue.mpscReserveProducer(1, true, false); moved != 0 {
 				t.Fatal("B reused unreleased slots")
 			}
@@ -309,6 +325,9 @@ func TestMPSCBaseBlockedBeforeRelease(t *testing.T) {
 		}
 		blocked()
 		queue.mpscReleaseConsumer(uint32(capacity))
+		if moved, reusable := queue.EnqueueBurst(nil); moved != 0 || reusable != capacity {
+			t.Fatalf("completed release: moved=%d reusable=%d", moved, reusable)
+		}
 		next, moved, _ := queue.mpscReserveProducer(1, true, false)
 		if next != uint64(capacity) || moved != 1 {
 			t.Fatal("B admission after release")

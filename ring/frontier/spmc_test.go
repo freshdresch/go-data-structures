@@ -119,14 +119,22 @@ func TestSPMCOutOfOrderRelease(t *testing.T) {
 	if err := queue.Enqueue(9); err != ErrFull {
 		t.Fatal("reused slots behind an unreleased reservation", err)
 	}
-	if free, _ := queue.EnqueueBurst([]int{9}); free != 0 {
-		t.Fatal("free behind hole", free)
+	for _, items := range [][]int{nil, {9, 10}} {
+		if moved, reusable := queue.EnqueueBurst(items); moved != 0 || reusable != 0 {
+			t.Fatalf("release hole: moved=%d reusable=%d", moved, reusable)
+		}
+	}
+	if moved, available := queue.DequeueBurst(nil); moved != 0 || available != 0 {
+		t.Fatalf("reserved work: moved=%d available=%d", moved, available)
 	}
 	got = got[:3]
 	queue.spmcReadConsumer(first, got)
 	queue.spmcReleaseConsumer(first, firstCount)
 	if !slices.Equal(got, []int{1, 2, 3}) {
 		t.Fatal(got)
+	}
+	if moved, reusable := queue.EnqueueBurst(nil); moved != 0 || reusable != 8 {
+		t.Fatalf("completed release: moved=%d reusable=%d", moved, reusable)
 	}
 	if moved, free := queue.EnqueueBurst([]int{9, 10, 11, 12, 13, 14, 15, 16}); moved != 8 ||
 		free != 0 {

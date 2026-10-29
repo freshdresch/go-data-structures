@@ -16,6 +16,13 @@ Each report lists the results of one 10-round campaign, including xsync and Work
 [ring queue guide](../ring/README.md#choosing-a-queue) discusses what they mean for choosing a
 queue. Crossbeam comparisons are future work.
 
+## Workq experiments
+
+The [lightweight-record batching report](workq/lightweight.md) compares workq with individual-record
+channels and channels carrying immutable slices. It covers sustained throughput, CPU cost, and
+finite bursts, with ten repetitions per case. The slice control is a best-case alternative
+that avoids payload copies and uses different ownership requirements.
+
 ## Run the comparison
 
 Run from the repository root with Go, Git, and `benchstat` on the path. Linux also needs `lscpu`

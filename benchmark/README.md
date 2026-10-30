@@ -132,7 +132,10 @@ one setting changed from its defaults at a time, to settle the receive batch lim
 batch limit, and the wait strategy of each side. Both run with `go test`, not with
 `scripts/ring-compare-bench.sh`, which runs only `BenchmarkCompare`.
 
+From the repository root, enter the benchmark module:
+
 ```bash
+cd benchmark
 go test -run '^$' -bench '^BenchmarkWorkq$' -benchtime 200ms -count 1 ./
 go test -run '^$' -bench '^BenchmarkWorkqTuning$' -benchtime 200ms -count 1 ./
 ```

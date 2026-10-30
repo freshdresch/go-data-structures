@@ -419,10 +419,10 @@ func waitUntil(due time.Time, pace time.Duration) {
 }
 
 // burstProducer returns a producer that sends share/burstItems bursts. Before each burst it
-// sleeps burstPause, so the consumers of every parking row reach their park, and records the
-// burst's start. It then pushes burstItems items whose value is the burst index, len(buf) at a
-// time, and records when the burst's last push returned. The engine row and cwait-never never
-// park, so for them the pause only lets the queue empty.
+// sleeps burstPause (2 ms), then records the burst's start. The pause is intended to let the
+// queue drain and parking consumers park, but does not prove either happened. It then pushes
+// burstItems items whose value is the burst index, len(buf) at a time, and records when the
+// burst's last push returned. The engine row and cwait-never never park.
 //
 // The producer does not yield while it pushes. A consumer that a push wakes goes into the
 // producer's P's runnext slot and can stay there until another P steals it or the producer

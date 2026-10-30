@@ -10,6 +10,7 @@ import (
 	"slices"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -603,9 +604,6 @@ func TestWorkqRowAbortWakes(t *testing.T) {
 		call func(target workRow)
 	}{
 		{
-			// The push fills the queue and then waits, with no consumer running. The test does
-			// not wait until the push is blocked: with the abort hook in place, the push
-			// returns either way, and without it, the push blocks forever.
 			name: "push",
 			call: func(target workRow) {
 				target.push(make([]int64, ringCapacity+1))
@@ -620,19 +618,25 @@ func TestWorkqRowAbortWakes(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			built := buildRow(t, row, mpmcMode, 32)
-			defer built.release()
-			runWithin(t, test.name+" did not return after the abort", func() (struct{}, error) {
+			synctest.Test(t, func(t *testing.T) {
+				built := buildRow(t, row, mpmcMode, 32)
+				defer built.release()
 				returned := make(chan struct{})
 				go func() {
 					defer close(returned)
 					test.call(built.row)
 				}()
+				// No other worker can make progress, so this wait reaches the parked call.
+				synctest.Wait()
+				select {
+				case <-returned:
+					t.Fatal("call returned before the abort")
+				default:
+				}
 				built.state.fail(errStubAbort)
 				<-returned
-				return struct{}{}, nil
+				require.Equal(t, errStubAbort, built.state.firstError())
 			})
-			require.Equal(t, errStubAbort, built.state.firstError())
 		})
 	}
 }

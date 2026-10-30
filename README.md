@@ -12,6 +12,7 @@ Import the packages you need. There is no Go package at the module root.
 | [`ring/dpdk`](ring/dpdk/README.md) | Transfer values or batches, modeled on DPDK's `rte_ring`. |
 | [`ring/frontier`](ring/README.md) | Transfer values or batches with no wait for earlier callers. |
 | [`set`](set/) | Track membership and compute unions, intersections, and differences. |
+| [`workq`](workq/README.md) | Distribute work to many goroutines, with batching and waiting. |
 | [`xmaps`](xmaps/) | Collect keys or values, invert a map, or merge maps into a new result. |
 | [`xslices`](xslices/) | Remove duplicates, partition elements, and find or reverse elements. |
 
@@ -27,9 +28,8 @@ you want:
 go get github.com/freshdresch/go-data-structures/set
 ```
 
-Replace `set` with `buffer`, `ring/dpdk`, `ring/frontier`, `xmaps`, or `xslices` for another
-package. Import paths share
-the prefix `github.com/freshdresch/go-data-structures/`.
+Replace `set` with `buffer`, `ring/dpdk`, `ring/frontier`, `workq`, `xmaps`, or `xslices` for
+another package. Import paths share the prefix `github.com/freshdresch/go-data-structures/`.
 
 ## Example
 
@@ -241,7 +241,7 @@ Bazel is optional. [.bazelversion](.bazelversion) pins Bazel 9.3.1, and [MODULE.
 selects the Go SDK from `go.mod`. With Bazelisk installed, test the packages:
 
 ```sh
-bazelisk test //buffer/... //ring/... //set/... //xmaps/... //xslices/...
+bazelisk test //buffer/... //ring/... //set/... //workq/... //xmaps/... //xslices/...
 ```
 
 The [benchmark methodology](benchmark/README.md) describes workloads and comparison limits.

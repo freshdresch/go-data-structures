@@ -14,6 +14,7 @@ go_library(
         "//ring/frontier",
         "//set",
         "//workq",
+        "//workq/runner",
         "//xmaps",
         "//xslices",
     ],

@@ -2,6 +2,8 @@
 import copy
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 import tempfile
 import unittest
@@ -72,6 +74,24 @@ class ValidationTest(unittest.TestCase):
                 parent[path[-1]] = value
                 with self.assertRaises((ValueError, KeyError, TypeError)):
                     validate_report(report, self.options)
+
+    def test_rejects_zero_rss(self):
+        for name in ("resources_before_warmup", "sampled_resources"):
+            for zero_maximum in (False, True):
+                with self.subTest(name=name, zero_maximum=zero_maximum):
+                    report = copy.deepcopy(self.report)
+                    report[name]["last_rss_bytes"] = 0
+                    if zero_maximum:
+                        report[name]["rss_max_bytes"] = 0
+                    with self.assertRaises(ValueError):
+                        validate_report(report, self.options)
+
+    def test_accepts_zero_file_sizes(self):
+        for name in ("resources_before_warmup", "sampled_resources"):
+            for kind in ("main", "wal"):
+                self.report[name][f"{kind}_max_bytes"] = 0
+                self.report[name][f"last_{kind}_bytes"] = 0
+        validate_report(self.report, self.options)
 
     def test_rejects_contradictory_queue_metrics(self):
         changes = [
@@ -230,6 +250,104 @@ class ValidationTest(unittest.TestCase):
 
 
 class ProvenanceTest(unittest.TestCase):
+    def test_sample_uses_captured_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / "binary"
+            binary.write_text(
+                f"#!{sys.executable}\n"
+                "import json, os\n"
+                "print(json.dumps(dict(os.environ)))\n"
+            )
+            binary.chmod(0o700)
+            env = provenance.campaign_build_environment({"GOMAXPROCS": "2"})
+            manifest = {"runs": [], "revision": "sha256:test"}
+            with patch.dict(os.environ, {"GOMAXPROCS": "99", "AMBIENT_ONLY": "ignored"}):
+                with patch.object(campaign, "verify_provenance"):
+                    with patch.object(campaign, "validate_report"):
+                        self.assertTrue(campaign.run_sample(
+                            root, root, binary, env, manifest, (256, 1, 0, "FULL")))
+            actual = json.loads((root / "p256-b1-r00-FULL/result.json").read_text())
+            self.assertEqual(actual["GOMAXPROCS"], "2")
+            self.assertEqual(actual["PATH"], env["PATH"])
+            self.assertNotIn("AMBIENT_ONLY", actual)
+
+    def test_timeout_fails_campaign_and_retains_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "campaign"
+            args = ["campaign.py", "--output", str(output), "--approved-campaign"]
+            host = {"output_mount": {"fstype": "ext4", "source": "/dev/test"}}
+            seen = {}
+
+            def build(root, output, manifest):
+                manifest["revision"] = "sha256:test"
+                return root / "binary", {"GOMAXPROCS": "2"}
+
+            def invoke(command, stdout, stderr, check, **kwargs):
+                seen.update(kwargs)
+                stdout.write('{"incomplete":')
+                stderr.write("stalled call\n")
+                Path(command[command.index("-directory") + 1]).mkdir()
+                raise subprocess.TimeoutExpired(command, kwargs.get("timeout", 120))
+
+            with patch.object(campaign.sys, "argv", args), \
+                    patch.object(campaign, "host_environment", return_value=host), \
+                    patch.object(campaign, "command_output", return_value="test"), \
+                    patch.object(campaign, "build_binary", side_effect=build), \
+                    patch.object(campaign, "verify_provenance"), \
+                    patch.object(campaign.subprocess, "run", side_effect=invoke), \
+                    patch.object(campaign, "validate_report") as validate:
+                self.assertEqual(campaign.main(), 1)
+                validate.assert_not_called()
+            self.assertEqual(seen["timeout"], 120)
+            manifest = json.loads((output / "manifest.json").read_text())
+            self.assertEqual(manifest["status"], "failed")
+            self.assertEqual(len(manifest["runs"]), 1)
+            record = manifest["runs"][0]
+            self.assertEqual(record["status"], "failed")
+            self.assertIn("timed out", record["failure"])
+            run_dir = output / record["name"]
+            self.assertEqual((run_dir / "result.json").read_text(), '{"incomplete":')
+            self.assertEqual((run_dir / "stderr.log").read_text(), "stalled call\n")
+            self.assertTrue((run_dir / "queue").is_dir())
+
+    def test_backing_device_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            device = root / "devices/test"
+            (device / "device").mkdir(parents=True)
+            (device / "slaves").mkdir()
+            (device / "uevent").write_text("MAJOR=8\nMINOR=1\nDEVNAME=test\n")
+            (device / "device/model").write_text("virtual disk\n")
+            (device / "device/vendor").write_text("test vendor\n")
+            (device / "slaves/backing").symlink_to(root / "devices/backing")
+            (root / "8:1").symlink_to(device)
+            metadata = provenance.backing_device("8:1", root)
+            self.assertEqual(metadata["major_minor"], "8:1")
+            self.assertEqual(metadata["sysfs_path"], str(device))
+            self.assertEqual(metadata["uevent"]["value"], "MAJOR=8\nMINOR=1\nDEVNAME=test")
+            self.assertEqual(metadata["device/model"]["value"], "virtual disk")
+            self.assertEqual(metadata["device/vendor"]["value"], "test vendor")
+            self.assertEqual(metadata["slaves"]["value"], [str(root / "devices/backing")])
+            self.assertIn("unavailable", metadata["loop/backing_file"])
+            self.assertIn("unavailable", metadata["dm/name"])
+            for major_minor in (None, "", "invalid", "../devices/test", "8:2"):
+                with self.subTest(major_minor=major_minor):
+                    self.assertIn("unavailable", provenance.backing_device(major_minor, root))
+            with patch.object(Path, "read_text", side_effect=PermissionError("denied")):
+                metadata = provenance.backing_device("8:1", root)
+            self.assertIn("unavailable", metadata["uevent"])
+
+    def test_host_records_backing_device_for_mount(self):
+        mount = {"fstype": "ext4", "source": "/dev/test", "maj:min": "8:1"}
+        with patch.object(provenance, "command_output", return_value=json.dumps({
+            "filesystems": [mount],
+        })), patch.object(provenance, "backing_device", return_value={"test": "metadata"}) as read:
+            host = provenance.host_environment(Path.cwd())
+        read.assert_called_once_with("8:1")
+        self.assertEqual(host["output_backing_device"], {"test": "metadata"})
+
     def test_compiler_overrides_stop_before_build(self):
         overrides = dict.fromkeys(provenance.COMPILER_OVERRIDES, "/external/input")
         overrides.update(dict.fromkeys(provenance.COMPILER_DEFAULTS, "-include /external/input.h"))
@@ -276,7 +394,7 @@ class ProvenanceTest(unittest.TestCase):
                     if when == "before":
                         target.write_text("replacement")
 
-                    def invoke(command, stdout, stderr, check):
+                    def invoke(command, stdout, stderr, check, **kwargs):
                         target.write_text("replacement")
                         stdout.write('{"valid": true}')
                         return SimpleNamespace(returncode=0)
@@ -343,7 +461,7 @@ class ProvenanceTest(unittest.TestCase):
             root = Path(directory)
             manifest = {"runs": [], "revision": "sha256:test"}
 
-            def invoke(command, stdout, stderr, check):
+            def invoke(command, stdout, stderr, check, **kwargs):
                 stdout.write('{"valid": true}')
                 return SimpleNamespace(returncode=0)
 

@@ -111,8 +111,9 @@ def check_phase(stats, batch, name):
 def check_resources(stats, name):
     integer(stats["count"], name + ".count", 1)
     for kind in ("main", "wal", "rss"):
-        maximum = integer(stats[f"{kind}_max_bytes"], name)
-        last = integer(stats[f"last_{kind}_bytes"], name)
+        minimum = 1 if kind == "rss" else 0
+        maximum = integer(stats[f"{kind}_max_bytes"], f"{name}.{kind}_max_bytes", minimum)
+        last = integer(stats[f"last_{kind}_bytes"], f"{name}.last_{kind}_bytes", minimum)
         require(last <= maximum, f"sample maximum: {name}.{kind}")
 
 

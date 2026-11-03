@@ -10,6 +10,9 @@ from provenance import build_binary, command_output, host_environment, verify_pr
 from validation import validate_report
 
 
+SAMPLE_TIMEOUT_SECONDS = 120
+
+
 def save_manifest(output, manifest):
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
@@ -43,7 +46,14 @@ def run_sample(root, output, binary, env, manifest, cell):
         verify_provenance(root, binary, env, manifest)
         with (run_dir / "result.json").open("w") as stdout:
             with (run_dir / "stderr.log").open("w") as stderr:
-                completed = subprocess.run(command, stdout=stdout, stderr=stderr, check=False)
+                completed = subprocess.run(
+                    command,
+                    env=env,
+                    stdout=stdout,
+                    stderr=stderr,
+                    check=False,
+                    timeout=SAMPLE_TIMEOUT_SECONDS,
+                )
         record["exit_code"] = completed.returncode
         verify_provenance(root, binary, env, manifest)
         if completed.returncode != 0:
@@ -51,7 +61,8 @@ def run_sample(root, output, binary, env, manifest, cell):
         report = json.loads((run_dir / "result.json").read_text())
         validate_report(report, options)
         record["status"] = "validated"
-    except (OSError, subprocess.CalledProcessError, ValueError, KeyError, TypeError) as error:
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired,
+            ValueError, KeyError, TypeError) as error:
         record["status"] = "failed"
         record["failure"] = str(error)
     save_manifest(output, manifest)
@@ -73,7 +84,7 @@ def main():
     try:
         mount = manifest["host"]["output_mount"]
         if mount.get("fstype") != "ext4" or not mount.get("source", "").startswith("/dev/"):
-            raise ValueError("campaign requires a verified local ext4 output mount")
+            raise ValueError("campaign requires an ext4 output mount with a /dev/ source")
         manifest["git_head"] = command_output(["git", "rev-parse", "HEAD"], root).strip()
         manifest["git_status"] = command_output(["git", "status", "--short"], root)
         binary, env = build_binary(root, output, manifest)

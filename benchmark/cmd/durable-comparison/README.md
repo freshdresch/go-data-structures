@@ -17,7 +17,10 @@ The entered suffix beyond each accepted prefix identifies an unconfirmed SubmitB
 call decision distinguishes Unknown from NotApplied. There are no retries or capacity exceptions.
 A 30-second watchdog fails stalled drain or cleanup.
 This is a harness failure threshold, not a queue completion-time guarantee. Entered Submit/Ack
-calls still join without context cancellation.
+calls still join without context cancellation. The campaign runner also limits each measured
+subprocess to 120 seconds, with headroom beyond the internal watchdog and samples that took a
+few seconds. If the outer timeout expires, the runner kills and waits for the process, marks the
+sample and campaign failed, and retains partial output and databases as rejected evidence.
 
 Warmup drains, validates, retires, and waits for cleanup on the same open queue. Measurement
 starts afterward. The measured interval includes wave bookkeeping, all drains and retirement,
@@ -53,9 +56,9 @@ compiler support policy. Builds require GCC and G++ 14.2.0 at `/usr/bin/gcc` and
 The compiler flags are `-O2 -g`, with empty `CGO_CPPFLAGS`. Custom CGO flags and compiler,
 include, library, or tool-search environment overrides fail before the build. Unset the named
 variable and rerun. The runner fixes tool PATH to `/usr/local/go/bin:/usr/bin:/bin` and passes
-only its explicit environment allowlist to build processes. Samples inherit the ambient runtime
-environment, whose `GOMAXPROCS`, `GOGC`, `GOMEMLIMIT`, and `GODEBUG` values the runner records.
-The manifest also records the enforced build environment.
+the same captured, explicit environment to build and sample processes. That environment keeps
+allowlisted runtime settings, including `GOMAXPROCS`, `GOGC`, `GOMEMLIMIT`, and `GODEBUG`.
+The manifest records this enforced environment.
 System compiler headers and libraries belong to that fixed host toolchain, whose executable
 hashes and versions are recorded. They are not enumerated by the Go source manifest. The runner
 hashes the selected source files of every dependency,
@@ -63,10 +66,15 @@ including standard library and cgo inputs, module files, and runner sources befo
 build. It checks those inputs and the executable before and after every invocation. The result's
 revision is the source manifest SHA-256. Git HEAD is separate descriptive metadata.
 
-The runner requires local ext4 and records the output mount, CPU models, affinity, and visible
-cgroup-v2 ancestor limits. Unreadable host fields explicitly report unavailable. It validates
+The runner requires an ext4 output mount whose reported source starts with `/dev/`. It records
+the mount's `MAJ:MIN` and the corresponding sysfs path, device metadata, and direct backing-device
+links. These are observations of the host's visible storage stack, not proof of physical locality.
+The runner also records CPU models, affinity, and visible cgroup-v2 ancestor limits. Unreadable
+host fields explicitly report unavailable. It validates
 required result fields, scheduled options, frozen runtime configuration, counters, histograms,
 actual batches, derived metrics, final counts, and reopen identity and retirement frontiers.
+Both resource summaries require positive maximum and final RSS observations. Main and WAL file
+sizes may be zero.
 Queue commit latency counts must match successful commits. Queue Ack latency counts must match
 completed AckBatch calls, while queue Ack outcomes count items. Latency aggregates must obey
 duration bounds and remain monotonic. Final snapshots require stopped admission and delivery,

@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -53,6 +54,26 @@ def read_optional(path):
         return {"unavailable": str(error)}
 
 
+def backing_device(major_minor, sysfs=Path("/sys/dev/block")):
+    metadata = {"major_minor": major_minor}
+    if not isinstance(major_minor, str) or not re.fullmatch(r"[0-9]+:[0-9]+", major_minor):
+        return dict(metadata, unavailable="mount has no valid MAJ:MIN")
+    try:
+        device = (sysfs / major_minor).resolve(strict=True)
+    except OSError as error:
+        return dict(metadata, unavailable=str(error))
+    metadata["sysfs_path"] = str(device)
+    for name in ("uevent", "device/model", "device/vendor", "loop/backing_file", "dm/name"):
+        metadata[name] = read_optional(device / name)
+    try:
+        metadata["slaves"] = {
+            "value": sorted(str(path.resolve()) for path in (device / "slaves").iterdir()),
+        }
+    except OSError as error:
+        metadata["slaves"] = {"unavailable": str(error)}
+    return metadata
+
+
 def host_environment(output):
     mount_command = ["findmnt", "--json", "--target", str(output),
                      "--output", "TARGET,SOURCE,FSTYPE,OPTIONS,MAJ:MIN,FSROOT"]
@@ -86,6 +107,7 @@ def host_environment(output):
         "python_executable": sys.executable, "cpu_models": models or {"unavailable": cpuinfo},
         "cpu_affinity": affinity, "cgroup_membership": cgroup, "cgroup_limits": limits,
         "output_mount": mount, "mount_command": mount_command,
+        "output_backing_device": backing_device(mount.get("maj:min")),
         "runtime_environment": {key: os.environ.get(key) for key in
                                 ("GOMAXPROCS", "GOGC", "GOMEMLIMIT", "GODEBUG")},
     }

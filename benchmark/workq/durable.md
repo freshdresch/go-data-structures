@@ -1,6 +1,6 @@
 # Durable queue production measurements
 
-Resource calibration completed on November 3, 2026. All 20 cases passed their correctness checks with no retries or omitted runs. The installed WAL threshold, production FULL/NORMAL comparison and final release checks are still pending.
+Resource calibration completed on November 3, 2026. All 20 cases passed their correctness checks with no retries or omitted runs. The 64 MiB WAL threshold is installed and passed five fresh resource cases and independent review. The production FULL/NORMAL comparison and final release checks are still pending.
 
 ## Resource protocol
 
@@ -43,7 +43,7 @@ Peak process RSS was 102,961,152 bytes. Peak Go HeapAlloc was 42,657,544 bytes, 
 
 ## Operational provision
 
-The selected WAL refusal threshold is 64 MiB (67,108,864 bytes), about 3.20 times the largest observed WAL. It allocates no storage in advance. Installation and retesting are pending. A crossing transaction can overshoot this threshold before observation stops subsequent writes. The checkpoint trigger, refusal threshold and available disk are separate quantities.
+The selected WAL refusal threshold is 64 MiB (67,108,864 bytes), about 3.20 times the largest observed WAL. It allocates no storage in advance. Five fresh cases tested the installed threshold at cache/mmap extremes, including NORMAL maximum-group churn. All passed once. Their largest sampled WAL was 20,356,952 bytes and their largest positive boundary change was 4,812,160 bytes. A crossing transaction can overshoot this threshold before observation stops subsequent writes. The checkpoint trigger, refusal threshold and available disk are separate quantities.
 
 For one queue at the tested ceilings, start with 512 MiB of process memory plus application-owned work and exceptional diagnostic/path-resolution allowance, and 1.25 GiB available local disk at the 1 GiB main cap. Monitor the actual workload and filesystem. These are starting provisions with headroom, not hard RSS or filesystem guarantees, and they provide no perpetual acknowledgment reserve. The maximum cache and mmap settings alone can expose up to 320 MiB.
 

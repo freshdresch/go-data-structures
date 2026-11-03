@@ -6,6 +6,10 @@
 set -euo pipefail
 
 prog=ring-compare-bench
+platform=$(uname -s)
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib.sh
+source "$(dirname "$0")/lib.sh"
 
 # Seconds each round invocation may run. Go's -test.timeout does not cover benchmarks, so the
 # script times each invocation itself.
@@ -19,26 +23,14 @@ usage() {
 	echo "  -pad N        rebuild with N padding pointers, Mac only; without it the Mac pads"
 	echo "                with 4 only when runtime.sched lands at offset 96"
 	echo "  -seed N       shuffle seed, default the script's pid; a seed repeats an order only"
-	echo "                on the same platform, because awk's srand differs between them"
+	echo "                with the same awk implementation, because each awk's srand and rand"
+	echo "                differ"
 }
 
 usage_error() {
 	echo "$prog: $*" >&2
 	usage >&2
 	exit 1
-}
-
-check_positive_integer() {
-	local flag=$1
-	local value=$2
-
-	case "$value" in
-	'' | *[!0-9]*) usage_error "$flag must be a positive integer, got '$value'" ;;
-	esac
-	# Bash arithmetic wraps on 20 or more digits.
-	[ ${#value} -le 9 ] || usage_error "$flag must be a positive integer, got '$value'"
-	# Forces base 10, so a leading zero such as 08 is not read as octal.
-	[ $((10#$value)) -gt 0 ] || usage_error "$flag must be a positive integer, got '$value'"
 }
 
 rounds=10
@@ -72,6 +64,7 @@ check_positive_integer -rounds "$rounds"
 rounds=$((10#$rounds))
 check_positive_integer -seed "$seed"
 seed=$((10#$seed))
+check_positive_integer RING_COMPARE_INVOCATION_LIMIT "$invocation_limit"
 if [ -n "$pad" ]; then
 	check_positive_integer -pad "$pad"
 	pad=$((10#$pad))
@@ -81,11 +74,6 @@ if ! [[ $benchtime =~ $benchtime_pattern ]]; then
 	usage_error "-benchtime must be a duration such as 200ms or a count such as 100x," \
 		"got '$benchtime'"
 fi
-
-platform=$(uname -s)
-# shellcheck source-path=SCRIPTDIR
-# shellcheck source=lib.sh
-source "$(dirname "$0")/lib.sh"
 
 if [ -n "$pad" ] && [ "$platform" != Darwin ]; then
 	die "-pad is for the Mac only, this platform never pads"
@@ -144,7 +132,6 @@ expected_rows() {
 	'
 }
 
-go_env=(env GOTOOLCHAIN=local GOWORK=off GOFLAGS=-mod=readonly)
 compare_build=("${go_env[@]}" go -C benchmark test -c -o "$results/compare-unpadded.test" .)
 padded_build=(
 	"${go_env[@]}" go -C benchmark test -c -o "$results/compare-padded.test"
@@ -448,31 +435,6 @@ cmp "$results/$selected_variant.test" "$results/compare.test" || die "selected b
 findings=()
 mkdir "$results/rounds"
 
-add_finding() {
-	findings+=("$1")
-	warn "$1"
-}
-
-# Sleeps in the background and waits on it, because bash runs the TERM trap during wait but
-# not during a foreground sleep, and the trap must kill the sleep so stopping leaves none behind.
-watchdog() {
-	local pid=$1
-	local marker=$2
-	local sleep_pid=""
-
-	trap 'kill $sleep_pid 2>/dev/null || true; exit 0' TERM
-	sleep "$invocation_limit" &
-	sleep_pid=$!
-	wait "$sleep_pid"
-	: >"$marker"
-	# SIGQUIT makes Go print every goroutine's stack before it exits.
-	kill -QUIT "$pid" 2>/dev/null || exit 0
-	sleep 10 &
-	sleep_pid=$!
-	wait "$sleep_pid"
-	kill -KILL "$pid" 2>/dev/null || true
-}
-
 run_invocation() {
 	local impl=$1
 	local round=$2
@@ -484,6 +446,8 @@ run_invocation() {
 	local invocation_pid
 	local watchdog_pid
 	local difference
+	# SIGQUIT makes a Go program print every goroutine's stack before it exits.
+	local first_signal=QUIT
 
 	while IFS= read -r arg; do
 		flags+=("$arg")
@@ -494,14 +458,14 @@ run_invocation() {
 	(cd "$results" && exec ${pin[@]+"${pin[@]}"} "$results/compare.test" "${flags[@]}") \
 		>"$out" 2>&1 &
 	invocation_pid=$!
-	watchdog "$invocation_pid" "$marker" &
+	watchdog "$invocation_pid" "$marker" "$invocation_limit" "$first_signal" &
 	watchdog_pid=$!
 	wait "$invocation_pid" || exit_status=$?
 	kill "$watchdog_pid" 2>/dev/null || true
 	wait "$watchdog_pid" 2>/dev/null || true
 
 	if [ -e "$marker" ]; then
-		add_finding "round $round $impl timed out after ${invocation_limit}s, sent SIGQUIT,\
+		add_finding "round $round $impl timed out after ${invocation_limit}s, sent SIG$first_signal,\
  exit status $exit_status, output in $out"
 		return
 	fi
@@ -517,9 +481,7 @@ run_invocation() {
 }
 
 shuffled_impls() {
-	printf '%s\n' "$impl_table" | awk '{ print $1 }' |
-		awk -v seed="$1" 'BEGIN { srand(seed) } { printf "%.9f %s\n", rand(), $0 }' |
-		sort -n | cut -d' ' -f2-
+	printf '%s\n' "$impl_table" | awk '{ print $1 }' | shuffle "$1"
 }
 
 printf '## shuffle\nseed: %s\n' "$seed" >>"$state"

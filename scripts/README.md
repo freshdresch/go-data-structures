@@ -43,8 +43,10 @@ unequal or unknown offsets because offset sensitivity is unestablished there. Eq
 not establish equivalent layouts. A stopped run starts no placement investigation or padding
 search.
 
-`lib.sh` holds helpers that `ring-quick-bench.sh` and `ring-compare-bench.sh` source. It is not
-run on its own.
+`lib.sh` holds helpers that `ring-quick-bench.sh`, `ring-compare-bench.sh`, and
+`crossbeam-bench.sh` source. It is not run on its own. Changing `lib.sh` changes the runner
+bundle that `prepare_benchmeta` records, so `ring-quick-bench.sh -reuse` rejects results made
+before the change.
 
 `ring-spin-bound.sh` compares one committed ref built with several publish wait spin bounds, the
 `defaultSpinsBeforeYield` constant in `ring/dpdk/ring.go` (`ring/ring.go` in older commits), or
@@ -213,3 +215,28 @@ The parent's protocol also measures unchanged Ring with the original quick corpu
 after this harness extension. Label this a harness/build control. Its compiled-test hashes differ.
 Do not overlay SPSC tests on the old baseline or attribute this control's differences to a Ring
 algorithm change. Existing quick and compare runners retain their selections and admission rules.
+
+## Crossbeam suite comparison
+
+`crossbeam-bench.sh` runs the ring queues and Go channels beside crossbeam's queues in
+crossbeam's benchmark suite. It runs shuffled rounds and summarizes them with `benchstat`. The
+method, the decision rule, and the caveats are in the
+[crossbeam comparison](../benchmark/crossbeam/README.md).
+
+```bash
+scripts/crossbeam-bench.sh [-rounds N] [-seed N] [-timeout S]
+```
+
+The script needs `git`, `go`, `benchstat`, `cargo`, `rustc`, and `rustup`. On Linux it also needs
+`lscpu` and `taskset`. It needs Go 1.25.5 or newer, because it sets `GOTOOLCHAIN=local` and
+`benchmark/go.mod` says `go 1.25.5`. On Linux, the Go race tests need cgo and a C compiler such
+as gcc, and `CGO_ENABLED` must not be 0. (Since Go 1.20 the race detector on macOS does not need
+cgo.) Install `benchstat` as the quick bench above describes. The script stops unless `rustc -V`
+in `benchmark/crossbeam/` prints 1.99.1, and rustup selects that version from
+`rust-toolchain.toml`. On Linux, the machine needs at least 8 physical cores, and the script pins
+every invocation to one hardware thread on each of the first 8 cores. On macOS it needs `hw.ncpu`
+of at least 8 and AC power.
+
+Run it on an otherwise idle machine. One round took about 59 s on the development machine, so a
+20-round campaign takes about 20 minutes plus the build and tests. Results go to
+`~/crossbeam-compare/<timestamp>-<pid>/`.

@@ -1,7 +1,8 @@
 # SPSCQueue comparisons
 
-The [results](#results) below come from one 10-round campaign. Crossbeam comparisons are future
-work.
+The [results](#results) below come from one 10-round campaign. For a comparison with crossbeam
+in its own benchmark suite, see the [crossbeam comparison](../crossbeam/README.md) and its
+[results](../crossbeam/results.md).
 
 ## Workload
 

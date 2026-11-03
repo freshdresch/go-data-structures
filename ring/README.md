@@ -38,6 +38,11 @@ Choose `ring/dpdk` in these cases:
 - Your batches run to hundreds of values. At that size the copy dominates, and `ring/dpdk` matched
   or slightly beat `ring/frontier`.
 
+This repository also runs `ring/dpdk` and `ring/frontier` in a copy of crossbeam's channel
+benchmark suite, next to crossbeam's queues and Go channels. The
+[crossbeam comparison](../benchmark/crossbeam/README.md) describes that suite and how to read its
+results, and the [results page](../benchmark/crossbeam/results.md) reports two campaigns.
+
 ### Vyukov-style queues
 
 [xsync](https://github.com/puzpuzpuz/xsync)'s `MPMCQueue` follows Erik Rigtorp's `MPMCQueue`, and

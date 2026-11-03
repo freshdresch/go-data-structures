@@ -578,11 +578,18 @@ build)
 	;;
 esac
 CARGO
+# FIXTURE_SYSROOT_SPACE puts a space in the sysroot path, which cargo prints unquoted.
 cat >"$FIXTURE_TOOLS/rustc" <<'RUSTC'
 #!/bin/sh
 case "$*" in
 -V) echo "${FIXTURE_RUSTC_VERSION:-rustc 1.99.1 (fixture)}" ;;
-'--print sysroot') echo "$FIXTURE_DATA/sysroot" ;;
+'--print sysroot')
+	if [ -n "${FIXTURE_SYSROOT_SPACE:-}" ]; then
+		echo "$FIXTURE_DATA/sys root"
+	else
+		echo "$FIXTURE_DATA/sysroot"
+	fi
+	;;
 *)
 	echo "unexpected fixture rustc: $*" >&2
 	exit 9
@@ -1392,6 +1399,13 @@ crossbeam_signals() {
 	done
 }
 
+crossbeam_build_check_sysroot_space() {
+	local name=crossbeam-build-check-sysroot-space
+
+	run_wrapper "$name" env FIXTURE_SYSROOT_SPACE=1 bash "$crossbeam" -rounds 1
+	expect_status "$name" "complete with findings"
+}
+
 crossbeam_build_checks() {
 	local setting
 	local problem
@@ -1434,5 +1448,6 @@ crossbeam_preflight_checks
 crossbeam_real_benchstat
 crossbeam_excluded_cell
 crossbeam_signals
+crossbeam_build_check_sysroot_space
 crossbeam_build_checks
 echo 'runner fixtures complete'

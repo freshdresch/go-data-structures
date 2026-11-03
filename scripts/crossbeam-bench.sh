@@ -277,17 +277,20 @@ build_problem=$(printf '%s\n' "$rustc_lines" | awk -v rustc="$expected_rustc" '
 	{
 		command = substr($0, index($0, "Running `") + length("Running `"))
 		sub(/`$/, "", command)
-		word_count = split(command, word, " ")
-		if (word[1] != rustc) {
-			problem = "a rustc command line runs " word[1] ", want " rustc
+		if (index(command, rustc " ") != 1) {
+			program = command
+			crate_name_at = index(command, " --crate-name")
+			if (crate_name_at > 0) program = substr(command, 1, crate_name_at - 1)
+			problem = "a rustc command line runs " program ", want " rustc
 			exit
 		}
+		word_count = split(substr(command, length(rustc) + 2), word, " ")
 	}
 	/--crate-name build_script_build / { next }
 	{
 		crate_lines++
 		delete seen
-		for (w = 2; w <= word_count; w++) {
+		for (w = 1; w <= word_count; w++) {
 			if (word[w] == "-O") {
 				problem = "a crate rustc command line sets -O"
 				exit

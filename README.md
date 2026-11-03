@@ -8,14 +8,14 @@ Import the packages you need. There is no Go package at the module root.
 
 | Package | Use it for |
 |---|---|
-| [`buffer`](buffer/) | Reuse fixed-capacity storage and consume elements from either end. |
+| [`buffer`](buffer/README.md) | Reuse fixed-capacity storage and consume elements from either end. |
 | [`ring/dpdk`](ring/dpdk/README.md) | Transfer values or batches, modeled on DPDK's `rte_ring`. |
 | [`ring/frontier`](ring/README.md) | Transfer values or batches with no wait for earlier callers. |
-| [`set`](set/) | Track membership and compute unions, intersections, and differences. |
+| [`set`](set/README.md) | Track membership and compute unions, intersections, and differences. |
 | [`workq`](workq/README.md) | Distribute work to many goroutines, with batching and waiting. |
 | [`workq/runner`](workq/runner/README.md) | Own workers, retries, shutdown, and terminal cleanup. |
-| [`xmaps`](xmaps/) | Collect keys or values, invert a map, or merge maps into a new result. |
-| [`xslices`](xslices/) | Remove duplicates, partition elements, and find or reverse elements. |
+| [`xmaps`](xmaps/README.md) | Collect keys or values, invert a map, or merge maps into a new result. |
+| [`xslices`](xslices/README.md) | Remove duplicates, partition elements, and find or reverse elements. |
 
 The library packages use only the Go standard library. Tests and the separate benchmark
 module have additional dependencies.

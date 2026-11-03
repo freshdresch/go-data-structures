@@ -132,9 +132,9 @@ remain in the backing array.
 `Slice`, `Bytes`, and slices returned by `Grow` share the buffer's storage. Follow their documented
 lifetimes and aliasing restrictions. After `Put`, stop using both the buffer and any slices into it.
 
-## Ring queues
+## Ring buffers
 
-The [ring queues](ring/README.md) come in two packages with the same type names and methods.
+The [ring buffers](ring/README.md) come in two packages with the same type names and methods.
 [`ring/dpdk`](ring/dpdk/README.md) is modeled on DPDK's `rte_ring`: a returned enqueue's values
 are visible to consumers, and DPDK's relaxed tail sync is available as an option.
 `ring/frontier` lets callers on a concurrent side publish without waiting for one another, which
@@ -146,7 +146,7 @@ stay invisible to the other side while an earlier caller on its side is unfinish
 at about 2 to 3 ns per value. Vyukov-style queues such as xsync's `MPMCQueue` are faster for
 single values, but they have no batch API. Choose `ring/dpdk` when a returned call must mean its
 effect is visible, when you need its tuning options, or for SPSC. The
-[ring queue guide](ring/README.md#choosing-a-queue) compares the queues with xsync, Workiva, and
+[ring buffer guide](ring/README.md#choosing-a-queue) compares the queues with xsync, Workiva, and
 channels.
 
 Choose a type according to which sides your application serializes:
@@ -171,7 +171,7 @@ many values moved. Construction options control batch limits, slot clearing, and
 A `ring/dpdk` call on a concurrent side can wait internally for another call's progress. A
 `ring/frontier` call never waits for another caller, but a stalled caller can hold back the other
 side's view of later calls. The queues have no close, cancellation, or notification API. Read the
-[ring queue guide](ring/README.md) and the [`ring/dpdk` guide](ring/dpdk/README.md) for ownership
+[ring buffer guide](ring/README.md) and the [`ring/dpdk` guide](ring/dpdk/README.md) for ownership
 rules, waiting behavior, options, and the limits of count snapshots before using a queue
 concurrently.
 
@@ -217,7 +217,7 @@ Coordinate concurrent access to buffers, sets, and the maps and slices passed to
 `Pool.Get` and `Pool.Put` support concurrent callers, but an individual buffer still needs an owner
 or external synchronization. Do not copy a pool after first use.
 
-Construct ring queues before sharing them, and do not copy them after use. Synchronize handoffs of
+Construct ring buffers before sharing them, and do not copy them after use. Synchronize handoffs of
 a serialized producer or consumer side. `Reset` requires exclusive access against all queue use.
 Values copied through a collection can still refer to shared objects that need synchronization.
 

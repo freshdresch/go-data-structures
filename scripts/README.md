@@ -218,7 +218,7 @@ algorithm change. Existing quick and compare runners retain their selections and
 
 ## Crossbeam suite comparison
 
-`crossbeam-bench.sh` runs the ring queues and Go channels beside crossbeam's queues in
+`crossbeam-bench.sh` runs the ring buffers and Go channels beside crossbeam's queues in
 crossbeam's benchmark suite. It runs shuffled rounds and summarizes them with `benchstat`. The
 method, the decision rule, and the caveats are in the
 [crossbeam comparison](../benchmark/crossbeam/README.md).

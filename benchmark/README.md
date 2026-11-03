@@ -13,8 +13,8 @@ the three [`ring/frontier` queues](../ring/README.md#frontier).
 | MPMCQueue | [Multiple producers, multiple consumers](ring/mpmc.md) |
 
 Each report lists the results of one 10-round campaign, including xsync and Workiva. The
-[ring queue guide](../ring/README.md#choosing-a-queue) discusses what they mean for choosing a
-queue. The [crossbeam comparison](crossbeam/README.md) runs the ring queues in crossbeam's channel
+[ring buffer guide](../ring/README.md#choosing-a-queue) discusses what they mean for choosing a
+queue. The [crossbeam comparison](crossbeam/README.md) runs the ring buffers in crossbeam's channel
 benchmark suite.
 
 ## Workq experiments

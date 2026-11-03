@@ -33,7 +33,7 @@ in parentheses.
 | `ring` | 32 | 1.41 (1.39–1.44) | 2.57 (2.55–2.62) |
 | `ring-exact` | 32 | 1.98 (1.95–2.13) | 2.68 (2.51–2.87) |
 
-[The ring queue guide](../../ring/README.md#choosing-a-queue) discusses what these results mean
+[The ring buffer guide](../../ring/README.md#choosing-a-queue) discusses what these results mean
 for choosing a queue.
 
 ## Run

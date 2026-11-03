@@ -1,4 +1,4 @@
-// Command ring times one crossbeam benchmark workload on a ring queue from ring/dpdk or
+// Command ring times one crossbeam benchmark workload on a ring buffer from ring/dpdk or
 // ring/frontier, and prints one result line.
 //
 // Usage: ring <family> <workload>

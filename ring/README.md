@@ -1,4 +1,4 @@
-# Ring queues
+# Ring buffers
 
 Two packages provide fixed-capacity FIFO queues. They differ in how concurrent callers on one side
 publish their progress to the other side.

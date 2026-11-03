@@ -1,4 +1,4 @@
-// Package shared holds the construction and length checks common to every ring queue family. The
+// Package shared holds the construction and length checks common to every ring buffer family. The
 // errors they wrap are the ring package's sentinels, so errors.Is matches the same value whichever
 // family returned one.
 package shared

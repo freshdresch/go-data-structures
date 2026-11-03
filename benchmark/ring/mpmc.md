@@ -42,7 +42,7 @@ in parentheses.
 | `ring-rts` | 32 | 4.21 (4.16–4.35) | 4.18 (4.13–4.29) |
 | `frontier` | 32 | 2.01 (1.98–2.02) | 2.59 (2.56–2.64) |
 
-[The ring queue guide](../../ring/README.md#choosing-a-queue) discusses what these results mean
+[The ring buffer guide](../../ring/README.md#choosing-a-queue) discusses what these results mean
 for choosing a queue.
 
 ## Run

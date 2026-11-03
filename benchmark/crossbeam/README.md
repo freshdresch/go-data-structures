@@ -4,7 +4,8 @@ This directory runs the [`ring/dpdk`](../../ring/dpdk/README.md) and
 [`ring/frontier`](../../ring/README.md#frontier) queues in crossbeam's channel benchmark suite.
 It runs them beside crossbeam's queues, crossbeam-channel and `ArrayQueue`, and beside Go's
 buffered channel, called Go chan below. Every program prints the suite's output format, so each
-result is comparable with the matching result from every other program.
+result is comparable with the matching result from every other program. The
+[results](results.md) come from a campaign pair that meets the [decision rule](#decision-rule).
 
 The wrapper, `scripts/crossbeam-bench.sh`, builds and runs the programs and summarizes the
 results. This README uses these terms:

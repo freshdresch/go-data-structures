@@ -19,9 +19,11 @@ column.
 | Status | `complete` | `complete` |
 
 Campaign B started about 30 s after campaign A finished. Both campaigns ran at commit `dbc8778`
-with a clean tree, with a 120 s timeout and 5,000,000 messages for each invocation. Each campaign
-kept all 1820 samples, 20 for each of the 91 cells. Neither campaign recorded a finding, an
-incomplete cell, or an excluded cell.
+with a clean tree, as the [README](README.md) defines it, while `go version -m` reports the build
+as `+dirty` because Go also counts untracked files outside `benchmark/` and `scripts/`. Both used
+a 120 s timeout and 5,000,000 messages for each invocation. Each campaign kept all 1820 samples,
+20 for each of the 91 cells. Neither campaign recorded a finding, an incomplete cell, or an
+excluded cell.
 
 Both `state.txt` files record the same machine and toolchains:
 
@@ -121,7 +123,7 @@ column, and the widest 95% confidence interval that `benchstat` printed for the 
 | Go dpdk-mpmc | 0.8% (`bounded2p23_spsc`) | ±6% | ±3% |
 | Go frontier-mpmc | 0.6% (`bounded1_spsc`) | ±2% | ±2% |
 
-Every Go median repeated within 1.0%. The Rust medians differed by up to 13.3%. One hypothesis,
+Every Go median repeated within about 1%. The Rust medians differed by up to 13.3%. One hypothesis,
 not tested, is that the Rust spread comes from heap addresses that change in every process, as
 the [memory layout caveat](README.md#caveats) describes. Go heap addresses stay the same between
 runs of a binary.
@@ -142,11 +144,11 @@ Four pairs do not pass:
 - `bounded1024_mpsc`, `Go frontier` and `Go frontier-mpmc`: significant only in A.
 - `bounded2p18_mpsc`, `Go dpdk` and `Go dpdk-mpmc`: significant only in A.
 
-Nearly every pair passes, because 20 samples give the Go columns intervals of a few percent. A
-pair that passes can still differ by very little, so read the size of each difference from the
-medians. For each passing pair, the size here is the slower cell's median over the faster cell's
-median, minus 1, with each median the mean of A and B. Of the 234 pairs, 218 differ by 10% or
-more, 2 differ by 5% to 10%, and 14 differ by less than 5%. Thirteen of those 14 compare two Go
+Nearly every pair passes. The Go columns have intervals of 1% to 6%, and 218 of the 234 pairs
+differ by 10% or more. A pair that passes can still differ by very little, so read the size of
+each difference from the medians. For each passing pair, the size here is the slower cell's median
+over the faster cell's median, minus 1, with each median the mean of A and B. Of the other 16
+pairs, 2 differ by 5% to 10%, and 14 differ by less than 5%. Thirteen of those 14 compare two Go
 ring columns, or a ring column with Go chan, at `mpsc` or at `bounded1`. The fourteenth is
 `Go dpdk-mpmc` against `Rust crossbeam-channel` at `bounded2p23_spsc`, with a difference of 4.0%.
 
@@ -161,16 +163,16 @@ At `mpmc` with capacity 1024 or more, `Go frontier` took 16.8 to 19.1 ns per mes
 `Go dpdk` took 73.2 to 82.1 ns. `Go frontier` was faster than `Go dpdk` and Go chan in all three
 rows. It was slower than `Rust arrayqueue` and `Rust arrayqueue-backoff` in all three rows. Against
 `Rust crossbeam-channel`, `Go frontier` was faster at `bounded1024_mpmc`, the difference did not
-pass at `bounded2p18_mpmc`, and crossbeam-channel was faster at `bounded2p23_mpmc`.
+pass at `bounded2p18_mpmc`, and `Rust crossbeam-channel` was faster at `bounded2p23_mpmc`.
 
 At `bounded1_mpmc`, Go chan was the fastest column, at about 112 ns. `Go dpdk` and `Go frontier`
-took about 720 ns, slower than every Rust column.
+took 718 to 727 ns, slower than every Rust column.
 
 The repository's own MPMC report, [mpmc.md](../ring/mpmc.md), uses a different harness. At 1024
-slots with single-element calls, it measured 79.9 ns for `ring-single` (`dpdk.MPMCQueue`) and
-30.8 ns for `frontier-single` (`frontier.MPMCQueue`). Here `Go dpdk` took 81.9 ns at
-`bounded1024_mpmc`, and `Go frontier` took 18.0 ns. This report did not examine why the frontier
-numbers differ between the two harnesses.
+slots with single-element calls, its `int64` column shows 79.9 ns for `ring-single`
+(`dpdk.MPMCQueue`) and 30.8 ns for `frontier-single` (`frontier.MPMCQueue`). In campaign A here,
+`Go dpdk` took 81.9 ns at `bounded1024_mpmc`, and `Go frontier` took 18.0 ns. This report did
+not examine why the frontier numbers differ between the two harnesses.
 
 One hypothesis, not tested, is that `Go dpdk` is slower than `Go frontier` because a `dpdk`
 producer waits for earlier producers before it publishes its slot, and a `frontier` producer

@@ -41,7 +41,7 @@ Choose `ring/dpdk` in these cases:
 This repository also runs `ring/dpdk` and `ring/frontier` in a copy of crossbeam's channel
 benchmark suite, next to crossbeam's queues and Go channels. The
 [crossbeam comparison](../benchmark/crossbeam/README.md) describes that suite and how to read its
-results.
+results, and the [results page](../benchmark/crossbeam/results.md) reports two campaigns.
 
 ### Vyukov-style queues
 

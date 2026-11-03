@@ -15,6 +15,7 @@ go_library(
         "//set",
         "//workq",
         "//workq/diagnostics",
+        "//workq/durable",
         "//workq/examples/lifecycle",
         "//workq/examples/observability",
         "//workq/examples/overload",
